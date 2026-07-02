@@ -1442,6 +1442,14 @@ async function pkConnect(roomId,gameToken){
         // Buffer snapshots (keep ~400ms worth at 30fps)
         if(!_ssBuf.has(sd.id))_ssBuf.set(sd.id,[]);
         const buf=_ssBuf.get(sd.id);
+        // -- TRACK B PROBE (logging only): does the RAW shared snapshot jump? Normalized by elapsed
+        // time so dropped/reordered packets don't false-positive. Fires = authoritative-data discontinuity.
+        try{ if(buf.length){ const _pb=buf[buf.length-1];
+          const _dpx=Math.hypot(sd.x-_pb.x,sd.y-_pb.y), _dtb=Math.max(1,pktT-_pb.t), _exp=(BOOST_SPD/TICK_MS)*_dtb;
+          if(_dpx>_exp*1.6){ const _r={ev:'srvjump',pid:sd.id,dpx:+_dpx.toFixed(1),dtMs:_dtb,expPx:+_exp.toFixed(1),tickGap:(d.tick!=null&&_pb.tick!=null?d.tick-_pb.tick:null),self:sd.id===myPid,t:pktT};
+            (window._teleLog=window._teleLog||[]).push(_r); if(window._teleLog.length>600)window._teleLog.shift();
+            console.log('[TELE] srv-data jump',(''+_r.pid).slice(0,8),_r.dpx+'px in '+_r.dtMs+'ms (exp<='+_r.expPx+') tickGap='+_r.tickGap);
+          } } }catch(_e){}
         buf.push({x:sd.x,y:sd.y,angle:sd.angle,ns:sd.ns,boost:sd.boost,score:sd.score||0,usd:sd.usd||0,t:pktT,tick:(typeof d.tick==='number'?d.tick:null)});
         while(buf.length>12)buf.shift();
         _playerMeta.set(sd.id,{color:sd.color,name:sd.name});
