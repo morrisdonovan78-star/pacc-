@@ -581,10 +581,14 @@ let _ssRtt=null; // rolling RTT (ms) from ss-ping/ss-pong, for death-replay netw
 // below a 96px hard-snap deadzone → own head drifted freely (measured 31.7px median / 82.8px max
 // vs server). Continuous soft correction bounds that drift with no visible pop. VISUAL ONLY —
 // own.path[0] is not used for collision; the server stays the sole collision authority.
-// Runtime-tunable via window._OWN_CORRECT (0 = old free-drift behavior) for live A/B.
-// DEFAULT 0 = production behavior UNCHANGED — the correction is inert until the owner opts in
-// (Shift+O cycles 0→0.15→0.2→0.25 on their own client). Shipping this default affects no player.
-let _OWN_CORRECT=0;
+// DEFAULT 0.2 = LIVE FOR EVERY PLAYER (standardized reconciliation smoothing). Normal clients never
+// set window._OWN_CORRECT, so the reconciliation below falls back to this 0.2 and applies the
+// continuous soft correction for all — one global default, no per-player logic or conditional
+// overrides. Shift+O (owner-only) toggles window._OWN_CORRECT 0↔0.2 on that owner's own client only,
+// for local A/B; it does not affect any other player. No other system depends on this being 0
+// (the only consumers are the reconciliation gain and the Shift+O toggle). VISUAL ONLY —
+// own.path[0] is not used for collision; the server stays the sole collision authority.
+let _OWN_CORRECT=0.2;
 let _localDead=false;
 let _autoCircle=false; // toggle: snake auto-circles until toggled off (E key / L3 button)
 let _lastRoomId=null;
