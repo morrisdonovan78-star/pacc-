@@ -1484,6 +1484,15 @@ async function pkConnect(roomId,gameToken){
               const _dx=_ax-h.x, _dy=_ay-h.y, _d2=_dx*_dx+_dy*_dy;
               if(_d2>SNAKE_SPD*SNAKE_SPD*100)own.path[0]={x:_ax,y:_ay};       // gross desync → hard snap
               else if(_g>0)own.path[0]={x:h.x+_dx*_g,y:h.y+_dy*_g};           // continuous soft correction
+              // ── INSTRUMENTATION (logging only; NO gameplay effect) — 96px correction-branch probe ──
+              try{
+                const _d2thr=SNAKE_SPD*SNAKE_SPD*100;                          // 96px^2 (same as branch above)
+                const _hard=_d2>_d2thr;                                        // identical condition to line above
+                const _rec={d2:+Math.sqrt(_d2).toFixed(1),thr:96,branch:_hard?'HARD':(_g>0?'soft':'none'),boost:!!sd.boost,circle:!!_autoCircle,t:Date.now()};
+                (window._d2Log=window._d2Log||[]).push(_rec);
+                if(window._d2Log.length>3600)window._d2Log.shift();            // ~2min @30Hz ring buffer
+                if(_hard)console.log('[D2] HARD',_rec.d2+'px','boost='+_rec.boost,'circle='+_rec.circle,_rec.t);
+              }catch(_e){}
             }
             if(sd.ns)own.numSections=sd.ns;
             if(sd.usd!=null){
