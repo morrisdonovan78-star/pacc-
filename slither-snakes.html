@@ -576,6 +576,15 @@ const _INTERP_DELAY=50; // ms: render this far behind the latest snapshot for sm
 // buffer under this game's ~8–12ms direct-connection latency; the existing frac-cap(1.5)
 // extrapolation covers rare packet-loss underruns → no rubber-band, no desync.
 let _ssRtt=null; // rolling RTT (ms) from ss-ping/ss-pong, for death-replay network timing
+// Local-head server-reconciliation gain: each 30Hz snapshot, nudge own drawn head this fraction
+// toward the authoritative head (advanced to ~present so we don't inject lag). Was effectively 0
+// below a 96px hard-snap deadzone → own head drifted freely (measured 31.7px median / 82.8px max
+// vs server). Continuous soft correction bounds that drift with no visible pop. VISUAL ONLY —
+// own.path[0] is not used for collision; the server stays the sole collision authority.
+// Runtime-tunable via window._OWN_CORRECT (0 = old free-drift behavior) for live A/B.
+// DEFAULT 0 = production behavior UNCHANGED — the correction is inert until the owner opts in
+// (Shift+O cycles 0→0.15→0.2→0.25 on their own client). Shipping this default affects no player.
+let _OWN_CORRECT=0;
 let _localDead=false;
 let _autoCircle=false; // toggle: snake auto-circles until toggled off (E key / L3 button)
 let _lastRoomId=null;
@@ -1459,9 +1468,18 @@ async function pkConnect(roomId,gameToken){
               _firstRemoteSync=false;_hideSyncOverlay();
             } else if(own.alive&&own.path.length){
               const h=own.path[0];
-              const d2=(sd.x-h.x)*(sd.x-h.x)+(sd.y-h.y)*(sd.y-h.y);
-              // Snap only on large drift (>10 ticks worth); smaller corrections let local prediction rule
-              if(d2>SNAKE_SPD*SNAKE_SPD*100)own.path[0]={x:sd.x,y:sd.y};
+              // Correct the local drawn head toward the authoritative head ADVANCED TO ~PRESENT: the
+              // snapshot sd is ~RTT/2 old, so extrapolate it forward by that latency along its heading,
+              // then blend the drawn head a fraction of the way there. Tracks server state without
+              // pulling the head backward into lag. Soft + continuous ⇒ no visible pop. Gross desync
+              // (teleport/respawn) still hard-snaps. VISUAL ONLY — server remains collision authority.
+              const _g=(typeof window._OWN_CORRECT==='number')?window._OWN_CORRECT:_OWN_CORRECT;
+              const _lead=Math.min((_ssRtt||0)/2+Math.max(0,Date.now()-pktT),TICK_MS*3)/TICK_MS; // ticks ahead of sd
+              const _spd=(sd.boost?BOOST_SPD:SNAKE_SPD);
+              const _ax=sd.x+Math.cos(sd.angle)*_spd*_lead, _ay=sd.y+Math.sin(sd.angle)*_spd*_lead;
+              const _dx=_ax-h.x, _dy=_ay-h.y, _d2=_dx*_dx+_dy*_dy;
+              if(_d2>SNAKE_SPD*SNAKE_SPD*100)own.path[0]={x:_ax,y:_ay};       // gross desync → hard snap
+              else if(_g>0)own.path[0]={x:h.x+_dx*_g,y:h.y+_dy*_g};           // continuous soft correction
             }
             if(sd.ns)own.numSections=sd.ns;
             if(sd.usd!=null){
@@ -2972,6 +2990,14 @@ function gpadFocus(dir){
 // Global T key — opens tuning panel from anywhere (lobby, result screen, in-game)
 document.addEventListener('keydown',function(e){
   if((e.key==='t'||e.key==='T')&&!e.repeat&&localStorage.getItem('ss_owner')==='1')_toggleTuning();
+  // Shift+O — owner-only toggle: baseline (0) ↔ single test gain, for the local-head reconciliation
+  // feel test. Binary, no cycling. VISUAL ONLY (own.path[0] not used for collision).
+  if((e.key==='o'||e.key==='O')&&e.shiftKey&&!e.repeat&&localStorage.getItem('ss_owner')==='1'){
+    const TEST=0.2; // single chosen test value
+    const cur=(typeof window._OWN_CORRECT==='number')?window._OWN_CORRECT:_OWN_CORRECT;
+    window._OWN_CORRECT=(cur>0)?0:TEST;
+    addToast('own-head correct: '+window._OWN_CORRECT+(window._OWN_CORRECT===0?'  (baseline)':'  (test)'), window._OWN_CORRECT===0?'#888':'#4CFF9E', 1800);
+  }
 });
 
 // Local-player prediction — MoneySlither-exact 60 Hz sub-steps (boost ramp + chord speed),
