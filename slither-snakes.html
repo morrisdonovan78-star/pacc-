@@ -569,6 +569,7 @@ let _foodSendCounter=0;
 let _forceFoodSend=false;
 let _firstRemoteSync=false;
 const _ssBuf=new Map(); // id → [{x,y,angle,ns,boost,score,usd,t}] — server snapshot buffer
+const _ssSeedBodies=new Map(); // id → [{x,y}] one-time authoritative body seed from server 'ss-bodies' on join/rejoin
 const _INTERP_DELAY=50; // ms: render this far behind the latest snapshot for smooth motion.
 // Was 100ms (≈3 snapshots @30Hz). Halved to 50ms to cut the render lag that draws remote
 // snakes ~30–63px behind their server-authoritative collision position (Category A: server
@@ -1425,6 +1426,20 @@ async function pkConnect(roomId,gameToken){
         }
       }catch(e){console.warn('[DEATH_FRAME_CLI] log error',e);}
       eliminateSnake(data.id,data.killerId||null);
+    });
+
+    // ── JOIN body seed consumer ─────────────────────────────────────────────────────────────
+    // Server sends each OTHER alive snake's authoritative body (head→tail, decimated) ONCE on join
+    // (in response to seed:1 on our first ssin). Stash it; the render loop adopts it in place of the
+    // fabricated straight stub, so a fresh/rejoining client draws full curved tails immediately.
+    // Render-only: nothing here touches collision (server-authoritative) or what we broadcast.
+    _sio.on('ss-bodies',(d)=>{
+      if(!d||!Array.isArray(d.snakes))return;
+      for(const sb of d.snakes){
+        if(!sb||sb.id===myPid||!Array.isArray(sb.p)||sb.p.length<4)continue;
+        const pts=[]; for(let i=0;i+1<sb.p.length;i+=2)pts.push({x:sb.p[i],y:sb.p[i+1]});
+        if(pts.length>=2)_ssSeedBodies.set(sb.id,pts);
+      }
     });
 
     // Server-authoritative state: head pos + angle per tick, no body segs
@@ -2420,7 +2435,7 @@ function startGuestLoop(){
     const _h0=_my0&&_my0.path&&_my0.path[0]||{x:0,y:0};
     _sio.emit('ssin',{id:myPid,angle:(_my0&&_my0.angle)||0,circle:false,boost:false,
       x:Math.round(_h0.x),y:Math.round(_h0.y),ns:(_my0&&_my0.numSections)||26,
-      color:(_my0&&_my0.color)||colorFromId(myPid),name:getMyName(),usd:_myUsd||0});
+      color:(_my0&&_my0.color)||colorFromId(myPid),name:getMyName(),usd:_myUsd||0,seed:1});
   }
   _guestInputLoop=setInterval(()=>{
     if(!SG||SG.over||!_sio||isSpectating||_localDead)return;
@@ -2431,7 +2446,7 @@ function startGuestLoop(){
     const h=my.path&&my.path[0]||{x:0,y:0};
     _sio.emit('ssin',{id:myPid,angle:my.angle,circle:!!_autoCircle,
       boost:canBoost,x:Math.round(h.x),y:Math.round(h.y),ns:my.numSections||26,
-      color:my.color||colorFromId(myPid),usd:_myUsd||0});
+      color:my.color||colorFromId(myPid),usd:_myUsd||0,seed:1});
   },33); // match server tick rate
 }
 
@@ -3073,6 +3088,14 @@ function rafDraw(ts){
       if(s.id===myPid||!s.alive)return;
       const buf=_ssBuf.get(s.id);
       s._exHead=null; // reset each frame; only the interpolation branch (extrap on) sets it
+      // JOIN seed: adopt the server's authoritative body ONCE, so buf<2 branches draw a full curved
+      // tail instead of fabricating a straight stub. The buf>=2 case adopts it render-clock-aligned
+      // below (translated onto the interpolated head) to avoid a join-frame discontinuity.
+      const _hasSeed=_ssSeedBodies.has(s.id);
+      if(_hasSeed && !(buf&&buf.length>=2)){
+        const _seed=_ssSeedBodies.get(s.id); _ssSeedBodies.delete(s.id);
+        if(_seed&&_seed.length>=2)s.path=_seed.map(p=>({x:p.x,y:p.y}));
+      }
       if(buf&&buf.length>=2){
         // ── Snapshot interpolation (server-authoritative live game) ──────────────
         const latest=buf[buf.length-1];
@@ -3088,6 +3111,16 @@ function rafDraw(ts){
         let ix=a.x+(b.x-a.x)*frac,iy=a.y+(b.y-a.y)*frac;
         s.angle=a.angle+da*frac;
         s.numSections=b.ns;s.boost=b.boost;
+        // JOIN seed aligned to the render clock: translate the seed body so its head sits on the
+        // interpolated head (ix,iy) at renderT. Full tail shape (server truth) preserved, but the
+        // whole snake now lies on the SAME renderT timeline as every later frame — no head-kink.
+        if(_hasSeed && _ssSeedBodies.has(s.id)){
+          const _seed=_ssSeedBodies.get(s.id); _ssSeedBodies.delete(s.id);
+          if(_seed&&_seed.length>=2){
+            const _dx=ix-_seed[0].x, _dy=iy-_seed[0].y;
+            s.path=_seed.map(p=>({x:p.x+_dx,y:p.y+_dy}));
+          }
+        }
         // Seed path if empty (revival after death or first appearance without makeSnake).
         // s.path stores ONLY the interpolated head (ix,iy) — deterministic given the snapshots,
         // so every client reconstructs identical body geometry. Extrapolation is applied to the
