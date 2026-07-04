@@ -3042,10 +3042,16 @@ const _MS_TURN = 8.1, _MS_BASE = 288, _MS_BOOST = 630, _MS_ACCEL = 4.5;
 function _ssPredictLocal(my, dtMs){
   if(my._ba == null) my._ba = 0;
   const boostGate = my.numSections > BOOST_MIN;
-  my._pAcc60 = (my._pAcc60 || 0) + Math.min(dtMs, 80);
+  // Keep the REAL elapsed time instead of discarding everything past 80ms (that discard is why the
+  // predicted head falls behind during hitches and the tail knots/collapses while circling). Clamp
+  // to 1s only as a runaway guard. Catch-up is capped at 5 sub-steps/frame below -- the SAME per-frame
+  // ceiling the old min(dt,80) already imposed -- so path[0] (and the glued camera) can never move
+  // more per frame than the current build already does: no new jump/star, just no lost time.
+  my._pAcc60 = Math.min((my._pAcc60 || 0) + dtMs, 1000);
   const stepMs = 1000/60, DT = 1/60;
-  while(my._pAcc60 >= stepMs){
-    my._pAcc60 -= stepMs;
+  let _sub = 0;
+  while(my._pAcc60 >= stepMs && _sub < 5){
+    my._pAcc60 -= stepMs; _sub++;
     if(_autoCircle){ my.angle += _MS_TURN * DT; }
     else { const d = angleDiff(targetAngleToMouse(my), my.angle); my.angle += Math.sign(d) * Math.min(Math.abs(d), _MS_TURN * DT); }
     while(my.angle >  Math.PI) my.angle -= 2*Math.PI;
@@ -3075,7 +3081,7 @@ function rafDraw(ts){
   if(!isHost&&SG&&!SG.over&&!_localDead){
     const my=SG.snakes.get(myPid);
     if(my&&my.alive&&my.path.length){
-      const dt=Math.min(_guestPredTs?ts-_guestPredTs:TICK_MS,80);
+      const dt=Math.min(_guestPredTs?ts-_guestPredTs:TICK_MS,1000); // pass real elapsed; _ssPredictLocal caps catch-up at 5 substeps/frame
       _guestPredTs=ts;
       _ssPredictLocal(my, dt);
     }
