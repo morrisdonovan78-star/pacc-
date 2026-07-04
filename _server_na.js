@@ -168,17 +168,25 @@ const SS_HHBS     = 1.18;    // combatHeadHitboxScale
 const SS_FACE     = Math.cos(75 * Math.PI / 180); // cos(75°) ≈ 0.259, facing gate threshold
 const SS_POINT_DIST = 1.6;   // path recording granularity in px (MoneySlither POINT_DIST)
 const SS_SEG_STEP = 4;       // path stride for H2B body samples (MoneySlither SEGMENT_SPACING_TICKS)
+// ── Option A: server-authoritative body sync (feature-flagged; OFF = legacy head-only) ──────────
+// When ON, the server streams a coarse copy of its OWN authoritative trail (render-trail `_rt`,
+// derived from the same head motion as sn.path — sn.path/collision are NOT modified). The client
+// renders THAT instead of free-running a body from head-only data, so drawn body == collision body.
+// Deltas per tick are bounded (head-advance/SS_RT_DIST ≈ 2-4 pts) → no per-tick linear growth.
+const SS_BODY_SYNC   = process.env.SS_BODY_SYNC === '1';
+const SS_RT_DIST     = 6;    // px between render-trail points (< smallest sectionRadius*0.5 ≈ 7.6 → faithful client resample)
+const SS_RT_KF_TICKS = 150;  // periodic full-body keyframe interval (~5s @30Hz), staggered per snake; heals joins/gaps
 const SS_MIN_SIZE = 40;
 
 // Server-authoritative physics constants (must match client exactly)
 const SS_ARENA_R       = 3000;
 const SS_MAX_TURN      = 0.274;   // rad/tick — client MAX_TURN
-const SS_FOOD_TARGET   = 95;      // client FOOD_TARGET (30% fewer pebbles, was 135)
+const SS_FOOD_TARGET   = 95;     // client FOOD_TARGET
 const SS_FOOD_GROW     = 2;       // client FOOD_GROW
 const SS_BOOST_MIN     = 12;      // client BOOST_MIN
 const SS_BOOST_DRAIN_A = 3.0;    // client BOOST_DRAIN_AMT
 const SS_BOOST_DRAIN_T = 8;      // client BOOST_DRAIN
-const SS_INIT_NS       = 17;     // client INIT_SECTIONS (join length)
+const SS_INIT_NS       = 17;     // client INIT_SECTIONS
 const SS_MIN_NS        = 8;      // client MIN_SECTIONS
 const SS_MAX_NS        = 300;    // client MAX_SECTIONS
 
@@ -191,12 +199,12 @@ const SS_BASE_SPEED    = 288;      // px/s
 const SS_BOOST_SPEED   = 630;      // px/s
 const SS_BOOST_ACCEL   = 4.5;      // boostAmount ramp /s
 const SS_TURN_PER_SEC  = 8.1;      // rad/s
-const SS_BOOST_BURN    = 0.18984375; // size burn fraction /s while boosting (25% faster than 0.151875)
+const SS_BOOST_BURN    = 0.18984375;    // size burn fraction /s while boosting
 const SS_START_SIZE    = 100;      // size for a fresh snake (→ ns 26)
 function ssSegForSize(size){ const sz=Math.max(SS_MIN_SIZE, Number(size)||SS_MIN_SIZE); let seg = 8 + (sz-40)*(26-8)/(100-40); if(sz>100) seg = 26 + (sz-100)*0.08; return Math.max(8, Math.round(seg)); }
 function ssSizeFromNs(n){ n=Math.max(SS_MIN_NS, n); return n<=26 ? 40 + (n-8)*(100-40)/(26-8) : 100 + (n-26)/0.08; }
 const SS_SHED_NE_MS    = 4000;   // client SHED_NOEAT_MS
-const SS_FOOD_PICKUP_R      = 42;  // client FOOD_PICKUP_R (raised 29->42 for reliable pickup vs head-prediction desync)
+const SS_FOOD_PICKUP_R      = 42;  // client FOOD_PICKUP_R
 const SS_KILL_FOOD_PICKUP_R = 42;  // client KILL_FOOD_PICKUP_R
 
 // ── Test lobby: deterministic bot scenarios ───────────────────────────────────
@@ -285,7 +293,7 @@ function ssMakeFood(x, y, k, w, o, ne) {
 
 // Best-candidate (Mitchell) sampling: generate K random candidates and keep the one
 // whose nearest existing pebble is farthest away. Same count/density as pure random, but
-// blue-noise spacing — pebbles spread evenly instead of clumping and leaving empty patches.
+// blue-noise spacing - pebbles spread evenly instead of clumping and leaving empty patches.
 function ssMakeFoodSpread(sg) {
   const food = sg.food || [];
   const K = 12;
@@ -319,17 +327,14 @@ function ssSpawnKillFood(sg, sn) {
   // Every orb is clamped to just inside the arena border so kill food never lands outside
   // the ring - including when a snake dies right against the edge.
   const ns = sn.ns || SS_MIN_NS;
-  const orbs = Math.max(2, Math.min(30, Math.round(ns / 4))); // ~1 orb per 4 length, hard cap 30
+  const orbs = Math.max(2, Math.min(30, Math.round(ns / 4)));
   const wPerOrb = (sn.usd || 0) / orbs;
-  const EDGE = SS_ARENA_R - 30;    // keep every orb just inside the border, never beyond it
-  // Only spread across the REAL body (head..tail = ns*SS_SEG_STEP path points); `path` is a
-  // long buffer that trails far behind the tail, so using its full length dropped food way
-  // behind the snake. Clamp to the actual body span.
+  const EDGE = SS_ARENA_R - 30;
   const bodyLen = Math.max(1, Math.min(path.length, (sn.ns || SS_MIN_NS) * SS_SEG_STEP));
-  const step = bodyLen / orbs;     // evenly spaced along the body from head to tail
+  const step = bodyLen / orbs;
   for (let c = 0; c < orbs; c++) {
     const p = path[Math.min(bodyLen - 1, Math.floor(c * step))];
-    let x = p.x + (Math.random() - 0.5) * 8; // small jitter so orbs don't perfectly overlap
+    let x = p.x + (Math.random() - 0.5) * 8;
     let y = p.y + (Math.random() - 0.5) * 8;
     const d = Math.sqrt(x * x + y * y);
     if (d > EDGE) { const s = EDGE / d; x *= s; y *= s; }
@@ -367,7 +372,7 @@ function ssSpawnSnake(pid, color, name, sg) {
   const face = Math.atan2(-sy, -sx);
   const ns = SS_INIT_NS;
   // MoneySlither: path entries at POINT_DIST=1.6px, maxPath=max(800, numSegments*SEGMENT_SPACING_TICKS+200)
-  const maxPath = Math.max(800, ns * SS_SEG_STEP + 200);
+  const maxPath = Math.max(800, Math.ceil(ns * ssSectionRadius(ns) * 0.5 / SS_POINT_DIST) + 200);
   const path = [];
   for (let i = 0; i < maxPath; i++)
     path.push({ x: sx - Math.cos(face) * i * SS_POINT_DIST, y: sy - Math.sin(face) * i * SS_POINT_DIST });
@@ -445,6 +450,9 @@ function ssSectionRadius(ns) {
 // ssHandleInput: receive direction/boost input — server owns position, no x/y needed from client
 function ssHandleInput(lid, pid, d, io) {
   const sg = getSsGame(lid);
+  // Player is (re)sending input -> they're present. Cancel any pending disconnect-delete so a
+  // stale 15s timer from an earlier socket blip can't delete this now-live snake.
+  if (sg.delTimers && sg.delTimers.has(pid)) { clearTimeout(sg.delTimers.get(pid)); sg.delTimers.delete(pid); }
   let sn = sg.snakes.get(pid);
   if (!sn || (!sn.alive && (!sn._killedAt || Date.now() - sn._killedAt > 2000))) {
     // First input OR dead snake rejoin (2s cooldown prevents revival from in-flight packets)
@@ -452,6 +460,7 @@ function ssHandleInput(lid, pid, d, io) {
     if (d.ns && d.ns > SS_INIT_NS) { sn.ns = Math.min(SS_MAX_NS, d.ns); sn.size = ssSizeFromNs(sn.ns); sn.thick = ssThick(sn.ns); }
     if (d.usd != null && typeof d.usd === 'number' && sn.usd === 0) { sn.usd = Math.max(0, d.usd); sn.baseUsd = sn.usd; }
     sg.snakes.set(pid, sn);
+    console.log('respawn', pid, sn.ns, sn.x, sn.y, Date.now());
     if (!sg.food || !sg.food.length) ssReconcileFood(sg);
     if (!sg.tickInterval) {
       sg.tickInterval = setInterval(() => ssTick(lid, io), TICK_MS);
@@ -480,14 +489,28 @@ function ssPlayerLeft(lid, pid, io) {
   if (!sg) return;
   const sn = sg.snakes.get(pid);
   if (sn && sn.alive) {
+    console.log('leave', pid, sn.ns, Date.now());
     if (!sg.food) sg.food = [];
     ssSpawnKillFood(sg, sn);
     sg._foodDirty = true;
     sn.alive = false; sn._killedAt = Date.now(); sn.segs = []; sn.path = [];
   } else if (sn) { sn.segs = []; sn.path = []; }
-  setTimeout(() => {
+  // Per-pid delete timer: tracked so a reconnect can cancel it, and never stacked during
+  // socket flapping. Only delete if, AT FIRE TIME, the socket is still disconnected AND the
+  // snake is still in a left/dead state (not just at the disconnect moment).
+  if (!sg.delTimers) sg.delTimers = new Map();
+  const _prevT = sg.delTimers.get(pid);
+  if (_prevT) clearTimeout(_prevT);
+  const _delT = setTimeout(() => {
     const g = ssGames.get(lid);
     if (!g) return;
+    if (g.delTimers) g.delTimers.delete(pid);
+    const _room = rooms.get(lid);
+    const _dp = _room && _room.players.get(pid);
+    const _stillDisc = !_dp || _dp.disconnected === true;   // reconnect sets disconnected=false
+    const _cur = g.snakes.get(pid);
+    const _stillLeft = !_cur || !_cur.alive;                // respawn sets alive=true
+    if (!(_stillDisc && _stillLeft)) return;                // reconnected / revived -> keep live snake
     g.snakes.delete(pid);
     if (g.snakes.size === 0) {
       clearInterval(g.tickInterval);
@@ -495,19 +518,17 @@ function ssPlayerLeft(lid, pid, io) {
       console.log(`[${lid}] ss game loop stopped`);
     }
   }, DISCONNECT_GRACE_MS);
+  sg.delTimers.set(pid, _delT);
 }
 
-// Growth cap by wager: snakes join at ns 17 (SS_INIT_NS) and grow +30 sections per full
-// entry-wager carried above the entry — so carrying double the entry wager => cap 70.
-// Free/no-wager snakes (baseUsd 0) keep a fixed 70 cap. Authoritative; client mirrors it.
+// ── MoneySlither stepMovement port — ONE 60 Hz sub-step (verbatim from client.js) ──
+// Continuous `size` is authoritative; ns/thickness derived. Chord-based path sampling.
 function ssGrowCap(sn) {
   const base = sn.baseUsd || 0, usd = sn.usd || 0;
   if (base <= 0) return 70;
   return Math.max(40, Math.min(SS_MAX_NS, Math.round(40 + 30 * (usd / base - 1))));
 }
 
-// ── MoneySlither stepMovement port — ONE 60 Hz sub-step (verbatim from client.js) ──
-// Continuous `size` is authoritative; ns/thickness derived. Chord-based path sampling.
 function ssStepMovement(sn, sg, lid, io, now) {
   // stepTurning: angle += sign(diff)*min(|diff|, TURN_SPEED_PER_SEC*DT)
   if (sn.circling) {
@@ -540,11 +561,17 @@ function ssStepMovement(sn, sg, lid, io, now) {
       sn._pathAcc -= SS_POINT_DIST;
     }
   }
-  const maxPath = Math.max(800, sn.ns * SS_SEG_STEP + 200);
+  const maxPath = Math.max(800, Math.ceil(sn.ns * ssSectionRadius(sn.ns) * 0.5 / SS_POINT_DIST) + 200);
   while (sn.path.length > maxPath) sn.path.pop();
+  if (SS_BODY_SYNC) ssUpdateRenderTrail(sn); // Option A: update client render-trail (no-op when flag OFF)
 
   // Growth: drain growQueue (each unit = +1 segment worth of size) — preserves food economy.
-  // Capped by wager (ssGrowCap): join at 17, +30 sections per entry-wager carried above entry.
+  // Runs every tick regardless of boost. (A prior version skipped this while boosting to stop a
+  // growQueue backlog from refilling ns as fast as boost-burn removed it -- but that backlog is
+  // now prevented at the source: the food-pickup phase never queues growth past the cap in the
+  // first place. Gating this on boost was too broad -- it deferred ALL growth earned while
+  // boosting, of any size, which then dumped in as a sudden lump the instant boost stopped
+  // (e.g. auto-disabling at BOOST_MIN=12) -- the "random length appears at low size" bug.)
   const _growCap = ssGrowCap(sn);
   while ((sn.growQueue || 0) > 0 && sn.ns < _growCap) {
     sn.growQueue--;
@@ -573,7 +600,7 @@ function ssStepMovement(sn, sg, lid, io, now) {
 }
 
 // Squared distance from point P to segment A->B. Used so food pickup covers the whole
-// path the head swept this tick (up to ~21px at boost), not just its final point —
+// path the head swept this tick (up to ~21px at boost), not just its final point -
 // otherwise a fast head tunnels straight through a pebble between discrete checks.
 function ssPtSegD2(px, py, ax, ay, bx, by) {
   const abx = bx - ax, aby = by - ay;
@@ -612,18 +639,30 @@ function ssTick(lid, io) {
   for (let _sub = 0; _sub < SS_SUBSTEPS; _sub++) {
     sg.snakes.forEach(sn => { if (sn.alive) ssStepMovement(sn, sg, lid, io, now); });
     ssCheckCollisions(sg, lid, io);
+    // Mid-tick broadcast: send each sub-step's position instead of only the final one, so
+    // clients receive state at 60Hz (matching the 60Hz sim) instead of 30Hz. Halves the
+    // interpolation buffer's inherent render lag for remote snakes. Last sub-step is still
+    // covered by the existing end-of-tick broadcast below (which also carries food/growth).
+    if (_sub < SS_SUBSTEPS - 1) ssBroadcastState(sg, lid, io);
   }
 
-  // 2. Food pickup — exact head position, no guessing
+  // 2. Food pickup — exact head position, no guessing.
+  // The growth cap IS the bank — nothing accumulates past it. At/above cap, regular (non-money)
+  // pebbles aren't picked up at all (left on the field, snake passes straight over them, no
+  // score/growth); money/kill food is still always collected (usd/score never withheld) but its
+  // growth portion is discarded rather than queued once at cap. This replaces any notion of a
+  // separate growQueue "reserve" beyond the cap.
   sg.snakes.forEach(sn => {
     if (!sn.alive) return;
+    const _cap = ssGrowCap(sn);
     for (let i = sg.food.length - 1; i >= 0; i--) {
       const f = sg.food[i];
       if (f.o === sn.pid && f.ne && now < f.ne) continue; // shed cooldown
+      if (!f.k && sn.ns >= _cap) continue; // regular pebble, already capped — leave it, no pickup
       const pickR = f.k ? (sn.thick + SS_KILL_FOOD_PICKUP_R) : (sn.thick + SS_FOOD_PICKUP_R);
       const _ax = sn._phx != null ? sn._phx : sn.x, _ay = sn._phy != null ? sn._phy : sn.y;
       if (ssPtSegD2(f.x, f.y, _ax, _ay, sn.x, sn.y) < pickR * pickR) {
-        sn.growQueue = (sn.growQueue || 0) + SS_FOOD_GROW;
+        if (sn.ns < _cap) sn.growQueue = (sn.growQueue || 0) + SS_FOOD_GROW; // discard growth once capped
         sn.score = (sn.score || 0) + (f.k ? 50 : 10);
         if (f.w) sn.usd = (sn.usd || 0) + f.w;
         sg.food.splice(i, 1);
@@ -668,17 +707,47 @@ function ssTick(lid, io) {
   ssBroadcastState(sg, lid, io);
 }
 
+// Option A: maintain a coarse copy of the snake's OWN trail for client rendering. Mirrors the head
+// motion sn.path already follows (does NOT read or modify sn.path). Self-initializing so the flag
+// can be toggled mid-game. New head points collected in _rtNew (oldest→newest) for per-tick deltas.
+function ssUpdateRenderTrail(sn) {
+  if (sn._rtLastX === undefined) {
+    sn._rtLastX = sn.x; sn._rtLastY = sn.y; sn._rt = [[Math.round(sn.x), Math.round(sn.y)]];
+    sn._rtNew = []; sn._rtNeedKf = true; sn._rtKfPhase = Math.floor(Math.random() * SS_RT_KF_TICKS);
+  }
+  const dx = sn.x - sn._rtLastX, dy = sn.y - sn._rtLastY, len = Math.hypot(dx, dy);
+  if (len >= SS_RT_DIST) {
+    const ux = dx / len, uy = dy / len, n = Math.floor(len / SS_RT_DIST);
+    for (let i = 0; i < n; i++) {
+      sn._rtLastX += ux * SS_RT_DIST; sn._rtLastY += uy * SS_RT_DIST;
+      const p = [Math.round(sn._rtLastX), Math.round(sn._rtLastY)];
+      sn._rt.unshift(p); sn._rtNew.push(p);
+    }
+  }
+  const cap = Math.ceil(sn.ns * ssSectionRadius(sn.ns) * 0.5 / SS_RT_DIST) + 8;
+  while (sn._rt.length > cap) sn._rt.pop();
+}
+
 function ssBroadcastState(sg, lid, io) {
   if (!sg) return;
   const snakePkts = [];
   sg.snakes.forEach(sn => {
     if (!sn.alive) return;
-    snakePkts.push({
+    const pk = {
       id: sn.pid, x: Math.round(sn.x), y: Math.round(sn.y),
       angle: sn.angle, ns: sn.ns, boost: sn.boost, circle: !!sn.circling,
       score: sn.score || 0, usd: sn.usd || 0,
       color: sn.color, name: sn.name
-    });
+    };
+    // Option A body stream (only when flag ON and trail exists): keyframe `rk` (staggered/periodic
+    // or first) else delta `rd`. Flat [x0,y0,...] head-first. OFF → neither field → client unchanged.
+    if (SS_BODY_SYNC && sn._rt) {
+      const kf = sn._rtNeedKf || ((sg.tick % SS_RT_KF_TICKS) === (sn._rtKfPhase || 0));
+      if (kf) { const a = []; for (const p of sn._rt) { a.push(p[0], p[1]); } pk.rk = a; sn._rtNeedKf = false; }
+      else if (sn._rtNew && sn._rtNew.length) { const a = []; for (const p of sn._rtNew) { a.push(p[0], p[1]); } pk.rd = a; }
+      sn._rtNew = [];
+    }
+    snakePkts.push(pk);
   });
   const pkt = { snakes: snakePkts, t: Date.now(), tick: sg.tick || 0 };
   const now = Date.now();
@@ -694,6 +763,25 @@ function ssBroadcastState(sg, lid, io) {
   io.to(lid).emit('ss-state', pkt);
 }
 
+// One-time JOIN body seed: send each OTHER alive snake's authoritative body (sn.path decimated
+// head->tail to render resolution) to the JOINING socket ONLY, once per connection. Lets a fresh
+// or rejoining client render full tails on frame one instead of a straight stub. Additive +
+// render-only: no gameplay/collision/authority/tick change; nothing broadcast to other clients.
+function ssSendJoinBodies(socket, sg, selfPid) {
+  if (!socket || !sg) return;
+  const out = [];
+  sg.snakes.forEach(sn => {
+    if (!sn.alive || sn.pid === selfPid || !sn.path || sn.path.length < 2) return;
+    const step = Math.max(1, Math.round(ssSectionRadius(sn.ns) * 0.5 / SS_POINT_DIST));
+    const p = [];
+    for (let i = 0; i < sn.path.length && p.length < 4000; i += step) {
+      p.push(Math.round(sn.path[i].x), Math.round(sn.path[i].y));
+    }
+    if (p.length >= 4) out.push({ id: sn.pid, ns: sn.ns, p });
+  });
+  if (out.length) socket.emit('ss-bodies', { t: Date.now(), snakes: out });
+}
+
 // Instrumentation helper (read-only; does NOT affect collision outcome):
 // runs the exact H2B head-in-body scan for `att` head against `vic` body, returns hit or null.
 function ssScanHeadInBody(attHeadX, attHeadY, attThick, vic, T) {
@@ -704,7 +792,7 @@ function ssScanHeadInBody(attHeadX, attHeadY, attThick, vic, T) {
   if (!vpath || vpath.length === 0) return null;
   const collLim = Math.min(vic.ns, 1200);
   for (let k = 2; k < collLim; k++) {
-    const idx = k * SS_SEG_STEP;
+    const idx = Math.round(k * ssSectionRadius(vic.ns) * 0.5 / SS_POINT_DIST);
     const pt = vpath[idx] || vpath[vpath.length - 1];
     const sdx = attHeadX - pt.x, sdy = attHeadY - pt.y;
     if (sdx * sdx + sdy * sdy <= crr2) {
@@ -812,7 +900,7 @@ function ssCheckCollisions(sg, lid, io) {
       if (!qpath || qpath.length === 0) continue;
       const collLim = Math.min(qq.ns, 1200);
       for (let k = 2; k < collLim; k++) {
-        const idx = k * SS_SEG_STEP;
+        const idx = Math.round(k * ssSectionRadius(qq.ns) * 0.5 / SS_POINT_DIST);
         const pt = qpath[idx] || qpath[qpath.length - 1];
         const sdx = hhx - pt.x, sdy = hhy - pt.y;
         if (sdx * sdx + sdy * sdy <= crr2) {
@@ -834,7 +922,7 @@ function ssCheckCollisions(sg, lid, io) {
           // k=2..kHit, plus the decimated body path the player ran into (instrumentation only).
           const _tested = [];
           for (let _kk = 2; _kk <= k; _kk++) {
-            const _ii = _kk * SS_SEG_STEP;
+            const _ii = Math.round(_kk * ssSectionRadius(qq.ns) * 0.5 / SS_POINT_DIST);
             const _sp = qpath[_ii] || qpath[qpath.length - 1];
             _tested.push({ k:_kk, idx:_ii, x:+_sp.x.toFixed(1), y:+_sp.y.toFixed(1),
                            dist:+Math.hypot(hhx - _sp.x, hhy - _sp.y).toFixed(2) });
@@ -871,12 +959,58 @@ function ssCheckCollisions(sg, lid, io) {
       if (died.has(pp.pid)) break;
     }
   }
+
+  // ── [PASSTHRU_PROBE] read-only missed-collision detector (enable with env SS_PASSTHRU_PROBE=1) ──
+  // Uses prod's IDENTICAL sampling (idx = round(k*ssSectionRadius(ns)*0.5/SS_POINT_DIST)) and
+  // IDENTICAL crr as the H2B loop above. sampledHit = minSampledDist2 <= crr2; shouldHaveKilled =
+  // sampledHit && !killOccurred (head inside a sampled body point but no death => server miss).
+  // killOccurred read from the already-populated `died` set. Hit evaluated per victim (deepest
+  // penetration). Logs only when sampledHit. Pure logging: never calls ssKill, never mutates
+  // died/paths/positions. Off unless the env flag is set.
+  if (process.env.SS_PASSTHRU_PROBE) {
+    for (let i = 0; i < alive.length; i++) {
+      const pp = alive[i];
+      const hR = pp.thick * SS_HB * T.hbs * T.hhbs;
+      const hhx = pp.x, hhy = pp.y;
+      let bestScore = Infinity, bestPid = null, bestD2 = 0, bestCrr2 = 0;
+      for (let j = 0; j < alive.length; j++) {
+        const qq = alive[j];
+        if (qq.pid === pp.pid) continue;
+        const qpath = qq.path; if (!qpath || qpath.length === 0) continue;
+        const bR = qq.thick * SS_HB * T.hbs;
+        const crr2 = (hR + bR) * (hR + bR);
+        const stepFactor = ssSectionRadius(qq.ns) * 0.5 / SS_POINT_DIST; // == prod H2B idx factor
+        const collLim = Math.min(qq.ns, 1200);
+        let minD2 = Infinity;
+        for (let k = 2; k < collLim; k++) {
+          const idx = Math.round(k * stepFactor);
+          const pt = qpath[idx] || qpath[qpath.length - 1];
+          const dx = hhx - pt.x, dy = hhy - pt.y, d2 = dx * dx + dy * dy;
+          if (d2 < minD2) minD2 = d2;
+        }
+        if (minD2 === Infinity) continue;
+        const score = minD2 - crr2;
+        if (score < bestScore) { bestScore = score; bestPid = qq.pid; bestD2 = minD2; bestCrr2 = crr2; }
+      }
+      if (bestPid == null) continue;
+      const sampledHit = bestD2 <= bestCrr2;
+      if (!sampledHit) continue;
+      const killOccurred = died.has(pp.pid);
+      console.log('[PASSTHRU_PROBE] ' + JSON.stringify({
+        tick: sg.tick, attacker: pp.pid, victim: bestPid,
+        minSampledDist2: +bestD2.toFixed(1), crr2: +bestCrr2.toFixed(1),
+        killOccurred, sampledHit,
+        shouldHaveKilled: sampledHit && !killOccurred
+      }));
+    }
+  }
 }
 
 function ssKill(victim, killer, lid, io, diag) {
   if (!victim.alive) return;
   victim.alive = false;
   victim._killedAt = Date.now();
+  console.log('ssKill', victim.pid, victim.ns, Date.now());
   console.log(`[${lid}] KILL: ${victim.pid.slice(0,8)} by ${killer ? killer.pid.slice(0,8) : 'wall/size'}`);
   // ── DEATH_FRAME instrumentation + replay capture (logging only; no gameplay effect) ──
   if (diag) {
@@ -1007,7 +1141,7 @@ function elim(victim, killerId, room, io) {
   const elimData = { id: victim.id, killerId, victimSol: victim.sol || 0, killProof, killTs };
   // Block victim cashout on the settlement server BEFORE broadcasting the kill to clients.
   // Delaying the elim event by ~50-100ms ensures dead: is set before the killer's client
-  // even knows to call settle/kill — closing the window where victim cashout races the kill.
+  // even knows to call settle/kill -- closing the window where victim cashout races the kill.
   if (victim.id && GAME_SECRET) {
     const adminSecret = (process.env.ADMIN_SECRET || '').trim();
     const settleUrl = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
@@ -1113,12 +1247,12 @@ io.on('connection', socket => {
         socket.emit('err', 'Invalid entry token — pay to join');
         socket.disconnect(); return;
       }
-      // Dead-player reconnect: token must be freshly minted (≤5 min) and never used before.
+      // Dead-player reconnect: token must be freshly minted (<=5 min) and never used before.
       // This blocks reuse of the original join token after elimination — new payment required.
       if (existing && !existing.alive) {
         const tokenTs = (() => { try { const {data} = JSON.parse(Buffer.from(gameToken, 'base64url').toString()); return parseInt(data.split(':')[2]); } catch (_) { return 0; } })();
         if (Date.now() - tokenTs > 300_000 || _usedGameTokens.has(gameToken)) {
-          console.log(`[${lobbyId}] dead-player reconnect blocked — stale/reused token pid=${pid&&pid.slice(0,8)}`);
+          console.log(`[${lobbyId}] dead-player reconnect blocked {EM} stale/reused token pid=${pid&&pid.slice(0,8)}`);
           socket.emit('err', 'You were eliminated — make a new deposit to rejoin');
           socket.disconnect(); return;
         }
@@ -1137,6 +1271,8 @@ io.on('connection', socket => {
     // Came back within grace window — cancel pending removal, resume same spot + score
     if (existing.dcTimer) { clearTimeout(existing.dcTimer); existing.dcTimer = null; }
     existing.disconnected = false;
+    // Reconnect owns cancellation of the snake disconnect-delete timer (not input timing).
+    { const _sg = ssGames.get(lobbyId); if (_sg && _sg.delTimers && _sg.delTimers.has(pid)) { clearTimeout(_sg.delTimers.get(pid)); _sg.delTimers.delete(pid); } }
     // Was dead when they left — other clients already removed them (lives=0 broadcast).
     // Give a fresh spawn and mark alive so: (a) tick() accepts their input again,
     // (b) others get a 'join' announcement so they re-add the player.
@@ -1236,7 +1372,7 @@ io.on('connection', socket => {
     io.to(lobbyId).emit('spectate', { id: pid });
   });
 
-  // ── In-game cashout (paid lobbies only) ───────────────────────
+  // -- In-game cashout (paid lobbies only) ---
   // Routing through the game server makes kill and cashout mutually exclusive:
   // p.alive=false is set synchronously before any await, so tick() collision
   // detection can never fire for this player after this point. No race possible.
@@ -1249,6 +1385,12 @@ io.on('connection', socket => {
     }
     // Mark dead NOW (sync, before any await) — kill detection is now impossible for this player
     p.alive = false;
+    // Also mark the SNAKE dead synchronously: blocks a kill mid-cashout AND stops the
+    // post-cashout disconnect from dropping kill/gold food (ssPlayerLeft only sheds food
+    // for an ALIVE snake). Restored in the catch below if the settle call errors.
+    const _csg = ssGames.get(lobbyId);
+    const _csn = _csg && _csg.snakes.get(pid);
+    if (_csn) { _csn.alive = false; _csn._cashedOut = true; }
     const { sig, ts, wagerLamports } = data || {};
     const settleUrl = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
     try {
@@ -1264,19 +1406,33 @@ io.on('connection', socket => {
       });
       const result = await resp.json().catch(() => ({}));
       if (resp.ok && !result.error) {
-        // Paid — tell other players this player left voluntarily
+        // Paid -- tell other players this player left voluntarily
         socket.to(lobbyId).emit('spectate', { id: pid });
         socket.emit('cashout-result', { ok: true, sig: result.sig, playerCut: result.playerCut, creatorCut: result.creatorCut, confirmed: result.confirmed });
       } else {
-        // Settle rejected (dead flag, empty escrow, etc.) — don't restore; wager was already gone
-        socket.emit('cashout-result', { error: result.error || 'Cashout failed — contact support' });
+        // Settle rejected (dead flag, empty escrow, etc.) -- don't restore; wager was already gone
+        socket.emit('cashout-result', { error: result.error || 'Cashout failed -- contact support' });
       }
     } catch (e) {
-      // Network/timeout — restore player so they can retry
+      // Network/timeout -- restore player so they can retry
       p.alive = true;
+      if (_csn) { _csn.alive = true; _csn._cashedOut = false; }
       console.warn('[cashout] settle call error:', e.message);
-      socket.emit('cashout-result', { error: 'Connection error — press SPACE to retry' });
+      socket.emit('cashout-result', { error: 'Connection error -- press SPACE to retry' });
     }
+  });
+
+  // In-game cashout NOTIFY from the client after a successful HTTP /api/settle. Removes the snake
+  // IMMEDIATELY with NO kill food -- otherwise the 6s ghost-timeout (ssKill) sheds the already-paid
+  // wager as gold orbs other players can eat (value duplication). Marks the snake + room player dead
+  // so ghost-kill, ssKill and the disconnect food-shed (ssPlayerLeft) are all skipped. NO payout here.
+  socket.on('ss-cashed', () => {
+    const _sg = ssGames.get(lobbyId);
+    const _sn = _sg && _sg.snakes.get(pid);
+    if (_sn && _sn.alive) { _sn.alive = false; _sn._cashedOut = true; _sn.path = []; _sn.segs = []; }
+    const _pl = room && room.players.get(pid);
+    if (_pl) _pl.alive = false;
+    socket.to(lobbyId).emit('spectate', { id: pid });
   });
 
   // ── Voice chat signaling relay ────────────────────────────────
@@ -1328,6 +1484,13 @@ io.on('connection', socket => {
     if (lobbyId.startsWith('ss-')) {
       // Server-authoritative: handle input directly, no peer relay
       ssHandleInput(lobbyId, pid, d, io);
+      // JOIN body seed (render-only): once per connection, when the client asks (d.seed), send
+      // every OTHER alive snake's authoritative body so a fresh/rejoining client draws full tails
+      // immediately instead of a straight stub. No gameplay/collision change.
+      if (d && d.seed && !socket._ssSeeded) {
+        const _sg = ssGames.get(lobbyId);
+        if (_sg && _sg.snakes.get(pid)) { socket._ssSeeded = true; ssSendJoinBodies(socket, _sg, pid); }
+      }
     } else {
       socket.to(lobbyId).emit('ssin', d);
     }
