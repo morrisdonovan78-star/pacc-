@@ -593,6 +593,7 @@ let _ssRtt=null; // rolling RTT (ms) from ss-ping/ss-pong, for death-replay netw
 // own.path[0] is not used for collision; the server stays the sole collision authority.
 let _OWN_CORRECT=0.2;
 let _localDead=false;
+let _cashedOut=false; // set on cashout so incoming ss-state can't keep reviving our own (now-removed) snake on our screen
 let _autoCircle=false; // toggle: snake auto-circles until toggled off (E key / L3 button)
 let _lastRoomId=null;
 let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
@@ -1480,6 +1481,9 @@ async function pkConnect(roomId,gameToken){
         }
         const s=SG.snakes.get(sd.id);
         if(!s)return;
+        // We cashed out: never let a lingering server packet revive our own (now-removed) snake on
+        // our own screen — others already stopped seeing it. Keep it hidden and spectate instead.
+        if(sd.id===myPid&&_cashedOut){s.alive=false;if(s.path&&s.path.length)s.path=[];return;}
         // Don't reanimate a recently-killed snake (stale packet from before kill)
         if(!s.alive&&_snakeDeathTs.has(sd.id)&&Date.now()-(_snakeDeathTs.get(sd.id)||0)<2000){_ssBuf.delete(sd.id);return;}
         s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;
@@ -2838,7 +2842,8 @@ async function endSnakeGame(reason,killerId){
     // Cashed out: tell the game server to remove our snake NOW with no kill food — otherwise the 6s
     // ghost-timeout (ssKill) sheds our already-paid wager as gold orbs others can eat (value dup).
     // Also hide it locally so spectate isn't glued to a frozen corpse sitting at the cashout spot.
-    { const _mine=SG&&SG.snakes.get(myPid); if(_mine)_mine.alive=false; }
+    _cashedOut=true;
+    { const _mine=SG&&SG.snakes.get(myPid); if(_mine){_mine.alive=false;_mine.path=[];} }
     if(_sio){try{_sio.emit('ss-cashed',{});}catch(_){}}
     _specPanInit=false;
     // rafDraw keeps running; SG stays alive for dead reckoning
@@ -2916,12 +2921,18 @@ function enterSpectate(){
 async function rejoinGame(){
   const wasPractice=_isPractice; // capture before goHome() clears it
   const roomId=_lastRoomId;
+  const usd=ST.lobbyUsd; // capture wager tier before goHome() clears state
   // Snapshot active bot modes before goHome() destroys SG
   const botsSnapshot=wasPractice&&SG?[...SG.snakes.entries()].filter(([id])=>id.startsWith('bot-')).map(([,s])=>s.botMode||'circle'):[];
   goHome();
   if(wasPractice){
     launchPractice(); // practice lobby: re-launch locally, no network needed
     if(botsSnapshot.length)setTimeout(()=>botsSnapshot.forEach(mode=>spawnBotSnake(mode)),100);
+  } else if(usd>0){
+    // Paid lobby: the prior entry token is single-use and the server blocks reuse after
+    // cashout/elimination, so a null-token reconnect is rejected ("Invalid entry token"). Rejoin
+    // must make a NEW deposit — route back through the full paid-join flow to mint a fresh token.
+    joinLobby(usd);
   } else if(roomId){
     await new Promise(r=>setTimeout(r,200));
     go('scr-mm');
@@ -2941,7 +2952,7 @@ async function rejoinGame(){
 
 function goHome(){
   _isPractice=false; _hideSyncOverlay();
-  isSpectating=false; _localDead=false; _firstRemoteSync=false; _autoCircle=false;
+  isSpectating=false; _localDead=false; _cashedOut=false; _firstRemoteSync=false; _autoCircle=false;
   _showTuning=false; const _tp=document.getElementById('tuning-panel');if(_tp)_tp.style.display='none';
   // Blur any focused input so the gamepad doesn't get trapped in a text field
   if(document.activeElement&&document.activeElement!==document.body)document.activeElement.blur();
