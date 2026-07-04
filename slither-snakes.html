@@ -710,9 +710,11 @@ function saveDisplayName(){
   addToast('Name saved: '+v,'#39FF14');
 }
 
-// ══ LEADERBOARD (paid lobbies only — powered by /api/leaderboard, backed by ph:{address} stats
-// that are only ever written from api/join.js (real on-chain deposit) and api/settle.js kill/win/lose
-// actions gated server-side to isPaid rooms — free-lobby play never touches these counters) ═══
+// ══ LEADERBOARD (paid lobbies only — powered by /api/leaderboard?game=ss, backed by
+// ph:ss:{address} stats that are only ever written from api/join.js (real on-chain deposit)
+// and api/settle.js kill/win/lose actions gated server-side to isPaid rooms — free-lobby
+// play never touches these counters. game=ss keeps this scoped away from the Pac-Man
+// (index.html) leaderboard, which shares the same /api/leaderboard endpoint) ═══
 let _lbTimer=null;
 function _lbSol(lamports){return (Number(lamports)||0)/1e9;}
 function _lbFmtSol(lamports){const s=_lbSol(lamports);return (s>=1?s.toFixed(2):s.toFixed(3))+' SOL';}
@@ -735,7 +737,7 @@ async function loadLeaderboard(){
   const emptyEl=document.getElementById('lb-empty');
   const youEl=document.getElementById('lb-you');
   try{
-    const r=await fetch('/api/leaderboard');
+    const r=await fetch('/api/leaderboard?game=ss');
     const d=await r.json();
     const players=d.players||[];
     loadingEl.style.display='none';
@@ -774,7 +776,7 @@ async function loadLeaderboard(){
         youEl.style.display='block';
         youEl.innerHTML='YOUR RANK <b style="color:var(--y);">#'+mine.rank+'</b> &nbsp;·&nbsp; '+_lbFmtSol(mine.earned)+' earned &nbsp;·&nbsp; '+mine.games+' games';
       }else{
-        const pr=await fetch('/api/leaderboard?address='+encodeURIComponent(ST.address));
+        const pr=await fetch('/api/leaderboard?game=ss&address='+encodeURIComponent(ST.address));
         const pd=await pr.json();
         if(pd.player&&(pd.player.games>0||pd.player.earned>0)){
           youEl.style.display='block';

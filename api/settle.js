@@ -273,8 +273,11 @@ module.exports = async function handler(req, res) {
     if (typeof body === 'string') try { body = JSON.parse(body); } catch (_) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Bad JSON' }); }
     body = body || {};
 
-    const { action, playerAddress } = body;
+    const { action, playerAddress, lobbyId } = body;
     const wagerLamportsRaw = Number(body.wagerLamports) || 0;
+    // Leaderboard stats are scoped per-game so Slither Snakes and Pac-Man never mix,
+    // even for a wallet that plays both. ss-* lobbyId = Slither Snakes, else Pac-Man.
+    const game = (lobbyId && lobbyId.startsWith('ss-')) ? 'ss' : 'pac';
 
     // ── elim-lock: game server calls this immediately on kill to block victim cashout ──
     if (action === 'elim-lock') {
@@ -389,11 +392,11 @@ module.exports = async function handler(req, res) {
             (async()=>{ try{ await kvDel('krl:'+playerAddress); }catch(_){} })();
             (async()=>{
               try{
-                const pk='ph:'+playerAddress;
+                const pk='ph:'+game+':'+playerAddress;
                 const newEarned=await kvHincrby(pk,'earned',playerCut);
                 await kvHincrby(pk,'wins',1);
-                await kvZadd('lb:earned',Number(newEarned)||0,playerAddress);
-                await kvHincrby('ph:global','totalEarned',playerCut);
+                await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
+                await kvHincrby('ph:'+game+':global','totalEarned',playerCut);
               }catch(_){}
             })();
             break;
@@ -495,14 +498,14 @@ module.exports = async function handler(req, res) {
           sig = result2.sig; txConfirmed2 = result2.confirmed;
           (async()=>{
             try{
-              const pk='ph:'+playerAddress;
+              const pk='ph:'+game+':'+playerAddress;
               await kvHincrby(pk,'kills',1);
               const newEarned=await kvHincrby(pk,'earned',killerCut||0);
-              await kvZadd('lb:earned',Number(newEarned)||0,playerAddress);
+              await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
               // Track death for victim — must happen regardless of wager since victim's
               // wager was already deleted above, so their settle/lose won't count it.
               if(vaBody && vaBody!==playerAddress) {
-                await kvHincrby('ph:'+vaBody,'deaths',1);
+                await kvHincrby('ph:'+game+':'+vaBody,'deaths',1);
               }
             }catch(_){}
           })();
@@ -548,8 +551,8 @@ module.exports = async function handler(req, res) {
         (async()=>{ try{ await kvDel('krl:'+playerAddress); await kvDel('kc:'+playerAddress); }catch(_){} })();
         (async()=>{
           try{
-            await kvHincrby('ph:'+playerAddress,'losses',1);
-            await kvHincrby('ph:'+playerAddress,'deaths',1);
+            await kvHincrby('ph:'+game+':'+playerAddress,'losses',1);
+            await kvHincrby('ph:'+game+':'+playerAddress,'deaths',1);
           }catch(_){}
         })();
         clearTimeout(guard); done = true;

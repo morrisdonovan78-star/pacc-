@@ -1349,7 +1349,7 @@ async function finishLogin(kp){
   await refreshBal().catch(e=>console.warn('[finishLogin] bal:',e.message));
   const _nk='pa_name_'+ST.address;
   if(!localStorage.getItem(_nk)){
-    fetch('/api/leaderboard?address='+encodeURIComponent(ST.address)).then(r=>r.json()).then(d=>{
+    fetch('/api/leaderboard?game=pac&address='+encodeURIComponent(ST.address)).then(r=>r.json()).then(d=>{
       if(d&&d.player&&d.player.name){ localStorage.setItem(_nk,d.player.name); updateUI(); }
     }).catch(()=>{});
   }
@@ -1385,7 +1385,7 @@ async function checkSession(){
     await fetchPrice(); await refreshBal();
     const _nkcs='pa_name_'+s.address;
     if(!localStorage.getItem(_nkcs)){
-      fetch('/api/leaderboard?address='+encodeURIComponent(s.address)).then(r=>r.json()).then(d=>{
+      fetch('/api/leaderboard?game=pac&address='+encodeURIComponent(s.address)).then(r=>r.json()).then(d=>{
         if(d&&d.player&&d.player.name){ localStorage.setItem(_nkcs,d.player.name); updateUI(); }
       }).catch(()=>{});
     }
@@ -2303,7 +2303,7 @@ async function claimKillReward(victimSol, victimAddress, killProof, killTs){
     const r=await fetch('/api/settle',{
       method:'POST',
       headers:{'Content-Type':'application/json','x-settle-sig':_kSig,'x-settle-ts':String(_kTs)},
-      body:JSON.stringify({action:'kill',playerAddress:ST.address,wagerLamports,victimAddress:victimAddress||null,killProof:killProof||null,killTs:killTs||null})
+      body:JSON.stringify({action:'kill',playerAddress:ST.address,wagerLamports,victimAddress:victimAddress||null,killProof:killProof||null,killTs:killTs||null,lobbyId:pkRoomId||null})
     });
     let d; try{ d=await r.json(); }catch(_){ throw new Error('Server error (not JSON) — try again'); }
     if(!r.ok||d.error) throw new Error(d.error||'Server error '+r.status);
@@ -5246,7 +5246,7 @@ async function settle(result){
     const r=await fetch('/api/settle',{
       method:'POST',
       headers:{'Content-Type':'application/json','x-settle-sig':_sSig,'x-settle-ts':String(_sTs)},
-      body:JSON.stringify({action,playerAddress:ST.address})
+      body:JSON.stringify({action,playerAddress:ST.address,lobbyId:pkRoomId||null})
     });
     const d=await r.json();
     if(!r.ok||d.error) throw new Error(d.error||'Server error');
@@ -5283,7 +5283,7 @@ function playAgain(){
 // HOME MINI LEADERBOARD
 async function fetchHomeLb(){
   try{
-    const r=await fetch('/api/leaderboard',{cache:'no-store'});
+    const r=await fetch('/api/leaderboard?game=pac',{cache:'no-store'});
     if(!r.ok) return;
     const d=await r.json();
     const players=(d.players||[]).slice(0,5);
@@ -5345,7 +5345,7 @@ async function openLeaderboard(){
 
 async function _fetchAndRenderLb(){
   try{
-    const r=await fetch('/api/leaderboard',{cache:'no-store'});
+    const r=await fetch('/api/leaderboard?game=pac',{cache:'no-store'});
     if(!r.ok) throw new Error('HTTP '+r.status);
     const d=await r.json();
     _lbPlayerCache=d.players||[];
@@ -5539,7 +5539,7 @@ async function lbSearch(){
     // Use cached data if available, otherwise fetch
     let players=_lbPlayerCache;
     if(!players.length){
-      const r=await fetch('/api/leaderboard',{cache:'no-store'});
+      const r=await fetch('/api/leaderboard?game=pac',{cache:'no-store'});
       const d=await r.json();
       players=d.players||[];
       _lbPlayerCache=players;

@@ -1433,7 +1433,7 @@ io.on('connection', socket => {
           'x-settle-sig': String(sig || ''),
           'x-settle-ts': String(ts || ''),
         },
-        body: JSON.stringify({ action: 'cashout', playerAddress: pid, wagerLamports: Number(wagerLamports) || 0 }),
+        body: JSON.stringify({ action: 'cashout', playerAddress: pid, wagerLamports: Number(wagerLamports) || 0, lobbyId }),
         signal: AbortSignal.timeout(30000),
       });
       const result = await resp.json().catch(() => ({}));

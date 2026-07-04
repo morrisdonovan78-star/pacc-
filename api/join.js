@@ -200,20 +200,24 @@ module.exports = async function handler(req, res) {
     kvDel('lock:co:' + walletAddress).catch(() => {});
     kvDel('dead:' + walletAddress).catch(() => {});
 
-    // Fire-and-forget leaderboard join stat — atomic HINCRBY, no read-modify-write race
+    // Fire-and-forget leaderboard join stat — atomic HINCRBY, no read-modify-write race.
+    // Stats are scoped per-game (ss-* lobbyId = Slither Snakes, everything else = Pac-Man)
+    // so the two games' leaderboards never mix, even for a wallet that plays both.
     (async()=>{
       try{
-        const pk='ph:'+walletAddress;
+        const game=(lobbyId&&lobbyId.startsWith('ss-'))?'ss':'pac';
+        const namePk='ph:'+walletAddress;      // display name is shared across both games
+        const statsPk='ph:'+game+':'+walletAddress;
         // Set display name only if player doesn't have one yet
-        if(playerName&&typeof playerName==='string') await kvHsetnx(pk,'name',playerName.slice(0,20).toUpperCase());
-        await kvHincrby(pk,'wagered',lamps);
-        await kvHincrby(pk,'games',1);
+        if(playerName&&typeof playerName==='string') await kvHsetnx(namePk,'name',playerName.slice(0,20).toUpperCase());
+        await kvHincrby(statsPk,'wagered',lamps);
+        await kvHincrby(statsPk,'games',1);
         // Keep sorted set score in sync (score = current earned lamports)
-        const earned=await kvHget(pk,'earned');
-        await kvZadd('lb:earned',Number(earned)||0,walletAddress);
+        const earned=await kvHget(statsPk,'earned');
+        await kvZadd('lb:'+game+':earned',Number(earned)||0,walletAddress);
         // Global counters
-        await kvHincrby('ph:global','totalWagered',lamps);
-        await kvHincrby('ph:global','gamesPlayed',1);
+        await kvHincrby('ph:'+game+':global','totalWagered',lamps);
+        await kvHincrby('ph:'+game+':global','gamesPlayed',1);
       }catch(_){}
     })();
 
