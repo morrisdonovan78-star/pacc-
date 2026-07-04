@@ -1179,7 +1179,9 @@ async function joinLobby(usd){
     ST.hasEscrow=true;
     lg('mm-log','Deposit confirmed ✓','lok');
     lg('mm-log','Recording wager…','lhi');
-    const roomId=usd===1?'paid-lobby-1':'paid-lobby-25';
+    // ss- prefix routes paid lobbies through the authoritative snake sim (same path as ss-free-lobby),
+    // not the legacy relay. Without this the server never simulates food/collisions for paid rooms.
+    const roomId=usd===1?'ss-paid-lobby-1':'ss-paid-lobby-5';
     const _pName=getMyName();
     const joinResult=await recordWager(ST.address,lamps,sig,roomId,_pName);
     const gameToken=joinResult.gameToken||null;

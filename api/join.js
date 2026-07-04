@@ -219,7 +219,8 @@ module.exports = async function handler(req, res) {
 
     // Issue a game token — HMAC-signed proof of payment for the Socket.io server.
     // The Socket.io server validates this on connection; without it paid lobbies are rejected.
-    const VALID_LOBBIES = new Set(['paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
+    // ss-paid-* are the snake game's paid rooms (authoritative sim); paid-lobby-* are legacy Pac-Man rooms.
+    const VALID_LOBBIES = new Set(['ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
     const gameToken  = VALID_LOBBIES.has(lobbyId) ? makeGameToken(walletAddress, lobbyId) : null;
     const entryToken = VALID_LOBBIES.has(lobbyId) ? makeEntryToken(walletAddress, lobbyId) : null;
 

@@ -147,7 +147,7 @@ function placePowerups(maze) {
 }
 
 // ── Lobby defs (match client) ─────────────────────────────────────────────────
-const LOBBY_IDS = new Set(['free-lobby', 'ss-free-lobby', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
+const LOBBY_IDS = new Set(['free-lobby', 'ss-free-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
 
 // ── Rooms ─────────────────────────────────────────────────────────────────────
 const rooms = new Map();
@@ -1064,7 +1064,7 @@ function tick(room, io) {
 const app = express();
 app.get('/health', (_, res) => res.json({ ok: true, rooms: rooms.size }));
 app.get('/counts', (_, res) => {
-  const LOBBY_IDS = ['free-lobby', 'paid-lobby-1', 'paid-lobby-25'];
+  const LOBBY_IDS = ['free-lobby', 'ss-free-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-25'];
   const counts = {};
   for (const id of LOBBY_IDS) {
     const r = io.sockets.adapter.rooms.get(id);
@@ -1398,7 +1398,7 @@ function requireAdmin(req, res, next) {
   next();
 }
 app.get('/admin/status', requireAdmin, (req, res) => {
-  const LOBBY_IDS = ['free-lobby','paid-lobby-1','paid-lobby-5','paid-lobby-25'];
+  const LOBBY_IDS = ['free-lobby','ss-free-lobby','ss-paid-lobby-1','ss-paid-lobby-5','paid-lobby-1','paid-lobby-5','paid-lobby-25'];
   const rooms = {};
   const inLobby = new Set();
   for (const lid of LOBBY_IDS) {
