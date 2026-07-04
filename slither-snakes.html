@@ -380,6 +380,8 @@ body.mctl #voice-speakers{left:150px;}
     <div class="gi"><span class="gl">FPS</span><span class="gv" id="hud-fps" style="color:var(--g)">--</span></div>
   </div>
   <div id="leaderboard" style="position:fixed;top:8px;right:10px;min-width:190px;background:rgba(7,7,15,0.88);border:1px solid rgba(255,215,0,0.35);border-radius:10px;padding:8px 12px;z-index:100;font-family:'Exo 2',sans-serif;pointer-events:none;display:none;"></div>
+  <!-- Shift+L (owner-only) — per-connection latency/staleness readout. Diagnostic only, no gameplay effect. -->
+  <div id="lag-debug" style="position:fixed;top:100px;left:10px;min-width:170px;background:rgba(7,7,15,0.88);border:1px solid rgba(0,255,255,0.35);border-radius:10px;padding:8px 12px;z-index:100;font-family:'Exo 2',sans-serif;font-size:12px;line-height:1.6;color:#9EFFEA;pointer-events:none;display:none;white-space:pre;"></div>
   <button id="voice-btn" onclick="voiceToggle()" title="Voice chat — X (controller) / M (keyboard) to mute" style="position:fixed;bottom:148px;right:14px;z-index:200;display:none;width:46px;height:46px;border-radius:50%;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.3);color:#fff;font-size:20px;cursor:pointer;">🎙️</button>
   <div id="voice-speakers" style="position:fixed;bottom:16px;left:12px;z-index:200;display:none;flex-direction:column;gap:4px;pointer-events:none;"></div>
   <div id="join-sync" style="display:none;position:fixed;inset:0;z-index:300;background:rgba(6,6,18,0.82);align-items:center;justify-content:center;flex-direction:column;gap:10px;pointer-events:none;">
@@ -3077,6 +3079,16 @@ document.addEventListener('keydown',function(e){
     window._OWN_CORRECT=(cur>0)?0:TEST;
     addToast('own-head correct: '+window._OWN_CORRECT+(window._OWN_CORRECT===0?'  (baseline)':'  (test)'), window._OWN_CORRECT===0?'#888':'#4CFF9E', 1800);
   }
+  // Shift+L — owner-only toggle: per-connection latency/staleness readout (own ping + how
+  // stale each remote snake's last snapshot is). Diagnostic only — no gameplay/render effect
+  // beyond the overlay text itself. Added to get real numbers on "gap looks different on each
+  // screen" reports instead of guessing.
+  if((e.key==='l'||e.key==='L')&&e.shiftKey&&!e.repeat&&localStorage.getItem('ss_owner')==='1'){
+    window._LAG_DEBUG=!window._LAG_DEBUG;
+    const panel=document.getElementById('lag-debug');
+    if(panel)panel.style.display=window._LAG_DEBUG?'block':'none';
+    addToast('lag debug: '+(window._LAG_DEBUG?'ON':'OFF'), window._LAG_DEBUG?'#4CFF9E':'#888', 1500);
+  }
 });
 
 // Local-player prediction — MoneySlither-exact 60 Hz sub-steps (boost ramp + chord speed),
@@ -3288,6 +3300,32 @@ function rafDraw(ts){
         trimPath(s);
       }
     });
+  }
+
+  // ── Lag-debug overlay (Shift+L, owner-only) — own ping + per-remote staleness ──
+  // Diagnostic only. "Behind live" ≈ your one-way latency (ping/2) + _INTERP_DELAY: the
+  // number that actually explains why two players circling the same fight see a different
+  // gap on their screens — each renders the OTHER guy stale by roughly THEIR OWN ping, not
+  // a shared/symmetric amount. "buf" is how old the last-received snapshot is (packet health;
+  // a spike there means loss/jitter for that matchup specifically, not baseline latency).
+  if(window._LAG_DEBUG&&SG&&(!window._lagDebugTs||ts-window._lagDebugTs>200)){
+    window._lagDebugTs=ts;
+    const panel=document.getElementById('lag-debug');
+    if(panel){
+      const p=(typeof _ping==='number'&&_ping>0)?_ping:null;
+      const behind=p!=null?Math.round(p/2+_INTERP_DELAY):null;
+      const lines=['YOUR PING: '+(p!=null?p+'ms':'--')+(behind!=null?'  (~'+behind+'ms behind live)':'')];
+      const nowMs=Date.now();
+      SG.snakes.forEach(s=>{
+        if(s.id===myPid||!s.alive)return;
+        const buf=_ssBuf.get(s.id);
+        const age=buf&&buf.length?nowMs-buf[buf.length-1].t:null;
+        const meta=_playerMeta.get(s.id);
+        const nm=(meta&&meta.name?meta.name:s.id.slice(0,6)).slice(0,10);
+        lines.push(nm+': buf '+(age!=null?age+'ms':'--'));
+      });
+      panel.textContent=lines.join('\n');
+    }
   }
 
   // Host: MoneySlither-exact 60 Hz sub-step prediction for own snake
