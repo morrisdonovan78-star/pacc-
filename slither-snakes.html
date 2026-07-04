@@ -572,7 +572,7 @@ let _forceFoodSend=false;
 let _firstRemoteSync=false;
 const _ssBuf=new Map(); // id → [{x,y,angle,ns,boost,score,usd,t}] — server snapshot buffer
 const _ssSeedBodies=new Map(); // id → [{x,y}] one-time authoritative body seed from server 'ss-bodies' on join/rejoin
-const _INTERP_DELAY=85; // ms: render remotes this far behind the latest snapshot for smooth motion. Live-tunable via window._INTERP_DELAY (larger = smoother / more jitter buffer, but a touch more visual lag on other players). Was 50 — too tight, caused 30Hz snapping.
+const _INTERP_DELAY=55; // ms: render remotes this far behind the latest snapshot. Live-tunable via window._INTERP_DELAY. Kept LOW on purpose: a bigger delay renders other players further behind their true position, which WIDENS the render-vs-collision gap (you die into a body that's drawn lagging). 55ms ≈ 1.7 packets — just enough to interpolate smoothly (with head-extrapolation off) without worsening collision fairness.
 // Was 100ms (≈3 snapshots @30Hz). Halved to 50ms to cut the render lag that draws remote
 // snakes ~30–63px behind their server-authoritative collision position (Category A: server
 // collides but client renders the body outside the zone). Still bracketed by the 12-snapshot
