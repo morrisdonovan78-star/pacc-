@@ -5678,28 +5678,37 @@ async function instantCashout(){
     addToast('⏳ Cashout in progress — please wait…','#FFD700');
     return;
   }
+  if(!_sio||!_sio.connected){
+    addToast('❌ Not connected to game server','#FF4444');
+    return;
+  }
 
   _cashoutInProgress=true;
-  // cashoutLamports = original wager + any kill rewards that failed to pay immediately
-  // (failed kills stay in escrow; this lets the cashout recover them automatically).
-  // Server caps payout at min(cashoutLamports, escrowAvail) so other players' funds are safe.
   const wagerLamports=ST.cashoutLamports||Math.floor((ST.wagerSol||0)*solanaWeb3.LAMPORTS_PER_SOL);
   const estSol=(ST.wagerSol>0)?'~'+(ST.wagerSol*0.9).toFixed(4)+' SOL':'';
   addToast('💸 Cashing out'+(estSol?' '+estSol:'')+'…','#FFD700');
   try{
     const {sig:_cSig,ts:_cTs}=signSettleMsg('cashout',ST.address,wagerLamports);
-    const r=await fetch('/api/settle',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-settle-sig':_cSig,'x-settle-ts':String(_cTs)},
-      body:JSON.stringify({action:'cashout',playerAddress:ST.address,wagerLamports})
+    // Route through the game server socket — server marks p.alive=false synchronously
+    // before calling settle, so kill detection and cashout run on the same Node.js event
+    // loop. Only one can win. A player cannot be killed after they cash out, and cannot
+    // cash out after they are killed.
+    const d=await new Promise((resolve,reject)=>{
+      const _tOut=setTimeout(()=>{
+        if(_sio) _sio.off('cashout-result',_onResult);
+        reject(new Error('Timed out — press SPACE to retry'));
+      },35000);
+      function _onResult(data){
+        clearTimeout(_tOut);
+        if(data&&data.ok) resolve(data);
+        else reject(new Error((data&&data.error)||'Cashout failed'));
+      }
+      _sio.once('cashout-result',_onResult);
+      _sio.emit('cashout',{sig:_cSig,ts:String(_cTs),wagerLamports});
     });
-    let d; try{ d=await r.json(); }catch(_){ throw new Error('Server error (not JSON) — try again'); }
-    if(!r.ok||d.error) throw new Error(d.error||'Server error '+r.status);
-    // Success — enter spectate; game and host loop keep running for remaining players
+    // Success — server already sent spectate event to other players
     isSpectating=true;
     if(G&&myPid){ G.players.delete(myPid); updateScoreboard(); }
-    if(ablyChannel) ablyChannel.publish('spectate',{id:myPid},()=>{});
-    // rafDraw should already be running; force-restart to guarantee clean state
     if(rafHandle){ cancelAnimationFrame(rafHandle); rafHandle=null; }
     rafHandle=requestAnimationFrame(rafDraw);
     const _sp=document.getElementById('spectate-panel'); if(_sp) _sp.style.display='flex';
@@ -5712,14 +5721,12 @@ async function instantCashout(){
     if(d.confirmed){
       addToast('💰 +'+_solAmt+' SOL CASHED OUT!','#39FF14');
     }else{
-      // TX sent but not confirmed in our 3s window — it WILL confirm on-chain shortly
       addToast('💸 +'+_solAmt+' SOL sent — confirming…','#39FF14');
-      // Second balance refresh after 5s to pick up the on-chain confirmation
       setTimeout(()=>refreshBal().catch(()=>{}),5000);
     }
     refreshBal().catch(()=>{});
   }catch(e){
-    _cashoutInProgress=false; // allow retry on failure
+    _cashoutInProgress=false;
     addToast('❌ Cashout failed: '+e.message+' — press SPACE to retry','#FF4444');
   }
 }

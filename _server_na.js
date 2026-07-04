@@ -1229,6 +1229,49 @@ io.on('connection', socket => {
     io.to(lobbyId).emit('spectate', { id: pid });
   });
 
+  // ── In-game cashout (paid lobbies only) ───────────────────────
+  // Routing through the game server makes kill and cashout mutually exclusive:
+  // p.alive=false is set synchronously before any await, so tick() collision
+  // detection can never fire for this player after this point. No race possible.
+  socket.on('cashout', async (data) => {
+    if (!isPaid) return;
+    const p = room.players.get(pid);
+    if (!p || !p.alive) {
+      socket.emit('cashout-result', { error: 'Cannot cashout — you were eliminated' });
+      return;
+    }
+    // Mark dead NOW (sync, before any await) — kill detection is now impossible for this player
+    p.alive = false;
+    const { sig, ts, wagerLamports } = data || {};
+    const settleUrl = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
+    try {
+      const resp = await fetch(settleUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-settle-sig': String(sig || ''),
+          'x-settle-ts': String(ts || ''),
+        },
+        body: JSON.stringify({ action: 'cashout', playerAddress: pid, wagerLamports: Number(wagerLamports) || 0 }),
+        signal: AbortSignal.timeout(30000),
+      });
+      const result = await resp.json().catch(() => ({}));
+      if (resp.ok && !result.error) {
+        // Paid — tell other players this player left voluntarily
+        socket.to(lobbyId).emit('spectate', { id: pid });
+        socket.emit('cashout-result', { ok: true, sig: result.sig, playerCut: result.playerCut, creatorCut: result.creatorCut, confirmed: result.confirmed });
+      } else {
+        // Settle rejected (dead flag, empty escrow, etc.) — don't restore; wager was already gone
+        socket.emit('cashout-result', { error: result.error || 'Cashout failed — contact support' });
+      }
+    } catch (e) {
+      // Network/timeout — restore player so they can retry
+      p.alive = true;
+      console.warn('[cashout] settle call error:', e.message);
+      socket.emit('cashout-result', { error: 'Connection error — press SPACE to retry' });
+    }
+  });
+
   // ── Voice chat signaling relay ────────────────────────────────
   socket.on('voice-signal', ({ toPid, type, sdp, candidate }) => {
     socket.to(lobbyId).emit('voice-signal', { from: pid, toPid, type, sdp, candidate });
