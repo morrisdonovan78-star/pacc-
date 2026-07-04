@@ -502,7 +502,7 @@ const FOOD_TARGET  = 95;    // 95 pebbles on map (30% fewer, was 135)
 const FOOD_GROW    = 2;     // sections added per food orb
 const MIN_SECTIONS = 8;     // die below this
 const BOOST_MIN    = 12;    // boost stops draining below this length
-const INIT_SECTIONS= 24;    // starting section count
+const INIT_SECTIONS= 17;    // starting section count (join length)
 const MAX_SECTIONS = 300;   // absolute hard cap; effective cap = floor(usd*70) per paid lobby
 const MAX_TURN     = 0.274; // rad/tick
 const BOOST_DRAIN  = 8;     // ticks between boost drain events
@@ -2065,10 +2065,15 @@ function snakeTick(){
     // can't boost at or below starting length
     if(snake.boost&&snake.numSections<=BOOST_MIN)snake.boost=false;
 
-    // Grow: cap = max(70, floor(usd*70)); scales with earned wager food; 70 base for free/bots
+    // Grow: cap by wager — join at 17, +30 sections per entry-wager carried above entry (so
+    // double the entry wager => cap 70). Free/no-wager => 70. Server ssGrowCap is authoritative;
+    // this predicts the local player only (remote snakes are server-driven, no client clamp).
     if(snake.growQueue>0){
-      const _uv=snake.id===myPid?_myUsd:(snake.usd||0);
-      const _cap=Math.max(70,Math.min(MAX_SECTIONS,Math.floor(_uv*70)));
+      let _cap;
+      if(snake.id===myPid){
+        const _base=ST.lobbyUsd||0;
+        _cap=_base>0?Math.max(40,Math.min(MAX_SECTIONS,Math.round(40+30*((_myUsd||0)/_base-1)))):70;
+      }else{ _cap=MAX_SECTIONS; }
       snake.growQueue--;
       snake.numSections=Math.min(_cap,snake.numSections+1);
     }

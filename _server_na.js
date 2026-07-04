@@ -178,7 +178,7 @@ const SS_FOOD_GROW     = 2;       // client FOOD_GROW
 const SS_BOOST_MIN     = 12;      // client BOOST_MIN
 const SS_BOOST_DRAIN_A = 3.0;    // client BOOST_DRAIN_AMT
 const SS_BOOST_DRAIN_T = 8;      // client BOOST_DRAIN
-const SS_INIT_NS       = 24;     // client INIT_SECTIONS
+const SS_INIT_NS       = 17;     // client INIT_SECTIONS (join length)
 const SS_MIN_NS        = 8;      // client MIN_SECTIONS
 const SS_MAX_NS        = 300;    // client MAX_SECTIONS
 
@@ -322,9 +322,13 @@ function ssSpawnKillFood(sg, sn) {
   const orbs = Math.max(2, Math.min(30, Math.round(ns / 4))); // ~1 orb per 4 length, hard cap 30
   const wPerOrb = (sn.usd || 0) / orbs;
   const EDGE = SS_ARENA_R - 30;    // keep every orb just inside the border, never beyond it
-  const step = path.length / orbs; // evenly spaced along the body from head to tail
+  // Only spread across the REAL body (head..tail = ns*SS_SEG_STEP path points); `path` is a
+  // long buffer that trails far behind the tail, so using its full length dropped food way
+  // behind the snake. Clamp to the actual body span.
+  const bodyLen = Math.max(1, Math.min(path.length, (sn.ns || SS_MIN_NS) * SS_SEG_STEP));
+  const step = bodyLen / orbs;     // evenly spaced along the body from head to tail
   for (let c = 0; c < orbs; c++) {
-    const p = path[Math.min(path.length - 1, Math.floor(c * step))];
+    const p = path[Math.min(bodyLen - 1, Math.floor(c * step))];
     let x = p.x + (Math.random() - 0.5) * 8; // small jitter so orbs don't perfectly overlap
     let y = p.y + (Math.random() - 0.5) * 8;
     const d = Math.sqrt(x * x + y * y);
@@ -446,7 +450,7 @@ function ssHandleInput(lid, pid, d, io) {
     // First input OR dead snake rejoin (2s cooldown prevents revival from in-flight packets)
     sn = ssSpawnSnake(pid, (sn && sn.color) || d.color || '#FFD700', (sn && sn.name) || d.name || 'SNAKE', sg);
     if (d.ns && d.ns > SS_INIT_NS) { sn.ns = Math.min(SS_MAX_NS, d.ns); sn.size = ssSizeFromNs(sn.ns); sn.thick = ssThick(sn.ns); }
-    if (d.usd != null && typeof d.usd === 'number' && sn.usd === 0) sn.usd = Math.max(0, d.usd);
+    if (d.usd != null && typeof d.usd === 'number' && sn.usd === 0) { sn.usd = Math.max(0, d.usd); sn.baseUsd = sn.usd; }
     sg.snakes.set(pid, sn);
     if (!sg.food || !sg.food.length) ssReconcileFood(sg);
     if (!sg.tickInterval) {
@@ -493,6 +497,15 @@ function ssPlayerLeft(lid, pid, io) {
   }, DISCONNECT_GRACE_MS);
 }
 
+// Growth cap by wager: snakes join at ns 17 (SS_INIT_NS) and grow +30 sections per full
+// entry-wager carried above the entry — so carrying double the entry wager => cap 70.
+// Free/no-wager snakes (baseUsd 0) keep a fixed 70 cap. Authoritative; client mirrors it.
+function ssGrowCap(sn) {
+  const base = sn.baseUsd || 0, usd = sn.usd || 0;
+  if (base <= 0) return 70;
+  return Math.max(40, Math.min(SS_MAX_NS, Math.round(40 + 30 * (usd / base - 1))));
+}
+
 // ── MoneySlither stepMovement port — ONE 60 Hz sub-step (verbatim from client.js) ──
 // Continuous `size` is authoritative; ns/thickness derived. Chord-based path sampling.
 function ssStepMovement(sn, sg, lid, io, now) {
@@ -530,8 +543,10 @@ function ssStepMovement(sn, sg, lid, io, now) {
   const maxPath = Math.max(800, sn.ns * SS_SEG_STEP + 200);
   while (sn.path.length > maxPath) sn.path.pop();
 
-  // Growth: drain growQueue (each unit = +1 segment worth of size) — preserves food economy
-  while ((sn.growQueue || 0) > 0 && sn.ns < SS_MAX_NS) {
+  // Growth: drain growQueue (each unit = +1 segment worth of size) — preserves food economy.
+  // Capped by wager (ssGrowCap): join at 17, +30 sections per entry-wager carried above entry.
+  const _growCap = ssGrowCap(sn);
+  while ((sn.growQueue || 0) > 0 && sn.ns < _growCap) {
     sn.growQueue--;
     sn.size += (ssSizeFromNs(sn.ns + 1) - ssSizeFromNs(sn.ns));
     sn.ns = ssSegForSize(sn.size);
