@@ -314,17 +314,21 @@ function ssReconcileFood(sg) {
 function ssSpawnKillFood(sg, sn) {
   if (!sn) return;
   const head = (sn.path && sn.path.length) ? sn.path[0] : { x: sn.x, y: sn.y };
-  // Drop kill food at the death point (head), tightly clustered, giving HALF the length
-  // of the old drop. Old: min(10,floor(ns/3)+2) wager orbs strung along the WHOLE body
-  // (±40) plus ~50% filler orbs (±50) => ~3 sections/step, spread across the snake.
-  // New: wager orbs only, count = 0.75x old (0.75*FOOD_GROW = half of the old ~3/step),
-  // all spawned in a small cluster around where the snake actually died.
-  const oldOrbs = Math.min(10, Math.floor(sn.ns / 3) + 2);
-  const orbs = Math.max(2, Math.round(oldOrbs * 0.75));
+  // Drop the victim's wager as money orbs in a tight pile at the EXACT death point.
+  // MORE orbs the bigger the snake was (scales with ns). Every orb is clamped to just
+  // inside the arena border, so kill food NEVER lands outside the ring — including when a
+  // snake dies right against the edge.
+  const ns = sn.ns || SS_MIN_NS;
+  const orbs = Math.max(4, Math.min(48, Math.round(ns / 2)));
   const wPerOrb = (sn.usd || 0) / orbs;
-  const R = 22; // tight scatter radius at the death point (was strung along full body length)
+  const R = 12;                    // tight jitter -> reads as a pile at the death spot
+  const EDGE = SS_ARENA_R - 30;    // keep every orb just inside the border, never beyond it
   for (let c = 0; c < orbs; c++) {
-    sg.food.push(ssMakeFood(head.x + (Math.random() - 0.5) * R, head.y + (Math.random() - 0.5) * R, 1, wPerOrb));
+    let x = head.x + (Math.random() - 0.5) * R;
+    let y = head.y + (Math.random() - 0.5) * R;
+    const d = Math.sqrt(x * x + y * y);
+    if (d > EDGE) { const s = EDGE / d; x *= s; y *= s; }
+    sg.food.push(ssMakeFood(x, y, 1, wPerOrb));
   }
 }
 
