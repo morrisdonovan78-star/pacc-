@@ -2473,11 +2473,19 @@ function startGuestLoop(){
   _guestInputLoop=setInterval(()=>{
     if(!SG||SG.over||!_sio||isSpectating||_localDead)return;
     const my=SG.snakes.get(myPid);
-    if(!my||!my.alive)return;
+    if(!my||!my.alive||!my.path||!my.path.length)return;
     const canBoost=(_mouseBoost||_padBoost)&&my.numSections>BOOST_MIN;
-    my.boost=canBoost;
-    const h=my.path&&my.path[0]||{x:0,y:0};
-    _sio.emit('ssin',{id:myPid,angle:my.angle,circle:!!_autoCircle,
+    // NOTE: don't also set my.boost here — in real games it's now a render-only field owned by
+    // the server-interpolation loop (rafDraw); writing it from this separate 33Hz timer would
+    // race against that and flicker the boost flame. _ssPredictLocal sets it itself when the
+    // old prediction path is active (window._OWN_PRED_ON / practice mode).
+    const h=my.path[0];
+    // Send the RAW mouse-aim angle, not my.angle. The server does its own turn-rate-limited
+    // integration toward whatever angle it receives (ssStepMovement/_server_na.js) — it was
+    // never expecting an already-smoothed heading. Decoupling this from my.angle (now a
+    // render-only value once own-snake rendering follows server truth, see rafDraw) means
+    // steering responsiveness is unaffected by how the snake is drawn.
+    _sio.emit('ssin',{id:myPid,angle:targetAngleToMouse(my),circle:!!_autoCircle,
       boost:canBoost,x:Math.round(h.x),y:Math.round(h.y),ns:my.numSections||26,
       color:my.color||colorFromId(myPid),usd:_myUsd||0,seed:1});
   },33); // match server tick rate
@@ -3181,8 +3189,17 @@ function rafDraw(ts){
 
   if(_pendingState){applyRemoteState(_pendingState);_pendingState=null;}
 
-  // Guest: MoneySlither-exact 60 Hz sub-step prediction between server updates
-  if(!isHost&&SG&&!SG.over&&!_localDead){
+  // Guest: MoneySlither-exact 60 Hz sub-step prediction between server updates.
+  // TEMP-DEFAULT-OFF for real (non-practice) games: local prediction is a SEPARATE position
+  // source from the server feed, and it can drift from server truth while circling (proven by
+  // a real death capture: healthy 23ms ping + 30ms-fresh remote buffer, yet a 100px+ visible gap
+  // on the local screen a few frames before dying) — the drift was in the OWN snake's predicted
+  // position, not the remote render. Own snake now renders from the SAME server-interpolation
+  // pipeline as everyone else by default (see the SG.snakes.forEach loop below) so what's drawn
+  // always corresponds to a real server tick. Costs a small (~one-way-ping + _INTERP_DELAY)
+  // steering/boost response lag. window._OWN_PRED_ON=true reverts to the old local-prediction
+  // feel if this turns out worse. Practice mode (no real server feed) always uses prediction.
+  if(!isHost&&SG&&!SG.over&&!_localDead&&(window._OWN_PRED_ON||_isPractice)){
     const my=SG.snakes.get(myPid);
     if(my&&my.alive&&my.path.length){
       const dt=Math.min(_guestPredTs?ts-_guestPredTs:TICK_MS,1000); // pass real elapsed; _ssPredictLocal caps catch-up at 5 substeps/frame
@@ -3197,7 +3214,7 @@ function rafDraw(ts){
   if(SG&&!SG.over){
     const _renderT=Date.now()-(typeof window._INTERP_DELAY==='number'?window._INTERP_DELAY:_INTERP_DELAY);
     SG.snakes.forEach(s=>{
-      if(s.id===myPid||!s.alive)return;
+      if((s.id===myPid&&(window._OWN_PRED_ON||_isPractice))||!s.alive)return;
       const buf=_ssBuf.get(s.id);
       s._exHead=null; // reset each frame; only the interpolation branch (extrap on) sets it
       // JOIN seed: adopt the server's authoritative body ONCE, so buf<2 branches draw a full curved
@@ -3329,8 +3346,9 @@ function rafDraw(ts){
     }
   }
 
-  // Host: MoneySlither-exact 60 Hz sub-step prediction for own snake
-  if(isHost&&SG&&!SG.over&&!_localDead){
+  // Host: MoneySlither-exact 60 Hz sub-step prediction for own snake (see guest block above
+  // for why this is gated off by default in real games — window._OWN_PRED_ON reverts it).
+  if(isHost&&SG&&!SG.over&&!_localDead&&(window._OWN_PRED_ON||_isPractice)){
     const my=SG.snakes.get(myPid);
     if(my&&my.alive&&my.path.length){
       const dt=Math.min(_hostPredTs?ts-_hostPredTs:TICK_MS,80);
