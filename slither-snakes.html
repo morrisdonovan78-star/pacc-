@@ -498,7 +498,7 @@ const BASE_RADIUS        = 8;    // minimum snake radius
 const RADIUS_GROWTH      = 0.6;  // exponent for radius curve
 const RADIUS_SCALE       = 0.8;  // multiplier for radius curve
 // radius = BASE_RADIUS + size^RADIUS_GROWTH * RADIUS_SCALE
-const FOOD_TARGET  = 135;   // 135 pebbles on map
+const FOOD_TARGET  = 95;    // 95 pebbles on map (30% fewer, was 135)
 const FOOD_GROW    = 2;     // sections added per food orb
 const MIN_SECTIONS = 8;     // die below this
 const BOOST_MIN    = 12;    // boost stops draining below this length
@@ -506,7 +506,7 @@ const INIT_SECTIONS= 24;    // starting section count
 const MAX_SECTIONS = 300;   // absolute hard cap; effective cap = floor(usd*70) per paid lobby
 const MAX_TURN     = 0.274; // rad/tick
 const BOOST_DRAIN  = 8;     // ticks between boost drain events
-const BOOST_DRAIN_AMT = 3.0;  // drain accumulator per tick = AMT/DRAIN = 0.375 sections/tick (~20% slower than before)
+const BOOST_DRAIN_AMT = 4.5;  // drain accumulator per tick = AMT/DRAIN = 0.5625 sections/tick (50% faster than 3.0)
 const SHED_NOEAT_MS = 4000;  // a snake can't re-eat its own boost-shed trail pebbles for this long (anti circle-farm)
 // moneyslither.com combat hitbox constants (mirrors server _server_na.js)
 const SS_HB   = 0.95;   // HITBOX_BASE

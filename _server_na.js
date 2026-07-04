@@ -173,7 +173,7 @@ const SS_MIN_SIZE = 40;
 // Server-authoritative physics constants (must match client exactly)
 const SS_ARENA_R       = 3000;
 const SS_MAX_TURN      = 0.274;   // rad/tick — client MAX_TURN
-const SS_FOOD_TARGET   = 135;     // client FOOD_TARGET
+const SS_FOOD_TARGET   = 95;      // client FOOD_TARGET (30% fewer pebbles, was 135)
 const SS_FOOD_GROW     = 2;       // client FOOD_GROW
 const SS_BOOST_MIN     = 12;      // client BOOST_MIN
 const SS_BOOST_DRAIN_A = 3.0;    // client BOOST_DRAIN_AMT
@@ -191,7 +191,7 @@ const SS_BASE_SPEED    = 288;      // px/s
 const SS_BOOST_SPEED   = 630;      // px/s
 const SS_BOOST_ACCEL   = 4.5;      // boostAmount ramp /s
 const SS_TURN_PER_SEC  = 8.1;      // rad/s
-const SS_BOOST_BURN    = 0.108;    // size burn fraction /s while boosting
+const SS_BOOST_BURN    = 0.162;    // size burn fraction /s while boosting (50% faster than 0.108)
 const SS_START_SIZE    = 100;      // size for a fresh snake (→ ns 26)
 function ssSegForSize(size){ const sz=Math.max(SS_MIN_SIZE, Number(size)||SS_MIN_SIZE); let seg = 8 + (sz-40)*(26-8)/(100-40); if(sz>100) seg = 26 + (sz-100)*0.08; return Math.max(8, Math.round(seg)); }
 function ssSizeFromNs(n){ n=Math.max(SS_MIN_NS, n); return n<=26 ? 40 + (n-8)*(100-40)/(26-8) : 100 + (n-26)/0.08; }
