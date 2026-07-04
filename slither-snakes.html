@@ -506,7 +506,7 @@ const INIT_SECTIONS= 24;    // starting section count
 const MAX_SECTIONS = 300;   // absolute hard cap; effective cap = floor(usd*70) per paid lobby
 const MAX_TURN     = 0.274; // rad/tick
 const BOOST_DRAIN  = 8;     // ticks between boost drain events
-const BOOST_DRAIN_AMT = 4.21875;  // drain accumulator per tick = AMT/DRAIN = 0.527 sections/tick (25% slower than 5.625)
+const BOOST_DRAIN_AMT = 5.2734375;  // drain accumulator per tick = AMT/DRAIN = 0.659 sections/tick (25% faster than 4.21875)
 const SHED_NOEAT_MS = 4000;  // a snake can't re-eat its own boost-shed trail pebbles for this long (anti circle-farm)
 // moneyslither.com combat hitbox constants (mirrors server _server_na.js)
 const SS_HB   = 0.95;   // HITBOX_BASE
@@ -1680,20 +1680,17 @@ function makeFood(){
 }
 // Respawn food in whichever pie-sector has the fewest pebbles so density stays even across the map
 function makeFoodLowDensity(){
-  const SECTORS=8;
-  const counts=new Array(SECTORS).fill(0);
-  if(SG&&SG.food){
-    SG.food.forEach(f=>{
-      const ang=(Math.atan2(f.y,f.x)+Math.PI*2)%(Math.PI*2);
-      counts[Math.floor(ang/(Math.PI*2/SECTORS))%SECTORS]++;
-    });
+  // best-candidate: farthest of K random spots from existing food -> even spread, no clumps
+  const food=(SG&&SG.food)?SG.food:[];
+  let bx=0,by=0,bd=-1;
+  for(let k=0;k<12;k++){
+    const a=Math.random()*Math.PI*2, r=Math.sqrt(Math.random())*ARENA_R*0.97;
+    const x=Math.cos(a)*r, y=Math.sin(a)*r;
+    let nd=Infinity;
+    for(let j=0;j<food.length;j++){const dx=food[j].x-x,dy=food[j].y-y,d2=dx*dx+dy*dy;if(d2<nd)nd=d2;}
+    if(nd>bd){bd=nd;bx=x;by=y;}
   }
-  const minS=counts.indexOf(Math.min(...counts));
-  const aStart=minS*(Math.PI*2/SECTORS);
-  const a=aStart+Math.random()*(Math.PI*2/SECTORS);
-  const rr=Math.sqrt(Math.random())*ARENA_R*0.97;
-  const ci=Math.floor(Math.random()*FOOD_COLORS.length);
-  return{x:Math.cos(a)*rr,y:Math.sin(a)*rr,ci,size:4+Math.random()*5};
+  return{x:bx,y:by,ci:Math.floor(Math.random()*FOOD_COLORS.length),size:4+Math.random()*5};
 }
 // Deterministic PRNG (mulberry32 + FNV-1a hash) so EVERY host of a given room builds the
 // IDENTICAL starting pebble layout. Rejoining — or a new host taking over — no longer rolls
@@ -1705,8 +1702,17 @@ function seedFoodLayout(){
   const rnd=_mulberry32(_hashStr('pebbles:'+(pkRoomId||'')));
   const out=[];
   for(let i=0;i<FOOD_TARGET;i++){
-    const a=rnd()*Math.PI*2, r=Math.sqrt(rnd())*ARENA_R*0.97;
-    out.push({x:Math.cos(a)*r,y:Math.sin(a)*r,ci:Math.floor(rnd()*FOOD_COLORS.length),size:4+rnd()*5});
+    // best-candidate: farthest of K seeded spots from existing pebbles -> even blue-noise
+    // (still deterministic per room via the seeded rng, so host migration stays consistent)
+    let bx=0,by=0,bd=-1;
+    for(let k=0;k<12;k++){
+      const a=rnd()*Math.PI*2, r=Math.sqrt(rnd())*ARENA_R*0.97;
+      const x=Math.cos(a)*r, y=Math.sin(a)*r;
+      let nd=Infinity;
+      for(let j=0;j<out.length;j++){const dx=out[j].x-x,dy=out[j].y-y,d2=dx*dx+dy*dy;if(d2<nd)nd=d2;}
+      if(nd>bd){bd=nd;bx=x;by=y;}
+    }
+    out.push({x:bx,y:by,ci:Math.floor(rnd()*FOOD_COLORS.length),size:4+rnd()*5});
   }
   return out;
 }
@@ -2242,7 +2248,7 @@ function spawnFoodFromSnake(snake){
   // pile. MORE orbs the bigger the snake, every orb clamped just inside the border. Matches
   // server ssSpawnKillFood.
   const ns=snake.numSections||bPts.length;
-  const orbs=Math.max(4,Math.min(48,Math.round(ns/2)));
+  const orbs=Math.max(2,Math.min(30,Math.round(ns/4))); // ~1 orb per 4 length, hard cap 30
   const w=totalUsd/orbs;
   const EDGE=ARENA_R-30;
   const step=bPts.length/orbs;

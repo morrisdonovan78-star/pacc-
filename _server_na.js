@@ -191,7 +191,7 @@ const SS_BASE_SPEED    = 288;      // px/s
 const SS_BOOST_SPEED   = 630;      // px/s
 const SS_BOOST_ACCEL   = 4.5;      // boostAmount ramp /s
 const SS_TURN_PER_SEC  = 8.1;      // rad/s
-const SS_BOOST_BURN    = 0.151875; // size burn fraction /s while boosting (25% slower than 0.2025)
+const SS_BOOST_BURN    = 0.18984375; // size burn fraction /s while boosting (25% faster than 0.151875)
 const SS_START_SIZE    = 100;      // size for a fresh snake (→ ns 26)
 function ssSegForSize(size){ const sz=Math.max(SS_MIN_SIZE, Number(size)||SS_MIN_SIZE); let seg = 8 + (sz-40)*(26-8)/(100-40); if(sz>100) seg = 26 + (sz-100)*0.08; return Math.max(8, Math.round(seg)); }
 function ssSizeFromNs(n){ n=Math.max(SS_MIN_NS, n); return n<=26 ? 40 + (n-8)*(100-40)/(26-8) : 100 + (n-26)/0.08; }
@@ -319,7 +319,7 @@ function ssSpawnKillFood(sg, sn) {
   // Every orb is clamped to just inside the arena border so kill food never lands outside
   // the ring - including when a snake dies right against the edge.
   const ns = sn.ns || SS_MIN_NS;
-  const orbs = Math.max(4, Math.min(48, Math.round(ns / 2)));
+  const orbs = Math.max(2, Math.min(30, Math.round(ns / 4))); // ~1 orb per 4 length, hard cap 30
   const wPerOrb = (sn.usd || 0) / orbs;
   const EDGE = SS_ARENA_R - 30;    // keep every orb just inside the border, never beyond it
   const step = path.length / orbs; // evenly spaced along the body from head to tail
