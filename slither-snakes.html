@@ -1496,6 +1496,25 @@ async function pkConnect(roomId,gameToken){
         if(!s.alive&&_snakeDeathTs.has(sd.id)&&Date.now()-(_snakeDeathTs.get(sd.id)||0)<2000){_ssBuf.delete(sd.id);return;}
         s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;
         s.numSections=sd.ns||s.numSections;s.color=sd.color||s.color;s.name=sd.name||s.name;
+        // ── Option A body-sync: adopt the server's authoritative render-trail (rk=full keyframe,
+        // rd=per-tick head delta; flat [x0,y0,...] head-first) so the DRAWN body equals the server
+        // body for EVERY client at any length — kills long-snake tail drift on join. REMOTE snakes
+        // only (own snake stays on local prediction → no camera wobble). Fields are absent unless the
+        // server flag SS_BODY_SYNC is on, so _rt stays null and rendering falls back to legacy.
+        if(sd.id!==myPid&&!window._BODYSYNC_OFF){
+          if(sd.rk&&sd.rk.length>=4){
+            const _t=new Array(sd.rk.length>>1);
+            for(let _i=0,_j=0;_i<sd.rk.length;_i+=2,_j++)_t[_j]={x:sd.rk[_i],y:sd.rk[_i+1]};
+            s._rt=_t;s._rtT=pktT;
+          }else if(sd.rd&&sd.rd.length>=2&&s._rt&&s._rt.length){
+            // rd is oldest→newest; unshift each so newest lands at head[0], mirroring server _rt order
+            for(let _i=0;_i<sd.rd.length;_i+=2)s._rt.unshift({x:sd.rd[_i],y:sd.rd[_i+1]});
+            // Bound the trail (deltas between 5s keyframes can't grow it unbounded). 6px = SS_RT_DIST.
+            const _cap=Math.ceil((s.numSections||sd.ns||26)*sectionRadius(s)*SEGMENT_SPACING/6)+24;
+            if(s._rt.length>_cap)s._rt.length=_cap;
+            s._rtT=pktT;
+          }
+        }
         // Own snake: reconcile metadata + gently correct position if large drift
         if(sd.id===myPid){
           const own=SG.snakes.get(myPid);
@@ -1532,7 +1551,7 @@ async function pkConnect(roomId,gameToken){
         if(id===myPid||!s.alive)return;
         if(!seen.has(id)){
           s._missedPkts=(s._missedPkts||0)+1;
-          if(s._missedPkts>=2){s.alive=false;s.path=[];_ssBuf.delete(id);s._missedPkts=0;}
+          if(s._missedPkts>=2){s.alive=false;s.path=[];s._rt=null;_ssBuf.delete(id);s._missedPkts=0;}
         }else{s._missedPkts=0;}
       });
     });
@@ -3184,7 +3203,7 @@ function rafDraw(ts){
       if(buf&&buf.length>=2){
         // ── Snapshot interpolation (server-authoritative live game) ──────────────
         const latest=buf[buf.length-1];
-        if(Date.now()-latest.t>800){s.alive=false;s.path=[];_ssBuf.delete(s.id);return;}
+        if(Date.now()-latest.t>800){s.alive=false;s.path=[];s._rt=null;_ssBuf.delete(s.id);return;}
         // Find two snapshots bracketing _renderT
         let a=buf[0],b=latest;
         for(let bi=1;bi<buf.length;bi++){if(buf[bi].t>=_renderT){a=buf[bi-1];b=buf[bi];break;}}
@@ -3211,7 +3230,16 @@ function rafDraw(ts){
         // so every client reconstructs identical body geometry. Extrapolation is applied to the
         // transient rendered head (s._exHead) below and is NEVER written into s.path, so
         // trimPath / getBodyPoints / collision / body generation stay on the interpolated path.
-        if(!s.path||!s.path.length){
+        if(s._rt&&s._rt.length>=2&&!window._BODYSYNC_OFF&&(Date.now()-(s._rtT||0)<1000)){
+          // ── Option A body-sync: DRAW the server's authoritative trail, rigidly slid so its head
+          // sits on the interpolated head (ix,iy). Body SHAPE is server truth (identical for every
+          // client at any length); the small per-frame slide (≤ one interp-delay of motion) keeps
+          // head motion smooth. getBodyPoints/trimPath/drawSnake all read s.path unchanged, so the
+          // drawn body now equals the server body. Remote-only, so no camera coupling / wobble.
+          const _h=s._rt[0],_dx=ix-_h.x,_dy=iy-_h.y,_n=s._rt.length,_p=new Array(_n);
+          for(let _i=0;_i<_n;_i++)_p[_i]={x:s._rt[_i].x+_dx,y:s._rt[_i].y+_dy};
+          s.path=_p;trimPath(s);
+        }else if(!s.path||!s.path.length){
           const _r=sectionRadius(s);
           const _pLen=Math.ceil(s.numSections*_r*SEGMENT_SPACING*2/SNAKE_SPD)+10;
           s.path=[];
