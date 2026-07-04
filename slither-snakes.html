@@ -572,12 +572,13 @@ let _forceFoodSend=false;
 let _firstRemoteSync=false;
 const _ssBuf=new Map(); // id → [{x,y,angle,ns,boost,score,usd,t}] — server snapshot buffer
 const _ssSeedBodies=new Map(); // id → [{x,y}] one-time authoritative body seed from server 'ss-bodies' on join/rejoin
-const _INTERP_DELAY=55; // ms: render remotes this far behind the latest snapshot. Live-tunable via window._INTERP_DELAY. Kept LOW on purpose: a bigger delay renders other players further behind their true position, which WIDENS the render-vs-collision gap (you die into a body that's drawn lagging). 55ms ≈ 1.7 packets — just enough to interpolate smoothly (with head-extrapolation off) without worsening collision fairness.
-// Was 100ms (≈3 snapshots @30Hz). Halved to 50ms to cut the render lag that draws remote
-// snakes ~30–63px behind their server-authoritative collision position (Category A: server
-// collides but client renders the body outside the zone). Still bracketed by the 12-snapshot
-// buffer under this game's ~8–12ms direct-connection latency; the existing frac-cap(1.5)
-// extrapolation covers rare packet-loss underruns → no rubber-band, no desync.
+const _INTERP_DELAY=28; // ms: render remotes this far behind the latest snapshot. Live-tunable via window._INTERP_DELAY. Kept LOW on purpose: a bigger delay renders other players further behind their true position, which WIDENS the render-vs-collision gap (you die into a body that's drawn lagging). 28ms ≈ 1.7 packets at the server's now-60Hz broadcast (server mid-tick broadcast, 2026-07-04) — same packet-multiple margin as the old 55ms/30Hz value, but half the absolute lag since packets now arrive every ~16.5ms instead of ~33ms.
+// History: was 100ms (≈3 snapshots @30Hz) → 50ms → 55ms while broadcast stayed 30Hz (each step
+// traded smoothness for less collision-fairness lag). 2026-07-04: server now broadcasts every
+// sub-step (60Hz) instead of once per tick, so the SOURCE lag is halved — this constant follows
+// it down proportionally. Still bracketed by the 12-snapshot buffer under this game's ~8–12ms
+// direct-connection latency; the existing frac-cap(1.5) extrapolation covers rare packet-loss
+// underruns → no rubber-band, no desync.
 let _ssRtt=null; // rolling RTT (ms) from ss-ping/ss-pong, for death-replay network timing
 // Local-head server-reconciliation gain: each 30Hz snapshot, nudge own drawn head this fraction
 // toward the authoritative head (advanced to ~present so we don't inject lag). Was effectively 0
