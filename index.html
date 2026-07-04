@@ -1967,8 +1967,12 @@ let _joiningLobby=false;
 let _lobbyIsPaid=false;
 async function joinLobby(usd){
   if(!ST.address){ alert('Log in first'); return; }
-  // If a previous join was abandoned (B-press during connect), _sio is null but flag may still be set
-  if(_joiningLobby && !_sio) _joiningLobby=false;
+  // NOTE: do NOT auto-clear _joiningLobby just because _sio is still null — for paid
+  // lobbies _sio isn't created until AFTER wallet signing + on-chain confirm + recordWager,
+  // which can take several seconds. A fast double-click during that window used to slip
+  // through here and fire a second full payment+join flow (double charge risk). Genuine
+  // abandonment (B-press / back nav) already resets the flag via pkDisconnect(), and
+  // server errors/timeouts reset it in their catch blocks — no heuristic needed here.
   if(_joiningLobby){ return; }
   // Create AudioContext NOW while we're inside a user gesture — join/cashout sounds need it
   // before launchGame() is ever called (e.g. join ping fires during matchmaking)

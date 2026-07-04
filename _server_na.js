@@ -1,6 +1,7 @@
 'use strict';
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -37,7 +38,37 @@ function ssSaveReplay(lid, victim, killer, diag) {
 
 const PORT = process.env.PORT || 3001;
 const GAME_SECRET = (process.env.GAME_SECRET || '').trim();
+const REGION = (process.env.REGION || 'NA').trim();
 const _usedGameTokens = new Set(); // server-level: survives room deletion, never cleared on disconnect
+
+// ── Discord paid-lobby-join notifications ──────────────────────────────────
+// Two separate channels: legacy `paid-lobby-*` ids are Pac-Man, `ss-paid-lobby-*` are Slither Snakes.
+const DISCORD_WEBHOOK_PACMAN = (process.env.DISCORD_WEBHOOK_PACMAN || '').trim();
+const DISCORD_WEBHOOK_SLITHER = (process.env.DISCORD_WEBHOOK_SLITHER || '').trim();
+function postDiscord(webhookUrl, content) {
+  if (!webhookUrl) return;
+  try {
+    const body = JSON.stringify({ content, allowed_mentions: { parse: ['everyone'] } });
+    const url = new URL(webhookUrl);
+    const req = https.request({
+      hostname: url.hostname, path: url.pathname + url.search, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    }, res => res.resume());
+    req.on('error', e => console.warn('[DISCORD] notify failed: ' + e.message));
+    req.write(body);
+    req.end();
+  } catch (e) { console.warn('[DISCORD] notify error: ' + e.message); }
+}
+function notifyPaidJoin(lobbyId, name) {
+  const isSlither = lobbyId.startsWith('ss-');
+  const webhookUrl = isSlither ? DISCORD_WEBHOOK_SLITHER : DISCORD_WEBHOOK_PACMAN;
+  if (!webhookUrl) return;
+  const game = isSlither ? `Slither Snakes (${REGION})` : `Pac-Man (${REGION})`;
+  const safeName = String(name || 'A player').replace(/@/g, '@​').slice(0, 32);
+  const usdMatch = lobbyId.match(/-(\d+)$/); // lobby id encodes the fixed USD tier, e.g. paid-lobby-25 -> $25
+  const wagerTxt = usdMatch ? ` — wagered $${usdMatch[1]}` : '';
+  postDiscord(webhookUrl, `@everyone **${safeName}** joined **${game}** paid lobby \`${lobbyId}\`${wagerTxt}`);
+}
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 
 // ── Game constants ────────────────────────────────────────────────────────────
@@ -1258,6 +1289,7 @@ io.on('connection', socket => {
         }
       }
       _usedGameTokens.add(gameToken);
+      notifyPaidJoin(lobbyId, name);
     }
   }
 
@@ -1522,6 +1554,11 @@ io.on('connection', socket => {
   // ── Disconnect ────────────────────────────────────────────────
   socket.on('disconnect', () => {
     const dp = room.players.get(pid);
+    // Stale-socket guard: if a newer connection for this pid has already taken over
+    // (e.g. a duplicate/racing join reconnected before this older socket's disconnect
+    // event arrived), dp.socketId no longer matches this socket. Acting on it here would
+    // freeze/delete the CURRENT live session out from under the player. No-op instead.
+    if (dp && dp.socketId !== socket.id) return;
     // Grace period: a brief network blip / heartbeat timeout shouldn't wipe the player.
     // Keep them frozen + non-collidable so they resume the SAME spot and score on
     // reconnect, instead of vanishing (looked like a cashout/kill) and respawning fresh.
