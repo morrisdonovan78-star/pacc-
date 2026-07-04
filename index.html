@@ -309,7 +309,6 @@ body{touch-action:manipulation;}
       <div style="flex:1;min-width:0;text-align:left;">
         <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);letter-spacing:1px;margin-bottom:3px;">WALLET</div>
         <div class="w-addr" id="h-addr" style="font-size:7px;">--</div>
-        <div style="font-size:9px;color:var(--muted);margin-top:2px;" id="h-email"></div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
         <div style="text-align:right;">
@@ -5737,10 +5736,9 @@ async function instantCashout(){
 
 // openGameCashout / closeGameCashout / doGameCashout removed — SPACE calls instantCashout() directly
 
+let _withdrawInProgress=false;
 async function doCashout(){
   if(_kickedOut) return;
-  const amt=parseFloat(document.getElementById('co-amt').value);
-  const dest=(document.getElementById('co-dest').value||'').trim();
   const btn=document.getElementById('co-send-btn');
   const res=document.getElementById('co-result');
 
@@ -5752,13 +5750,21 @@ async function doCashout(){
     res.innerHTML=msg;
   }
 
-  if(!amt||amt<=0){ showRes('Enter an amount to withdraw.',false); return; }
-  if(!dest){ showRes('Enter a destination wallet address.',false); return; }
+  // Guard against double-clicks — disable immediately before any async work
+  if(_withdrawInProgress){ showRes('Withdraw already in progress — please wait.',false); return; }
+  _withdrawInProgress=true;
+  btn.disabled=true; btn.textContent='SENDING…';
+
+  const amt=parseFloat(document.getElementById('co-amt').value);
+  const dest=(document.getElementById('co-dest').value||'').trim();
+
+  if(!amt||amt<=0){ showRes('Enter an amount to withdraw.',false); _withdrawInProgress=false; btn.disabled=false; btn.textContent='💸 WITHDRAW'; return; }
+  if(!dest){ showRes('Enter a destination wallet address.',false); _withdrawInProgress=false; btn.disabled=false; btn.textContent='💸 WITHDRAW'; return; }
 
   let destPk;
   try{ destPk=new solanaWeb3.PublicKey(dest); }
-  catch(e){ showRes('Invalid destination address.',false); return; }
-  if(dest===ST.address){ showRes('Destination is your own game wallet — enter an external wallet (e.g. Phantom).',false); return; }
+  catch(e){ showRes('Invalid destination address.',false); _withdrawInProgress=false; btn.disabled=false; btn.textContent='💸 WITHDRAW'; return; }
+  if(dest===ST.address){ showRes('Destination is your own game wallet — enter an external wallet (e.g. Phantom).',false); _withdrawInProgress=false; btn.disabled=false; btn.textContent='💸 WITHDRAW'; return; }
 
   const txFee=5000;
   await doRefreshBal();
@@ -5780,9 +5786,8 @@ async function doCashout(){
     '→ To: '+dest.slice(0,8)+'…'+dest.slice(-8)+'\n'+
     '→ No fee — 100% to destination\n\n'+
     'This is MAINNET. Continue?'
-  )) return;
+  )){ _withdrawInProgress=false; btn.disabled=false; btn.textContent='💸 WITHDRAW'; return; }
 
-  btn.disabled=true; btn.textContent='SENDING…';
   showRes('Sending…',true);
 
   try{
@@ -5811,7 +5816,7 @@ async function doCashout(){
   }catch(e){
     showRes('Error: '+e.message,false);
   }
-  btn.disabled=false; btn.textContent='💸 WITHDRAW';
+  _withdrawInProgress=false; btn.disabled=false; btn.textContent='💸 WITHDRAW';
 }
 
 // ═══ VOICE CHAT (socket.io PCM relay — works on all networks) ════════
