@@ -3042,10 +3042,21 @@ const _MS_TURN = 8.1, _MS_BASE = 288, _MS_BOOST = 630, _MS_ACCEL = 4.5;
 function _ssPredictLocal(my, dtMs){
   if(my._ba == null) my._ba = 0;
   const boostGate = my.numSections > BOOST_MIN;
-  my._pAcc60 = (my._pAcc60 || 0) + Math.min(dtMs, 80);
+  // Accumulate the REAL elapsed time. The old cap (Math.min(dtMs,80)) DISCARDED everything past
+  // 80 ms, so any frame slower than 80 ms (a GC/render hitch) permanently dropped that much
+  // rotation. Over ~a minute of tight circling those losses pile up and the predicted head falls
+  // progressively behind the server; the head-reconciliation then has to drag path[0] across the
+  // tightly-wound loop, which knots it -> the own-screen "tail shrinks / only the head circles"
+  // bug (others, drawing from the server snapshots, never see it). Now the elapsed time is kept
+  // (clamped to 1 s only as a runaway guard for a multi-second hang) and burned down over frames.
+  my._pAcc60 = Math.min((my._pAcc60 || 0) + dtMs, 1000);
   const stepMs = 1000/60, DT = 1/60;
-  while(my._pAcc60 >= stepMs){
-    my._pAcc60 -= stepMs;
+  // Cap sub-steps PER FRAME so catch-up after a hitch spreads over a few frames instead of one
+  // big lurch; the remainder stays in _pAcc60. Normal frames need ~1-2 steps, so the spare
+  // capacity clears any backlog within a few frames. Mirrors the bounded catch-up in _bgStep.
+  let _sub = 0;
+  while(my._pAcc60 >= stepMs && _sub < 20){
+    my._pAcc60 -= stepMs; _sub++;
     if(_autoCircle){ my.angle += _MS_TURN * DT; }
     else { const d = angleDiff(targetAngleToMouse(my), my.angle); my.angle += Math.sign(d) * Math.min(Math.abs(d), _MS_TURN * DT); }
     while(my.angle >  Math.PI) my.angle -= 2*Math.PI;
@@ -3075,7 +3086,7 @@ function rafDraw(ts){
   if(!isHost&&SG&&!SG.over&&!_localDead){
     const my=SG.snakes.get(myPid);
     if(my&&my.alive&&my.path.length){
-      const dt=Math.min(_guestPredTs?ts-_guestPredTs:TICK_MS,80);
+      const dt=Math.min(_guestPredTs?ts-_guestPredTs:TICK_MS,1000); // keep real elapsed; _ssPredictLocal bounds catch-up per frame
       _guestPredTs=ts;
       _ssPredictLocal(my, dt);
     }
