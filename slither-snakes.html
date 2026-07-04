@@ -506,13 +506,13 @@ const INIT_SECTIONS= 24;    // starting section count
 const MAX_SECTIONS = 300;   // absolute hard cap; effective cap = floor(usd*70) per paid lobby
 const MAX_TURN     = 0.274; // rad/tick
 const BOOST_DRAIN  = 8;     // ticks between boost drain events
-const BOOST_DRAIN_AMT = 5.625;  // drain accumulator per tick = AMT/DRAIN = 0.703 sections/tick (25% faster than 4.5)
+const BOOST_DRAIN_AMT = 4.21875;  // drain accumulator per tick = AMT/DRAIN = 0.527 sections/tick (25% slower than 5.625)
 const SHED_NOEAT_MS = 4000;  // a snake can't re-eat its own boost-shed trail pebbles for this long (anti circle-farm)
 // moneyslither.com combat hitbox constants (mirrors server _server_na.js)
 const SS_HB   = 0.95;   // HITBOX_BASE
 const SS_HBS  = 1.07;   // combatHitboxScale
 const SS_HHBS = 1.18;   // combatHeadHitboxScale
-const FOOD_PICKUP_R      = 29;  // food pickup reach beyond thick (moneyslither formula)
+const FOOD_PICKUP_R      = 42;  // food pickup reach beyond thick (raised 29->42 for reliable pickup vs head-prediction desync)
 const KILL_FOOD_PICKUP_R = 42;  // kill-food (SOL wager) pickup reach beyond thick
 const HOST_TIMEOUT = 800;   // ms of host silence before a guest promotes itself (host migration)
 const SELF_SKIP    = 9999;  // disable self-collision — damnbruh.com: own tail never kills you
@@ -2237,16 +2237,18 @@ function spawnFoodFromSnake(snake){
   _snakesSpawnedFood.add(snake.id);
   const bPts=getBodyPoints(snake);
   if(!bPts.length)return;
-  const head=bPts[0];
   const totalUsd=snake.id===myPid?_myUsd:(snake.usd||0);
-  // Money orbs: tight pile at the EXACT death point, MORE orbs the bigger the snake, every
-  // orb clamped to just inside the border (never outside). Matches server ssSpawnKillFood.
+  // Money orbs spread ALONG the body (head->tail) at the exact death spot - a trail, NOT a
+  // pile. MORE orbs the bigger the snake, every orb clamped just inside the border. Matches
+  // server ssSpawnKillFood.
   const ns=snake.numSections||bPts.length;
   const orbs=Math.max(4,Math.min(48,Math.round(ns/2)));
   const w=totalUsd/orbs;
   const EDGE=ARENA_R-30;
+  const step=bPts.length/orbs;
   for(let c=0;c<orbs;c++){
-    let fx=head.x+(Math.random()-0.5)*12,fy=head.y+(Math.random()-0.5)*12;
+    const p=bPts[Math.min(bPts.length-1,Math.floor(c*step))];
+    let fx=p.x+(Math.random()-0.5)*8,fy=p.y+(Math.random()-0.5)*8;
     const dist=Math.sqrt(fx*fx+fy*fy);
     if(dist>EDGE){const sc=EDGE/dist;fx*=sc;fy*=sc;}
     SG.food.push({x:fx,y:fy,ci:3,size:12+Math.random()*4,k:1,w:w,ts:Date.now()});

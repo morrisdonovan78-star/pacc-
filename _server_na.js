@@ -191,12 +191,12 @@ const SS_BASE_SPEED    = 288;      // px/s
 const SS_BOOST_SPEED   = 630;      // px/s
 const SS_BOOST_ACCEL   = 4.5;      // boostAmount ramp /s
 const SS_TURN_PER_SEC  = 8.1;      // rad/s
-const SS_BOOST_BURN    = 0.2025;   // size burn fraction /s while boosting (25% faster than 0.162)
+const SS_BOOST_BURN    = 0.151875; // size burn fraction /s while boosting (25% slower than 0.2025)
 const SS_START_SIZE    = 100;      // size for a fresh snake (→ ns 26)
 function ssSegForSize(size){ const sz=Math.max(SS_MIN_SIZE, Number(size)||SS_MIN_SIZE); let seg = 8 + (sz-40)*(26-8)/(100-40); if(sz>100) seg = 26 + (sz-100)*0.08; return Math.max(8, Math.round(seg)); }
 function ssSizeFromNs(n){ n=Math.max(SS_MIN_NS, n); return n<=26 ? 40 + (n-8)*(100-40)/(26-8) : 100 + (n-26)/0.08; }
 const SS_SHED_NE_MS    = 4000;   // client SHED_NOEAT_MS
-const SS_FOOD_PICKUP_R      = 29;  // client FOOD_PICKUP_R
+const SS_FOOD_PICKUP_R      = 42;  // client FOOD_PICKUP_R (raised 29->42 for reliable pickup vs head-prediction desync)
 const SS_KILL_FOOD_PICKUP_R = 42;  // client KILL_FOOD_PICKUP_R
 
 // ── Test lobby: deterministic bot scenarios ───────────────────────────────────
@@ -313,19 +313,20 @@ function ssReconcileFood(sg) {
 
 function ssSpawnKillFood(sg, sn) {
   if (!sn) return;
-  const head = (sn.path && sn.path.length) ? sn.path[0] : { x: sn.x, y: sn.y };
-  // Drop the victim's wager as money orbs in a tight pile at the EXACT death point.
-  // MORE orbs the bigger the snake was (scales with ns). Every orb is clamped to just
-  // inside the arena border, so kill food NEVER lands outside the ring — including when a
-  // snake dies right against the edge.
+  const path = (sn.path && sn.path.length) ? sn.path : [{ x: sn.x, y: sn.y }];
+  // Spread the victim's wager as money orbs ALONG the snake's body (head->tail) at the exact
+  // spot it died - a trail, NOT a pile. MORE orbs the bigger the snake was (scales with ns).
+  // Every orb is clamped to just inside the arena border so kill food never lands outside
+  // the ring - including when a snake dies right against the edge.
   const ns = sn.ns || SS_MIN_NS;
   const orbs = Math.max(4, Math.min(48, Math.round(ns / 2)));
   const wPerOrb = (sn.usd || 0) / orbs;
-  const R = 12;                    // tight jitter -> reads as a pile at the death spot
   const EDGE = SS_ARENA_R - 30;    // keep every orb just inside the border, never beyond it
+  const step = path.length / orbs; // evenly spaced along the body from head to tail
   for (let c = 0; c < orbs; c++) {
-    let x = head.x + (Math.random() - 0.5) * R;
-    let y = head.y + (Math.random() - 0.5) * R;
+    const p = path[Math.min(path.length - 1, Math.floor(c * step))];
+    let x = p.x + (Math.random() - 0.5) * 8; // small jitter so orbs don't perfectly overlap
+    let y = p.y + (Math.random() - 0.5) * 8;
     const d = Math.sqrt(x * x + y * y);
     if (d > EDGE) { const s = EDGE / d; x *= s; y *= s; }
     sg.food.push(ssMakeFood(x, y, 1, wPerOrb));
