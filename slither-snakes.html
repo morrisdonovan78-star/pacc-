@@ -1127,6 +1127,10 @@ async function joinLobby(usd){
   if(_joiningLobby)return;
   if(rafHandle){cancelAnimationFrame(rafHandle);rafHandle=null;}
   _joiningLobby=true;
+  // Fresh user-initiated join: clear any leftover death/spectate/game state from a prior round.
+  // Otherwise the server's 'init' handler early-returns (SG set → treated as reconnect, or
+  // _localDead → dead) and never launches the game, leaving you stuck forever on "Connecting…".
+  _localDead=false; _cashedOut=false; isSpectating=false; SG=null;
   ST.lobbyUsd=usd;
   ST.wagerSol=usd>0?usdToSol(usd):0;
   _lobbyIsPaid=(usd>0);
