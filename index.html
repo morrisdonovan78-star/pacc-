@@ -157,8 +157,6 @@ html,body{background-image:linear-gradient(rgba(4,4,12,0.18),rgba(4,4,12,0.18)),
   background-size:cover;background-position:center top;background-attachment:fixed;
 }
 #scr-home.on{justify-content:flex-start;padding-top:clamp(220px,28vh,320px);}
-/* Leaderboard: solid background so the arena art doesn't show through behind the list */
-#scr-leaderboard.on{background:var(--dark);}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:2rem 1.75rem;width:100%;max-width:440px;}
 .logo{font-family:'Orbitron',sans-serif;font-weight:900;font-size:clamp(32px,7vw,64px);letter-spacing:6px;animation:glow 2.2s ease-in-out infinite;line-height:1;}
 .logo .pac{color:#FF8C00;text-shadow:0 0 20px rgba(255,140,0,.95),0 0 50px rgba(255,140,0,.6),0 0 90px rgba(255,140,0,.3);}
@@ -5380,7 +5378,7 @@ function _renderLeaderboard(d){
     const displayName=p.name?escHtml(p.name.slice(0,16)):'ANON';
     const kd=((p.kills||0)/Math.max(p.deaths||0,1)).toFixed(1);
     const winRate=p.games>0?((+(p.wins||0)/p.games)*100).toFixed(0)+'%':'–';
-    return `<div class="lb-row" data-idx="${i}" style="background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:8px;padding:11px 13px;margin-bottom:7px;scroll-margin:8px;">
+    return `<div class="lb-row" data-idx="${i}" style="background:#000;border:1px solid rgba(255,255,255,.07);border-radius:8px;padding:11px 13px;margin-bottom:7px;scroll-margin:8px;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px;">
         <div style="display:flex;align-items:center;gap:10px;">${rank}
           <div>
