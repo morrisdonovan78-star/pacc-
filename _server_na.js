@@ -191,7 +191,7 @@ const SS_BASE_SPEED    = 288;      // px/s
 const SS_BOOST_SPEED   = 630;      // px/s
 const SS_BOOST_ACCEL   = 4.5;      // boostAmount ramp /s
 const SS_TURN_PER_SEC  = 8.1;      // rad/s
-const SS_BOOST_BURN    = 0.162;    // size burn fraction /s while boosting (50% faster than 0.108)
+const SS_BOOST_BURN    = 0.2025;   // size burn fraction /s while boosting (25% faster than 0.162)
 const SS_START_SIZE    = 100;      // size for a fresh snake (→ ns 26)
 function ssSegForSize(size){ const sz=Math.max(SS_MIN_SIZE, Number(size)||SS_MIN_SIZE); let seg = 8 + (sz-40)*(26-8)/(100-40); if(sz>100) seg = 26 + (sz-100)*0.08; return Math.max(8, Math.round(seg)); }
 function ssSizeFromNs(n){ n=Math.max(SS_MIN_NS, n); return n<=26 ? 40 + (n-8)*(100-40)/(26-8) : 100 + (n-26)/0.08; }
@@ -283,11 +283,32 @@ function ssMakeFood(x, y, k, w, o, ne) {
            k: k || 0, w: w || 0, o: o || null, ne: ne || 0 };
 }
 
+// Best-candidate (Mitchell) sampling: generate K random candidates and keep the one
+// whose nearest existing pebble is farthest away. Same count/density as pure random, but
+// blue-noise spacing — pebbles spread evenly instead of clumping and leaving empty patches.
+function ssMakeFoodSpread(sg) {
+  const food = sg.food || [];
+  const K = 12;
+  let best = null, bestD = -1;
+  for (let c = 0; c < K; c++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * SS_ARENA_R * 0.9;
+    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+    let nd = Infinity;
+    for (let i = 0; i < food.length; i++) {
+      const dx = food[i].x - x, dy = food[i].y - y, d2 = dx * dx + dy * dy;
+      if (d2 < nd) nd = d2;
+    }
+    if (nd > bestD) { bestD = nd; best = { x, y }; }
+  }
+  return best ? ssMakeFood(best.x, best.y) : ssMakeFood();
+}
+
 function ssReconcileFood(sg) {
   if (!sg.food) sg.food = [];
   let reg = 0;
   sg.food.forEach(f => { if (!f.k) reg++; });
-  while (reg < SS_FOOD_TARGET) { sg.food.push(ssMakeFood()); reg++; }
+  while (reg < SS_FOOD_TARGET) { sg.food.push(ssMakeFoodSpread(sg)); reg++; }
 }
 
 function ssSpawnKillFood(sg, sn) {
@@ -531,6 +552,18 @@ function ssStepMovement(sn, sg, lid, io, now) {
   if (sn.ns < SS_MIN_NS) { ssKill(sn, null, lid, io); }
 }
 
+// Squared distance from point P to segment A->B. Used so food pickup covers the whole
+// path the head swept this tick (up to ~21px at boost), not just its final point —
+// otherwise a fast head tunnels straight through a pebble between discrete checks.
+function ssPtSegD2(px, py, ax, ay, bx, by) {
+  const abx = bx - ax, aby = by - ay;
+  const ab2 = abx * abx + aby * aby;
+  let t = ab2 > 0 ? ((px - ax) * abx + (py - ay) * aby) / ab2 : 0;
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  const cx = ax + abx * t, cy = ay + aby * t, dx = px - cx, dy = py - cy;
+  return dx * dx + dy * dy;
+}
+
 function ssTick(lid, io) {
   const sg = ssGames.get(lid);
   if (!sg) return;
@@ -554,6 +587,8 @@ function ssTick(lid, io) {
   // 1. Ghost timeout (network check, 30 Hz), then run the 60 Hz authoritative sim:
   //    SS_SUBSTEPS × (move every snake one 1/60 step, then check collisions).
   sg.snakes.forEach(sn => { if (sn.alive && now - sn.lastTs > SS_GHOST_MS) ssKill(sn, null, lid, io); });
+  // Remember each head's pre-tick position so food pickup can test the swept segment.
+  sg.snakes.forEach(sn => { if (sn.alive) { sn._phx = sn.x; sn._phy = sn.y; } });
   for (let _sub = 0; _sub < SS_SUBSTEPS; _sub++) {
     sg.snakes.forEach(sn => { if (sn.alive) ssStepMovement(sn, sg, lid, io, now); });
     ssCheckCollisions(sg, lid, io);
@@ -565,9 +600,9 @@ function ssTick(lid, io) {
     for (let i = sg.food.length - 1; i >= 0; i--) {
       const f = sg.food[i];
       if (f.o === sn.pid && f.ne && now < f.ne) continue; // shed cooldown
-      const dx = sn.x - f.x, dy = sn.y - f.y;
       const pickR = f.k ? (sn.thick + SS_KILL_FOOD_PICKUP_R) : (sn.thick + SS_FOOD_PICKUP_R);
-      if (dx * dx + dy * dy < pickR * pickR) {
+      const _ax = sn._phx != null ? sn._phx : sn.x, _ay = sn._phy != null ? sn._phy : sn.y;
+      if (ssPtSegD2(f.x, f.y, _ax, _ay, sn.x, sn.y) < pickR * pickR) {
         sn.growQueue = (sn.growQueue || 0) + SS_FOOD_GROW;
         sn.score = (sn.score || 0) + (f.k ? 50 : 10);
         if (f.w) sn.usd = (sn.usd || 0) + f.w;
