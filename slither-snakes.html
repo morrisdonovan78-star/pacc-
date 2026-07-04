@@ -380,7 +380,7 @@ body.mctl #voice-speakers{left:150px;}
     <div class="gi"><span class="gl">FPS</span><span class="gv" id="hud-fps" style="color:var(--g)">--</span></div>
   </div>
   <div id="leaderboard" style="position:fixed;top:8px;right:10px;min-width:190px;background:rgba(7,7,15,0.88);border:1px solid rgba(255,215,0,0.35);border-radius:10px;padding:8px 12px;z-index:100;font-family:'Exo 2',sans-serif;pointer-events:none;display:none;"></div>
-  <!-- Shift+L (owner-only) — per-connection latency/staleness readout. Diagnostic only, no gameplay effect. -->
+  <!-- Shift+L (TEMP: open to all players for testing) — per-connection latency/staleness readout. Diagnostic only, no gameplay effect. -->
   <div id="lag-debug" style="position:fixed;top:100px;left:10px;min-width:170px;background:rgba(7,7,15,0.88);border:1px solid rgba(0,255,255,0.35);border-radius:10px;padding:8px 12px;z-index:100;font-family:'Exo 2',sans-serif;font-size:12px;line-height:1.6;color:#9EFFEA;pointer-events:none;display:none;white-space:pre;"></div>
   <button id="voice-btn" onclick="voiceToggle()" title="Voice chat — X (controller) / M (keyboard) to mute" style="position:fixed;bottom:148px;right:14px;z-index:200;display:none;width:46px;height:46px;border-radius:50%;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.3);color:#fff;font-size:20px;cursor:pointer;">🎙️</button>
   <div id="voice-speakers" style="position:fixed;bottom:16px;left:12px;z-index:200;display:none;flex-direction:column;gap:4px;pointer-events:none;"></div>
@@ -3079,11 +3079,11 @@ document.addEventListener('keydown',function(e){
     window._OWN_CORRECT=(cur>0)?0:TEST;
     addToast('own-head correct: '+window._OWN_CORRECT+(window._OWN_CORRECT===0?'  (baseline)':'  (test)'), window._OWN_CORRECT===0?'#888':'#4CFF9E', 1800);
   }
-  // Shift+L — owner-only toggle: per-connection latency/staleness readout (own ping + how
-  // stale each remote snake's last snapshot is). Diagnostic only — no gameplay/render effect
-  // beyond the overlay text itself. Added to get real numbers on "gap looks different on each
-  // screen" reports instead of guessing.
-  if((e.key==='l'||e.key==='L')&&e.shiftKey&&!e.repeat&&localStorage.getItem('ss_owner')==='1'){
+  // Shift+L — toggle: per-connection latency/staleness readout (own ping + how stale each
+  // remote snake's last snapshot is). Diagnostic only — no gameplay/render effect beyond the
+  // overlay text itself. TEMPORARILY open to all players (not owner-gated) for live A/B
+  // testing across two real clients — re-add the ss_owner gate once done testing.
+  if((e.key==='l'||e.key==='L')&&e.shiftKey&&!e.repeat){
     window._LAG_DEBUG=!window._LAG_DEBUG;
     const panel=document.getElementById('lag-debug');
     if(panel)panel.style.display=window._LAG_DEBUG?'block':'none';
