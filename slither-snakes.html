@@ -534,7 +534,7 @@ let _sio=null,ablyChannel=null,pkRoomId=null;
 let _voiceStream=null,_voiceEnabled=false,_voiceCapCtx=null,_voiceProc=null,_voicePlayCtx=null;
 let _peerAudioCtxs=new Map(),_voiceAnalysers=new Map(),_voiceSpeaking=new Set(),_voiceLocalAnalyser=null,_voiceReadyPids=new Set(),_voiceHearFirst=new Set();
 let myPid=null,isHost=false,isSpectating=false;
-let _joiningLobby=false,_lobbyIsPaid=false;
+let _joiningLobby=false,_lobbyIsPaid=false,_joinStartedAt=0;
 let GAME_SERVER=localStorage.getItem('ss_server')||'NA';
 let REGION=localStorage.getItem('ss_region')||'US';
 
@@ -1123,10 +1123,14 @@ async function joinLobby(usd){
   // Auto-save whatever is in the name field so getMyName() always returns the latest
   const _nin=document.getElementById('name-input');
   if(_nin&&_nin.value.trim()){const _nv=_nin.value.trim().toUpperCase().slice(0,12);localStorage.setItem('ss_name_'+(ST.address||''),_nv);}
-  if(_joiningLobby&&!_sio)_joiningLobby=false;
+  // Only clear a STUCK join flag — one with no socket AND older than any real join could take
+  // (the paid deposit+confirm loop can run ~90s). A rapid double-click, or a second click during
+  // on-chain confirmation, is milliseconds→seconds after the first and stays blocked below, so we
+  // never launch two concurrent deposit flows (which collided → one errored → sent the user home).
+  if(_joiningLobby&&!_sio&&(Date.now()-_joinStartedAt>120000))_joiningLobby=false;
   if(_joiningLobby)return;
   if(rafHandle){cancelAnimationFrame(rafHandle);rafHandle=null;}
-  _joiningLobby=true;
+  _joiningLobby=true;_joinStartedAt=Date.now();
   // Fresh user-initiated join: clear any leftover death/spectate/game state from a prior round.
   // Otherwise the server's 'init' handler early-returns (SG set → treated as reconnect, or
   // _localDead → dead) and never launches the game, leaving you stuck forever on "Connecting…".
