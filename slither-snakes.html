@@ -1494,28 +1494,14 @@ async function pkConnect(roomId,gameToken){
                 own.path.push({x:sd.x-Math.cos(sd.angle)*_i*SNAKE_SPD,y:sd.y-Math.sin(sd.angle)*_i*SNAKE_SPD});
               _firstRemoteSync=false;_hideSyncOverlay();
             } else if(own.alive&&own.path.length){
-              const h=own.path[0];
-              // Correct the local drawn head toward the authoritative head ADVANCED TO ~PRESENT: the
-              // snapshot sd is ~RTT/2 old, so extrapolate it forward by that latency along its heading,
-              // then blend the drawn head a fraction of the way there. Tracks server state without
-              // pulling the head backward into lag. Soft + continuous ⇒ no visible pop. Gross desync
-              // (teleport/respawn) still hard-snaps. VISUAL ONLY — server remains collision authority.
-              const _g=(typeof window._OWN_CORRECT==='number')?window._OWN_CORRECT:_OWN_CORRECT;
-              const _lead=Math.min((_ssRtt||0)/2+Math.max(0,Date.now()-pktT),TICK_MS*3)/TICK_MS; // ticks ahead of sd
-              const _spd=(sd.boost?BOOST_SPD:SNAKE_SPD);
-              const _ax=sd.x+Math.cos(sd.angle)*_spd*_lead, _ay=sd.y+Math.sin(sd.angle)*_spd*_lead;
-              const _dx=_ax-h.x, _dy=_ay-h.y, _d2=_dx*_dx+_dy*_dy;
-              if(_d2>SNAKE_SPD*SNAKE_SPD*100)own.path[0]={x:_ax,y:_ay};       // gross desync → hard snap
-              else if(_g>0)own.path[0]={x:h.x+_dx*_g,y:h.y+_dy*_g};           // continuous soft correction
-              // ── INSTRUMENTATION (logging only; NO gameplay effect) — 96px correction-branch probe ──
-              try{
-                const _d2thr=SNAKE_SPD*SNAKE_SPD*100;                          // 96px^2 (same as branch above)
-                const _hard=_d2>_d2thr;                                        // identical condition to line above
-                const _rec={d2:+Math.sqrt(_d2).toFixed(1),thr:96,branch:_hard?'HARD':(_g>0?'soft':'none'),boost:!!sd.boost,circle:!!_autoCircle,t:Date.now()};
-                (window._d2Log=window._d2Log||[]).push(_rec);
-                if(window._d2Log.length>3600)window._d2Log.shift();            // ~2min @30Hz ring buffer
-                if(_hard)console.log('[D2] HARD',_rec.d2+'px','boost='+_rec.boost,'circle='+_rec.circle,_rec.t);
-              }catch(_e){}
+              // Store the latest authoritative snapshot; the head correction toward it is applied
+              // SMOOTHLY once per render frame in _ssReconcileFrame() rather than as a yank here.
+              // A per-packet yank (30Hz) beating against the 60Hz redraw made path[0] sawtooth, and
+              // since the camera is glued to path[0] that shook the whole view and jittered the
+              // segments right behind the head while circling (worse as drift grew ~15-20s in).
+              // Same target math + same gross-desync hard-snap — only applied per-frame, so smooth.
+              // VISUAL ONLY — server remains collision authority.
+              own._srvSnap={x:sd.x,y:sd.y,angle:sd.angle,boost:!!sd.boost,pktT:pktT};
             }
             if(sd.ns)own.numSections=sd.ns;
             if(sd.usd!=null){
@@ -3068,6 +3054,24 @@ function _ssPredictLocal(my, dtMs){
   }
 }
 
+// Smooth per-frame reconciliation of the own head toward the latest server snapshot. Replaces the
+// old per-packet path[0] yank: applying the correction once per render frame (60 Hz) at half the
+// gain — instead of once per snapshot (30 Hz) at full gain — removes the 30-vs-60 Hz sawtooth that
+// shook the camera (glued to path[0]) and the segments behind the head while circling. Same target
+// math and same gross-desync hard-snap as before, so drift/teleport behaviour is unchanged.
+// VISUAL ONLY — own.path[0] is not used for collision; the server stays the sole authority.
+function _ssReconcileFrame(own){
+  const snap=own&&own._srvSnap; if(!snap||!own.path||!own.path.length)return;
+  const _g=(typeof window._OWN_CORRECT==='number')?window._OWN_CORRECT:_OWN_CORRECT;
+  const h=own.path[0];
+  const _lead=Math.min((_ssRtt||0)/2+Math.max(0,Date.now()-snap.pktT),TICK_MS*3)/TICK_MS;
+  const _spd=(snap.boost?BOOST_SPD:SNAKE_SPD);
+  const _ax=snap.x+Math.cos(snap.angle)*_spd*_lead, _ay=snap.y+Math.sin(snap.angle)*_spd*_lead;
+  const _dx=_ax-h.x, _dy=_ay-h.y, _d2=_dx*_dx+_dy*_dy;
+  if(_d2>SNAKE_SPD*SNAKE_SPD*100)own.path[0]={x:_ax,y:_ay};            // gross desync → hard snap (unchanged)
+  else if(_g>0)own.path[0]={x:h.x+_dx*(_g*0.5),y:h.y+_dy*(_g*0.5)};   // smooth per-frame nudge (half gain @60Hz)
+}
+
 // ══ RENDERING ════════════════════════════════════════════════
 
 function rafDraw(ts){
@@ -3084,6 +3088,7 @@ function rafDraw(ts){
       const dt=Math.min(_guestPredTs?ts-_guestPredTs:TICK_MS,1000); // pass real elapsed; _ssPredictLocal caps catch-up at 5 substeps/frame
       _guestPredTs=ts;
       _ssPredictLocal(my, dt);
+      _ssReconcileFrame(my); // smooth per-frame head correction (replaces per-packet yank)
     }
   }
 
