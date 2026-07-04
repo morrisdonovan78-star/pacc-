@@ -349,6 +349,15 @@ module.exports = async function handler(req, res) {
           clearTimeout(guard); done = true;
           return res.status(403).json({ error: 'No wager on record — you may have been eliminated or already cashed out' });
         }
+        // Second dead check: catches kills that raced with our kvGetDel above.
+        // elim-lock or settle/kill may have set dead: in the ~5 ms between our first check and here.
+        // Restore the wager so the kill-reward path is unaffected, then reject.
+        const isDeadNow = await kvGet('dead:' + playerAddress);
+        if (isDeadNow) {
+          kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
+          clearTimeout(guard); done = true;
+          return res.status(403).json({ error: 'Cannot cashout — you were eliminated' });
+        }
         // Use client-signed accumulated amount (initial wager + kill-food winnings).
         // kvWager confirms the player has an active deposit; wagerLamportsRaw is the signed total they claim.
         // Cap at 20× initial to guard against fraudulent inflation; avail caps the actual transfer.

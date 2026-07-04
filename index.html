@@ -1987,6 +1987,44 @@ async function joinLobby(usd){
     pkConnect(_rr, ST.entryToken);
     return;
   }
+  // TX was broadcast but confirmTransaction timed out (or recordWager failed) before
+  // ST.entryToken was set — retry registration with the saved sig, no new charge.
+  if(usd>0 && ST.hasEscrow && ST._pendingJoinSig && !ST.entryToken){
+    const _rr=ST._pendingJoinRoom||(usd===1?'paid-lobby-1':'paid-lobby-25');
+    go('scr-mm');
+    document.getElementById('mm-sub').textContent='Retrying previous deposit…';
+    lg('mm-log','Transaction already broadcast — retrying registration without new charge','lhi');
+    _joiningLobby=true;
+    (async()=>{
+      try{
+        const _psig=ST._pendingJoinSig;
+        const _plamps=ST._pendingJoinLamps;
+        const _pName=localStorage.getItem('pa_name_'+ST.address)||'';
+        let joinResult=null;
+        for(let _ri=0;_ri<3;_ri++){
+          try{ joinResult=await recordWager(ST.address,_plamps,_psig,_rr,_pName); break; }
+          catch(e2){
+            if(_ri===2) throw e2;
+            lg('mm-log','Server busy, retrying ('+(2+_ri)+'/3)…','lwarn');
+            await new Promise(r=>setTimeout(r,2000));
+          }
+        }
+        ST._pendingJoinSig=null;
+        const gameToken=joinResult.gameToken||null;
+        ST.entryToken=gameToken;
+        document.getElementById('mm-sub').textContent='Wager locked · Joining live lobby…';
+        await refreshBal();
+        pkConnect(_rr,gameToken);
+      }catch(e){
+        _joiningLobby=false;
+        ST._pendingJoinSig=null;
+        lg('mm-log','❌ '+e.message,'lerr');
+        await new Promise(r=>setTimeout(r,4000));
+        populateLobby(); go('scr-lobby');
+      }
+    })();
+    return;
+  }
   ST.hasEscrow=false;
 
   // Free lobby — no transaction, permanent room
@@ -2031,12 +2069,18 @@ async function joinLobby(usd){
     await signLocalTx(tx);
     lg('mm-log','Broadcasting to Solana…','lhi');
     const sig=await ST.conn.sendRawTransaction(tx.serialize());
+    // Mark escrow immediately after broadcast — TX is on Solana now.
+    // If confirmTransaction times out below, hasEscrow stays true so the next join
+    // attempt takes the recovery path (retry without a new charge) instead of re-paying.
+    const roomId=usd===1?'paid-lobby-1':'paid-lobby-25';
+    ST.hasEscrow=true;
+    ST._pendingJoinSig=sig;
+    ST._pendingJoinLamps=lamps;
+    ST._pendingJoinRoom=roomId;
     lg('mm-log','Confirming on-chain…','lhi');
     await ST.conn.confirmTransaction({signature:sig,blockhash:lb.blockhash,lastValidBlockHeight:lb.lastValidBlockHeight},'confirmed');
-    ST.hasEscrow=true;
     lg('mm-log','Deposit confirmed ✓','lok');
     lg('mm-log','Recording wager…','lhi');
-    const roomId=usd===1?'paid-lobby-1':'paid-lobby-25';
     const _pName=localStorage.getItem('pa_name_'+ST.address)||'';
     // Retry recordWager up to 3× — TX is already on-chain at this point so money is safe;
     // a transient server hiccup should not cost the player their wager.
@@ -2051,6 +2095,7 @@ async function joinLobby(usd){
     }
     const gameToken=joinResult.gameToken||null;
     ST.entryToken=gameToken;
+    ST._pendingJoinSig=null; // registration complete — no longer needed
     document.getElementById('mm-sub').textContent='Wager locked · Joining live lobby…';
     await refreshBal();
     pkConnect(roomId, gameToken);

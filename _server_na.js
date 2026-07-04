@@ -1004,7 +1004,10 @@ function elim(victim, killerId, room, io) {
   const killProof = GAME_SECRET
     ? crypto.createHmac('sha256', GAME_SECRET).update(`${killerId}:${victim.id}:${killTs}`).digest('hex')
     : null;
-  // Fire-and-forget: immediately block victim cashout on the settlement server
+  const elimData = { id: victim.id, killerId, victimSol: victim.sol || 0, killProof, killTs };
+  // Block victim cashout on the settlement server BEFORE broadcasting the kill to clients.
+  // Delaying the elim event by ~50-100ms ensures dead: is set before the killer's client
+  // even knows to call settle/kill — closing the window where victim cashout races the kill.
   if (victim.id && GAME_SECRET) {
     const adminSecret = (process.env.ADMIN_SECRET || '').trim();
     const settleUrl = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
@@ -1013,9 +1016,15 @@ function elim(victim, killerId, room, io) {
       headers: { 'Content-Type': 'application/json', 'x-admin-secret': adminSecret },
       body: JSON.stringify({ action: 'elim-lock', victimAddress: victim.id }),
       signal: AbortSignal.timeout(5000),
-    }).catch(e => console.warn('[elim] cashout lock failed:', e.message));
+    }).then(() => {
+      io.to(room.lobbyId).emit('elim', elimData);
+    }).catch(e => {
+      console.warn('[elim] cashout lock failed:', e.message);
+      io.to(room.lobbyId).emit('elim', elimData); // emit regardless so game never gets stuck
+    });
+  } else {
+    io.to(room.lobbyId).emit('elim', elimData);
   }
-  io.to(room.lobbyId).emit('elim', { id: victim.id, killerId, victimSol: victim.sol || 0, killProof, killTs });
 }
 
 function tick(room, io) {
