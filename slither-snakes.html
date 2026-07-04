@@ -544,6 +544,8 @@ let canvas=null,ctx=null,mmCanvas=null,mmCtx=null;
 let rafHandle=null,_hostRaf=null,_lastTickTs=0,_hostGraceTicks=0;
 let _bgPump=null,_bgLastTs=0,_bgSuppressSend=false;
 let _camX=0,_camY=0,_camZoom=0.6,_zoomOffset=0;
+let _specPanX=0,_specPanY=0,_specPanInit=false,_specDrag=null; // free-roam spectate camera for an empty lobby (e.g. after cashing out as the last player)
+const _eatenLocalTTL=8000,_eatenLocal=new Map(); // guest predictive pebble pickup: keys of regular food we already drove through, so the next server snapshot can't re-add it (flicker)
 let _mouseX=0,_mouseY=0,_mouseBoost=false,_padBoost=false,_cashoutTimer=null,_showHitboxes=false,_myEyeAngle=null;
 let _mobileCtl=false,_joyTouchId=null,_mobileWired=false;
 let _pendingState=null;
@@ -1449,7 +1451,7 @@ async function pkConnect(roomId,gameToken){
       if(!SG||SG.over)return;
       // Sync food (sent every ~250ms or when changed)
       if(d.food){
-        SG.food=d.food.map(f=>({x:f[0],y:f[1],ci:f[2]||0,size:f[3]||6,k:f[4]||0,w:f[5]?f[5]/1e6:0}));
+        SG.food=_mapServerFood(d.food);
       }
       if(d.tick!=null&&SG)SG.tick=d.tick; // keep SG.tick in sync so the elim dedup guard resets each server tick
       const pktT=Date.now(); // use client receive-time; server clock may differ
@@ -2423,7 +2425,7 @@ function applyRemoteState(d){
     });
   }
   if(d.food){
-    SG.food=d.food.map(f=>({x:f[0],y:f[1],ci:f[2]||0,size:f[3]||6,k:f[4]||0,w:f[5]?f[5]/1e6:0}));
+    SG.food=_mapServerFood(d.food);
   }
 }
 
@@ -2472,8 +2474,8 @@ function launchSnakeGame(){
 
   document.addEventListener('mousemove',onMouseMove);
   window.addEventListener('wheel',onWheel,{passive:false});
-  document.addEventListener('mousedown',e=>{if(e.button===0)_mouseBoost=true;});
-  document.addEventListener('mouseup',e=>{if(e.button===0)_mouseBoost=false;});
+  document.addEventListener('mousedown',e=>{if(e.button===0){_mouseBoost=true; if(isSpectating)_specDrag={x:e.clientX,y:e.clientY,px:_specPanX,py:_specPanY};}});
+  document.addEventListener('mouseup',e=>{if(e.button===0){_mouseBoost=false; _specDrag=null;}});
   canvas.addEventListener('contextmenu',e=>e.preventDefault());
   canvas.addEventListener('touchmove',onTouchMove,{passive:false});
   canvas.addEventListener('touchstart',e=>{e.preventDefault();_mouseBoost=true;onTouchMove(e);},{passive:false});
@@ -2701,7 +2703,7 @@ function clearBotSnakes(){
 }
 
 function onResize(){if(canvas){canvas.width=window.innerWidth;canvas.height=window.innerHeight;}}
-function onMouseMove(e){_mouseX=e.clientX;_mouseY=e.clientY;}
+function onMouseMove(e){_mouseX=e.clientX;_mouseY=e.clientY; if(_specDrag&&_camZoom){_specPanX=_specDrag.px-(e.clientX-_specDrag.x)/_camZoom;_specPanY=_specDrag.py-(e.clientY-_specDrag.y)/_camZoom;}}
 // Scroll wheel / trackpad zoom — up = zoom in, down = zoom out. Per-event step is capped so
 // high-resolution trackpads don't jump. rafDraw re-clamps _zoomOffset to the visible range.
 function onWheel(e){
@@ -2833,6 +2835,12 @@ async function endSnakeGame(reason,killerId){
     isSpectating=true;
     clearInterval(_guestInputLoop);_guestInputLoop=null;
     _padBoost=false;
+    // Cashed out: tell the game server to remove our snake NOW with no kill food — otherwise the 6s
+    // ghost-timeout (ssKill) sheds our already-paid wager as gold orbs others can eat (value dup).
+    // Also hide it locally so spectate isn't glued to a frozen corpse sitting at the cashout spot.
+    { const _mine=SG&&SG.snakes.get(myPid); if(_mine)_mine.alive=false; }
+    if(_sio){try{_sio.emit('ss-cashed',{});}catch(_){}}
+    _specPanInit=false;
     // rafDraw keeps running; SG stays alive for dead reckoning
   } else {
     // Full shutdown (host gameover / 'over' reason)
@@ -3088,6 +3096,36 @@ function _ssReconcileFrame(own){
   else if(_g>0)own.path[0]={x:h.x+_dx*(_g*0.5),y:h.y+_dy*(_g*0.5)};   // smooth per-frame nudge (half gain @60Hz)
 }
 
+// Guest-only VISUAL pickup. The server eats food at its authoritative head, but our rendered head
+// (forward-lead + turn curvature) can pass beside it, so a pebble we clearly drove through lingers
+// on screen — "I go right through it without getting it". Hide it the instant the rendered head
+// overlaps it, and remember it (_eatenLocal) so the next server food snapshot can't re-add it.
+// REGULAR pebbles only — money/kill orbs (f.k) are NEVER predicted; growth, score and $ stay 100%
+// server-authoritative. Uses the exact server pickR (thick + FOOD_PICKUP_R) and does NOT widen range.
+function _guestPredictiveEat(my){
+  if(!my||!my.path||!my.path.length||!SG||!SG.food||!SG.food.length)return;
+  const h=my.path[0], now=Date.now(), pickR=msThick(my)+FOOD_PICKUP_R, r2=pickR*pickR;
+  for(let i=SG.food.length-1;i>=0;i--){
+    const f=SG.food[i];
+    if(f.k)continue;                                       // never predict money/kill orbs
+    const dx=h.x-f.x, dy=h.y-f.y;
+    if(dx*dx+dy*dy<r2){ _eatenLocal.set(Math.round(f.x)+'_'+Math.round(f.y),now+_eatenLocalTTL); SG.food.splice(i,1); }
+  }
+}
+
+// Map a raw server food packet to client objects, dropping regular pebbles we already predictively
+// ate locally so a stale snapshot can't flicker them back in. Money/kill orbs (f[4]) are ALWAYS kept.
+function _mapServerFood(arr){
+  const now=Date.now();
+  for(const [k,v] of _eatenLocal)if(now>v)_eatenLocal.delete(k); // expire
+  const out=[];
+  for(const f of arr){
+    if(!f[4]&&_eatenLocal.has(Math.round(f[0])+'_'+Math.round(f[1])))continue;
+    out.push({x:f[0],y:f[1],ci:f[2]||0,size:f[3]||6,k:f[4]||0,w:f[5]?f[5]/1e6:0});
+  }
+  return out;
+}
+
 // ══ RENDERING ════════════════════════════════════════════════
 
 function rafDraw(ts){
@@ -3105,6 +3143,7 @@ function rafDraw(ts){
       _guestPredTs=ts;
       _ssPredictLocal(my, dt);
       _ssReconcileFrame(my); // smooth per-frame head correction (replaces per-packet yank)
+      _guestPredictiveEat(my); // hide regular pebbles the rendered head drives through (server stays authoritative for growth/$)
     }
   }
 
@@ -3229,8 +3268,12 @@ function rafDraw(ts){
     _camX=h.x;
     _camY=h.y;
   }else if(isSpectating&&SG){
-    // Follow first alive snake while spectating
-    for(const s of SG.snakes.values()){if(s.alive&&s.path.length){_camX=s.path[0].x;_camY=s.path[0].y;break;}}
+    // Follow first alive snake while spectating; if there are none (e.g. cashed out into an empty
+    // lobby), free-roam — drag the mouse to look around instead of freezing on the cashout spot.
+    let _spFound=false;
+    for(const s of SG.snakes.values()){if(s.alive&&s.path.length){_camX=s.path[0].x;_camY=s.path[0].y;_spFound=true;break;}}
+    if(_spFound){_specPanInit=false;}
+    else{ if(!_specPanInit){_specPanX=_camX;_specPanY=_camY;_specPanInit=true;} _camX=_specPanX;_camY=_specPanY; }
   }
   // Zoom formula matched to MoneySlither's effective zoom level at 288 px/s.
   // Divisors 928/522 ≈ 1920/2.07 / 1080/2.07 — gives ~2.07× base vs damnbruh's 1/1920 formula,
