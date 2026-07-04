@@ -291,15 +291,19 @@ function ssReconcileFood(sg) {
 }
 
 function ssSpawnKillFood(sg, sn) {
-  if (!sn || !sn.path || !sn.path.length) return;
-  const maxOrbs = Math.min(10, Math.floor(sn.ns / 3) + 2);
-  const step = Math.max(1, Math.floor(sn.path.length / maxOrbs));
-  const wPerOrb = (sn.usd || 0) / maxOrbs;
-  for (let i = 0, c = 0; i < sn.path.length && c < maxOrbs; i += step, c++) {
-    const p = sn.path[i];
-    sg.food.push(ssMakeFood(p.x + (Math.random() - 0.5) * 40, p.y + (Math.random() - 0.5) * 40, 1, wPerOrb));
-    if (Math.random() < 0.5)
-      sg.food.push(ssMakeFood(p.x + (Math.random() - 0.5) * 50, p.y + (Math.random() - 0.5) * 50));
+  if (!sn) return;
+  const head = (sn.path && sn.path.length) ? sn.path[0] : { x: sn.x, y: sn.y };
+  // Drop kill food at the death point (head), tightly clustered, giving HALF the length
+  // of the old drop. Old: min(10,floor(ns/3)+2) wager orbs strung along the WHOLE body
+  // (±40) plus ~50% filler orbs (±50) => ~3 sections/step, spread across the snake.
+  // New: wager orbs only, count = 0.75x old (0.75*FOOD_GROW = half of the old ~3/step),
+  // all spawned in a small cluster around where the snake actually died.
+  const oldOrbs = Math.min(10, Math.floor(sn.ns / 3) + 2);
+  const orbs = Math.max(2, Math.round(oldOrbs * 0.75));
+  const wPerOrb = (sn.usd || 0) / orbs;
+  const R = 22; // tight scatter radius at the death point (was strung along full body length)
+  for (let c = 0; c < orbs; c++) {
+    sg.food.push(ssMakeFood(head.x + (Math.random() - 0.5) * R, head.y + (Math.random() - 0.5) * R, 1, wPerOrb));
   }
 }
 

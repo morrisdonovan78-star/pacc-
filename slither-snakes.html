@@ -2237,19 +2237,21 @@ function spawnFoodFromSnake(snake){
   _snakesSpawnedFood.add(snake.id);
   const bPts=getBodyPoints(snake);
   if(!bPts.length)return;
+  const head=bPts[0];
   const totalUsd=snake.id===myPid?_myUsd:(snake.usd||0);
-  // Limit to 10 scattered orbs max — 1 orb per N segments so it looks like loot, not a body
-  const MAX_KILL_ORBS=10;
-  const stride=Math.max(1,Math.ceil(bPts.length/MAX_KILL_ORBS));
-  const spawnPts=bPts.filter((_,i)=>i%stride===0).slice(0,MAX_KILL_ORBS);
-  const w=spawnPts.length>0?totalUsd/spawnPts.length:0;
+  // Half the length + clustered at the death point (head), matching server ssSpawnKillFood.
+  // Old: up to 10 orbs strung along the whole body. New: 0.75x the old orb count (= half
+  // the length), wager orbs only, in a tight cluster where the snake actually died.
+  const oldOrbs=Math.min(10,Math.floor((snake.numSections||bPts.length)/3)+2);
+  const orbs=Math.max(2,Math.round(oldOrbs*0.75));
+  const w=totalUsd/orbs;
   const maxR=ARENA_R*0.96;
-  spawnPts.forEach(p=>{
-    let fx=p.x,fy=p.y;
+  for(let c=0;c<orbs;c++){
+    let fx=head.x+(Math.random()-0.5)*22,fy=head.y+(Math.random()-0.5)*22;
     const dist=Math.sqrt(fx*fx+fy*fy);
     if(dist>maxR){const sc=maxR/dist;fx*=sc;fy*=sc;}
     SG.food.push({x:fx,y:fy,ci:3,size:12+Math.random()*4,k:1,w:w,ts:Date.now()});
-  });
+  }
   _forceFoodSend=true;
 }
 
