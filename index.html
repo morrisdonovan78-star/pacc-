@@ -1745,6 +1745,10 @@ async function pkConnect(roomId, gameToken){
       _killFeed.push({killerName:kName,killerColor:km.color||'#FFD700',victimName:vName,victimColor:vm.color||'#FF69B4',ts:Date.now()});
       if(_killFeed.length>6) _killFeed.shift();
       if(data.id===myPid){
+        // Clear payment state so a re-entry always requires a fresh deposit.
+        // Without this, stale hasEscrow+entryToken lets the server reconnect path
+        // revive the player for free (server skips token check for existing pids).
+        ST.hasEscrow=false; ST.entryToken=null;
         _spectateKillerPid=data.killerId||null;
         G.players.delete(myPid);
         updateScoreboard();

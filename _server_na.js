@@ -1098,25 +1098,32 @@ io.on('connection', socket => {
 
   // Paid lobby gate — fail CLOSED: no GAME_SECRET means misconfigured server, deny entry
   if (isPaid) {
-    console.log(`[${lobbyId}] connection pid=${pid&&pid.slice(0,8)} hasToken=${!!gameToken} existing=${!!existing} gsSet=${!!GAME_SECRET}`);
+    console.log(`[${lobbyId}] connection pid=${pid&&pid.slice(0,8)} hasToken=${!!gameToken} existing=${!!existing} alive=${existing&&existing.alive} gsSet=${!!GAME_SECRET}`);
     if (!GAME_SECRET) {
       socket.emit('err', 'Server not configured for paid lobbies — contact admin');
       socket.disconnect(); return;
     }
-    // Reconnecting players (already in room) skip token re-check — their token was validated on first join
-    if (!existing) {
+    // Alive reconnects (socket drop while still playing) skip token re-check — already validated.
+    // Fresh joins AND dead-player reconnects must prove a new payment with a recent token.
+    const isAliveReconnect = existing && existing.alive;
+    if (!isAliveReconnect) {
       const tokenValid = validateGameToken(gameToken, lobbyId, pid);
-      console.log(`[${lobbyId}] token valid=${tokenValid} alreadyUsed=${_usedGameTokens.has(gameToken)}`);
+      console.log(`[${lobbyId}] token valid=${tokenValid} alreadyUsed=${_usedGameTokens.has(gameToken)} existing=${!!existing}`);
       if (!tokenValid) {
         socket.emit('err', 'Invalid entry token — pay to join');
         socket.disconnect(); return;
       }
-      if (_usedGameTokens.has(gameToken)) {
-        // Same player reconnecting after a drop — allow re-entry (token is HMAC-tied to this pid)
-        console.log(`[${lobbyId}] allowing reconnect for pid=${pid&&pid.slice(0,8)} with previously-used token`);
-      } else {
-        _usedGameTokens.add(gameToken);
+      // Dead-player reconnect: token must be freshly minted (≤5 min) and never used before.
+      // This blocks reuse of the original join token after elimination — new payment required.
+      if (existing && !existing.alive) {
+        const tokenTs = (() => { try { const {data} = JSON.parse(Buffer.from(gameToken, 'base64url').toString()); return parseInt(data.split(':')[2]); } catch (_) { return 0; } })();
+        if (Date.now() - tokenTs > 300_000 || _usedGameTokens.has(gameToken)) {
+          console.log(`[${lobbyId}] dead-player reconnect blocked — stale/reused token pid=${pid&&pid.slice(0,8)}`);
+          socket.emit('err', 'You were eliminated — make a new deposit to rejoin');
+          socket.disconnect(); return;
+        }
       }
+      _usedGameTokens.add(gameToken);
     }
   }
 
