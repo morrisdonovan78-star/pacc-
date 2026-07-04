@@ -572,7 +572,7 @@ let _forceFoodSend=false;
 let _firstRemoteSync=false;
 const _ssBuf=new Map(); // id → [{x,y,angle,ns,boost,score,usd,t}] — server snapshot buffer
 const _ssSeedBodies=new Map(); // id → [{x,y}] one-time authoritative body seed from server 'ss-bodies' on join/rejoin
-const _INTERP_DELAY=50; // ms: render this far behind the latest snapshot for smooth motion.
+const _INTERP_DELAY=85; // ms: render remotes this far behind the latest snapshot for smooth motion. Live-tunable via window._INTERP_DELAY (larger = smoother / more jitter buffer, but a touch more visual lag on other players). Was 50 — too tight, caused 30Hz snapping.
 // Was 100ms (≈3 snapshots @30Hz). Halved to 50ms to cut the render lag that draws remote
 // snakes ~30–63px behind their server-authoritative collision position (Category A: server
 // collides but client renders the body outside the zone). Still bracketed by the 12-snapshot
@@ -3181,7 +3181,7 @@ function rafDraw(ts){
 
   // Remote snake advancement: snapshot interpolation (live) or dead-reckoning (practice bots)
   if(SG&&!SG.over){
-    const _renderT=Date.now()-_INTERP_DELAY;
+    const _renderT=Date.now()-(typeof window._INTERP_DELAY==='number'?window._INTERP_DELAY:_INTERP_DELAY);
     SG.snakes.forEach(s=>{
       if(s.id===myPid||!s.alive)return;
       const buf=_ssBuf.get(s.id);
@@ -3243,18 +3243,16 @@ function rafDraw(ts){
           const ph=s.path[0];
           if(!ph||Math.hypot(ix-ph.x,iy-ph.y)>0.3){s.path.unshift({x:ix,y:iy});trimPath(s);}
         }
-        // ── Bounded remote-head extrapolation (RENDERED HEAD ONLY; never written to s.path) ──
-        // The newest snapshot is one 30 Hz broadcast (~33 ms) stale, so the drawn head trails
-        // server truth. Advance ONLY the transient rendered head (s._exHead) forward along the
-        // newest snapshot's heading by that snapshot's age, HARD-CAPPED at one tick of motion.
-        // s.path, trimPath, getBodyPoints, collision and body generation are untouched.
-        // TEST TOGGLE: window._EXTRAP_OFF=true disables it (head falls back to interpolated path[0]).
-        if(window._EXTRAP_OFF){ s._exHead=null; }
-        else{
+        // ── Remote head render position ──────────────────────────────────────────
+        // Draw the head at the SMOOTH interpolated point (s._exHead=null → drawSnake uses path[0]).
+        // The old forward extrapolation advanced the head by the newest snapshot's age and RESET on
+        // every 30Hz packet → a sawtooth that made remote heads look shaky/jumpy. Disabled by default
+        // for smooth glide; opt back in for testing with window._EXTRAP_ON=true.
+        if(window._EXTRAP_ON){
           const _snapAge=Math.min(Math.max(0,Date.now()-latest.t),TICK_MS);
           const _exSpd=(latest.boost?BOOST_SPD:SNAKE_SPD)*(_snapAge/TICK_MS);
           s._exHead={x:ix+Math.cos(latest.angle)*_exSpd,y:iy+Math.sin(latest.angle)*_exSpd};
-        }
+        } else { s._exHead=null; }
       }else if(buf&&buf.length===1){
         // 1 snapshot — extrapolate forward from snapshot so snake appears + moves immediately.
         // Without this, new snakes are frozen at their seed position until the 2nd packet.
