@@ -200,7 +200,10 @@ body.mctl #voice-speakers{left:150px;}
 
   <!-- Not logged in -->
   <div id="home-off" class="card">
-    <button class="btn btn-y btn-sm" onclick="openLeaderboard()" style="margin:0 auto 1.25rem;">🏆 LEADERBOARD</button>
+    <div style="display:flex;gap:8px;justify-content:center;margin:0 auto 1.25rem;">
+      <button class="btn btn-y btn-sm" onclick="openLeaderboard()" style="margin:0;">🏆 LEADERBOARD</button>
+      <button class="btn btn-c btn-sm" onclick="_openSettings()" style="margin:0;">⚙ SETTINGS</button>
+    </div>
     <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);text-align:center;margin-bottom:1.5rem;">SIGN IN TO PLAY</div>
     <!-- Email step -->
     <div id="step-email">
@@ -307,7 +310,31 @@ body.mctl #voice-speakers{left:150px;}
     <button class="btn btn-c btn-sm" onclick="showWithdraw()" style="margin-bottom:10px;">💸 WITHDRAW SOL</button>
     <button class="btn btn-y btn-sm" onclick="openLeaderboard()" style="margin-bottom:10px;">🏆 LEADERBOARD</button>
     <button class="btn btn-c btn-sm" onclick="openFriends()" style="margin-bottom:10px;">👥 FRIENDS</button>
+    <button class="btn btn-c btn-sm" onclick="_openSettings()" style="margin-bottom:10px;">⚙ SETTINGS</button>
     <button class="btn btn-r btn-sm" onclick="doLogout()" style="margin:0 auto;width:auto;">LOGOUT</button>
+  </div>
+</div>
+
+<!-- Settings modal — clip toggle + remappable keybinds -->
+<div id="settings-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:10003;align-items:center;justify-content:center;">
+  <div class="card" style="max-width:440px;width:92%;padding:1.4rem;max-height:88vh;overflow:auto;">
+    <div style="font-family:'Press Start 2P',monospace;font-size:12px;color:var(--acc);margin-bottom:1rem;text-align:center;">⚙ SETTINGS</div>
+    <!-- Clips -->
+    <div id="clip-setting-row" style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px;">
+      <span style="font-family:'Press Start 2P',monospace;font-size:8px;color:#fff;">🎬 CLIP RECORDING</span>
+      <button id="clip-toggle-btn" class="copy-btn" style="min-width:64px;" onclick="_toggleClip()">ON</button>
+    </div>
+    <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:1.1rem;">
+      Records the last 20 seconds in your browser. Press <b>G</b> (keyboard) or click the <b>right stick</b> (controller) to save a clip. <b>PC only</b> — off on phones. Runs on your device, never on the game server.
+    </div>
+    <!-- Keybinds -->
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">KEYBINDS</div>
+    <div id="keybind-list"></div>
+    <div style="font-size:10px;color:var(--muted);margin:8px 0 1rem;">Click a key, then press the key you want. Steering is your mouse.</div>
+    <div style="display:flex;gap:8px;">
+      <button class="copy-btn" onclick="_resetBinds()" style="flex:1;">RESET DEFAULTS</button>
+      <button class="btn btn-g btn-sm" onclick="_closeSettings()" style="flex:1;margin:0;">DONE</button>
+    </div>
   </div>
 </div>
 
@@ -3418,6 +3445,154 @@ function startGuestLoop(){
   },33); // match server tick rate
 }
 
+// ══ SETTINGS: clip recorder (PC only) + remappable keybinds ══════════════════════
+// Everything here is client-side only — recording happens in this browser off the game
+// canvas and (if a webhook is set) uploads straight to Discord. The game servers are never
+// involved, so this can't affect match performance for anyone but the recording player.
+const SS_IS_PC = !(('ontouchstart' in window) || (navigator.maxTouchPoints||0) > 0);
+
+// Discord webhook for auto-posting clips to your #clips channel. Empty string = clips just
+// download to the player's device instead. Exposed in client code by necessity (browser →
+// Discord direct); if it ever gets abused, regenerate it in Discord and paste the new one here.
+const SS_CLIP_WEBHOOK = '';
+
+// action → default keys (first is the primary shown in Settings). Boost keeps Space+Shift.
+const SS_BIND_DEFS = [
+  {act:'boost',      label:'Boost',            keys:[' ','Shift']},
+  {act:'cashout',    label:'Cash Out (hold)',  keys:['q']},
+  {act:'clip',       label:'Save 20s Clip',    keys:['g']},
+  {act:'zoomIn',     label:'Zoom In',          keys:['=','+']},
+  {act:'zoomOut',    label:'Zoom Out',         keys:['-','_']},
+  {act:'voice',      label:'Voice Chat',       keys:['m']},
+  {act:'autoCircle', label:'Auto-Circle',      keys:['e']},
+];
+let _ssBinds = {};
+try{ _ssBinds = JSON.parse(localStorage.getItem('ss_keybinds')||'{}') || {}; }catch(_){ _ssBinds = {}; }
+function _ssNormKey(k){ return (k && k.length===1) ? k.toLowerCase() : k; }
+// Map a physical key to the game action it triggers (user overrides win; a reassigned action
+// frees its old default key so the old key stops firing).
+function _ssKeyAction(rawKey){
+  const k=_ssNormKey(rawKey);
+  for(const a in _ssBinds){ if(_ssBinds[a]===k) return a; }
+  for(const d of SS_BIND_DEFS){
+    if(_ssBinds[d.act]!==undefined) continue;
+    if(d.keys.some(x=>_ssNormKey(x)===k)) return d.act;
+  }
+  return null;
+}
+function _ssBindKey(act){
+  if(_ssBinds[act]!==undefined) return _ssBinds[act];
+  const d=SS_BIND_DEFS.find(x=>x.act===act); return d?d.keys[0]:'';
+}
+
+// ── Rolling clip buffer ────────────────────────────────────────────────────────
+let _clipRec=null, _clipChunks=[], _clipStream=null, _clipMime='';
+function _clipEnabled(){ return SS_IS_PC && localStorage.getItem('ss_clip_on')==='1'; } // opt-in, default OFF
+function _clipStart(){
+  if(!_clipEnabled() || _clipRec || !canvas || typeof MediaRecorder==='undefined') return;
+  try{
+    _clipStream = canvas.captureStream(30);
+    const types=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+    _clipMime = (MediaRecorder.isTypeSupported ? types.find(t=>MediaRecorder.isTypeSupported(t)) : '') || '';
+    // ~3.5 Mbps → a full 20s clip lands around 8–9 MB regardless of the player's screen size,
+    // safely under Discord's 25 MB webhook cap while still looking clean for a gameplay clip.
+    _clipRec = new MediaRecorder(_clipStream, _clipMime ? {mimeType:_clipMime, videoBitsPerSecond:3500000} : undefined);
+    _clipChunks=[];
+    _clipRec.ondataavailable=e=>{
+      if(e.data && e.data.size) _clipChunks.push({t:Date.now(), b:e.data});
+      // Keep the first chunk forever (it holds the WebM header) + only the last ~22s of the rest,
+      // so memory stays bounded during a long match but "the last 20s" is always available.
+      if(_clipChunks.length>2){
+        const cutoff=Date.now()-22000, head=_clipChunks[0];
+        _clipChunks=[head, ..._clipChunks.slice(1).filter(c=>c.t>=cutoff)];
+      }
+    };
+    _clipRec.start(1000); // 1s timeslices
+  }catch(err){ console.warn('[clip] start failed', err); _clipRec=null; }
+}
+function _clipStop(){
+  try{ if(_clipRec && _clipRec.state!=='inactive') _clipRec.stop(); }catch(_){}
+  _clipRec=null; _clipChunks=[];
+  if(_clipStream){ try{_clipStream.getTracks().forEach(t=>t.stop());}catch(_){}; _clipStream=null; }
+}
+function _clipSave(){
+  if(!SS_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
+  if(!_clipEnabled()){ addToast('Clips are off — turn on in ⚙ Settings','#FFD700'); return; }
+  if(!_clipRec || _clipChunks.length===0){ addToast('Clip not ready yet — give it a few seconds','#FFD700'); return; }
+  const cutoff=Date.now()-20000, head=_clipChunks[0];
+  const parts=[head.b, ..._clipChunks.slice(1).filter(c=>c.t>=cutoff).map(c=>c.b)];
+  const blob=new Blob(parts, {type:_clipMime||'video/webm'});
+  _clipUpload(blob);
+}
+function _clipUpload(blob){
+  const fname='pacarena-'+Date.now()+'.webm';
+  if(!SS_CLIP_WEBHOOK){
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download=fname; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    addToast('🎬 Clip saved to your device','#39FF14');
+    return;
+  }
+  if(blob.size > 25*1024*1024){ addToast('Clip too big for Discord (25MB) — saved locally','#FFD700');
+    const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=fname; a.click(); setTimeout(()=>URL.revokeObjectURL(url),5000); return; }
+  const who=((typeof getMyName==='function' && getMyName()) || 'A player');
+  const where = ST.lobbyUsd ? ('$'+ST.lobbyUsd+' '+GAME_SERVER+' lobby') : 'practice';
+  const fd=new FormData();
+  fd.append('content','🎬 **'+String(who).slice(0,32)+'** clipped a moment — '+where);
+  fd.append('file', blob, fname);
+  addToast('🎬 Uploading clip…','#00CFFF');
+  fetch(SS_CLIP_WEBHOOK,{method:'POST',body:fd})
+    .then(r=>{ addToast(r.ok?'✅ Clip posted to Discord!':'Clip upload failed ('+r.status+')', r.ok?'#39FF14':'#FF4444'); })
+    .catch(()=>addToast('Clip upload failed (network)','#FF4444'));
+}
+
+// ── Settings modal (keybinds + clip toggle) ────────────────────────────────────
+let _kbCapturing=false, _kbCapBtn=null, _kbCapAct=null;
+function _keyLabel(k){
+  if(k===' ') return 'SPACE'; if(k==='Shift') return 'SHIFT'; if(k==='=') return '=';
+  if(k==='ArrowUp') return '↑'; if(k==='ArrowDown') return '↓';
+  if(k==='ArrowLeft') return '←'; if(k==='ArrowRight') return '→';
+  return String(k||'').toUpperCase();
+}
+function _openSettings(){ _renderSettings(); document.getElementById('settings-modal').style.display='flex'; }
+function _closeSettings(){ _cancelRebind(); document.getElementById('settings-modal').style.display='none'; }
+function _renderSettings(){
+  const on = SS_IS_PC && localStorage.getItem('ss_clip_on')==='1';
+  const tb=document.getElementById('clip-toggle-btn');
+  if(tb){
+    tb.textContent = !SS_IS_PC ? 'PC ONLY' : (on?'ON':'OFF');
+    tb.style.color = !SS_IS_PC ? '#888' : (on?'#39FF14':'#FF4444');
+  }
+  const list=document.getElementById('keybind-list');
+  if(list){
+    list.innerHTML = SS_BIND_DEFS.map(d=>
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.08);">'
+      +'<span style="font-family:\'Press Start 2P\',monospace;font-size:8px;color:#ccc;">'+d.label+'</span>'
+      +'<button class="copy-btn" style="min-width:64px;" onclick="_startRebind(\''+d.act+'\',this)">'+_keyLabel(_ssBindKey(d.act))+'</button>'
+      +'</div>').join('');
+  }
+}
+function _startRebind(act, btn){ _cancelRebind(); _kbCapturing=true; _kbCapAct=act; _kbCapBtn=btn; btn.textContent='PRESS…'; btn.style.color='#FFD700'; }
+function _cancelRebind(){ if(_kbCapBtn) _kbCapBtn.style.color=''; _kbCapturing=false; _kbCapAct=null; _kbCapBtn=null; }
+function _resetBinds(){ _ssBinds={}; try{localStorage.removeItem('ss_keybinds');}catch(_){}; _renderSettings(); }
+function _toggleClip(){
+  if(!SS_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
+  if(localStorage.getItem('ss_clip_on')==='1'){ localStorage.removeItem('ss_clip_on'); _clipStop(); }
+  else{ localStorage.setItem('ss_clip_on','1'); if(SG&&!SG.over&&!isSpectating)_clipStart(); }
+  _renderSettings();
+}
+// Global capture-phase listener: while rebinding, the next key press becomes the new binding.
+document.addEventListener('keydown', function(e){
+  if(!_kbCapturing) return;
+  e.preventDefault(); e.stopPropagation();
+  if(e.key==='Escape'){ _cancelRebind(); _renderSettings(); return; }
+  const k=_ssNormKey(e.key);
+  for(const a in _ssBinds){ if(_ssBinds[a]===k) delete _ssBinds[a]; } // key can only map to one action
+  _ssBinds[_kbCapAct]=k;
+  try{ localStorage.setItem('ss_keybinds', JSON.stringify(_ssBinds)); }catch(_){}
+  _cancelRebind(); _renderSettings();
+}, true);
+
 // ══ LAUNCH / END GAME ═══════════════════════════════════════
 
 function launchSnakeGame(){
@@ -3491,6 +3666,7 @@ function launchSnakeGame(){
   }
   const _bb=document.getElementById('bot-bar');if(_bb)_bb.style.display=(_isPractice&&localStorage.getItem('ss_owner')==='1')?'flex':'none';
   if(_firstRemoteSync){const _jo=document.getElementById('join-sync');if(_jo)_jo.style.display='flex';}
+  _clipStart(); // begin rolling clip buffer (PC + enabled only; no-op otherwise)
 }
 
 // ── Combat Tuning Suite ──────────────────────────────────────
@@ -3692,23 +3868,28 @@ function onWheel(e){
 function onTouchMove(e){e.preventDefault();if(_mobileCtl)return;if(e.touches.length){_mouseX=e.touches[0].clientX;_mouseY=e.touches[0].clientY;}}
 function onGameKey(e){
   if(e.repeat)return;
-  if(e.key===' '||e.key==='Shift')_mouseBoost=true;
-  if(e.key==='h'||e.key==='H'){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');}
-  if(e.key==='q'||e.key==='Q'){
+  if(_kbCapturing)return; // Settings is capturing a rebind — ignore game actions
+  // 'H' hitboxes stays hardcoded (dev tool, not in the remap list) unless the key is bound elsewhere.
+  const a=_ssKeyAction(e.key);
+  if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
+  if(!a)return;
+  if(a==='boost')_mouseBoost=true;
+  else if(a==='cashout'){
     if(SG&&!SG.over&&!_localDead&&!_cashoutTimer){
-      addToast('HOLD Q to cash out… release to cancel','#FFD700');
+      addToast('HOLD to cash out… release to cancel','#FFD700');
       _cashoutTimer=setTimeout(()=>{_cashoutTimer=null;endSnakeGame('cashout',null);},1000);
     }
   }
-  // +/= zoom in, -/_ zoom out (keyboard). rafDraw re-clamps to the visible range.
-  if(e.key==='='||e.key==='+')_zoomOffset=Math.min(2.0,_zoomOffset+0.12);
-  if(e.key==='-'||e.key==='_')_zoomOffset=Math.max(-2.0,_zoomOffset-0.12);
-  if(e.key==='m'||e.key==='M')voiceToggle(); // keyboard/mouse: toggle voice chat
-  if((e.key==='e'||e.key==='E')&&!e.repeat)toggleAutoCircle(); // auto-circle: first press only, no keydown repeat
+  else if(a==='zoomIn')_zoomOffset=Math.min(2.0,_zoomOffset+0.12);   // rafDraw re-clamps to visible range
+  else if(a==='zoomOut')_zoomOffset=Math.max(-2.0,_zoomOffset-0.12);
+  else if(a==='voice')voiceToggle();
+  else if(a==='autoCircle')toggleAutoCircle();
+  else if(a==='clip')_clipSave();
 }
 function onGameKeyUp(e){
-  if(e.key===' '||e.key==='Shift')_mouseBoost=false;
-  if(e.key==='q'||e.key==='Q'){
+  const a=_ssKeyAction(e.key);
+  if(a==='boost')_mouseBoost=false;
+  else if(a==='cashout'){
     if(_cashoutTimer){clearTimeout(_cashoutTimer);_cashoutTimer=null;addToast('Cashout cancelled','#888');}
   }
 }
@@ -3934,6 +4115,7 @@ function goHome(){
   window.removeEventListener('wheel',onWheel);
   window.removeEventListener('resize',onResize);
   if(isHost)saveKillFood(); // preserve uncollected SOL pellets for the next person to join
+  _clipStop(); // tear down the rolling clip buffer on full exit
   SG=null;
   const srb=document.getElementById('spec-rejoin-btn');
   if(srb)srb.style.display='none';
@@ -3974,6 +4156,8 @@ function pollGamepad(){
     if(pressed(2)) voiceToggle();
     // L3 (left stick click, index 10) — toggle auto-circle
     if(pressed(10)) toggleAutoCircle();
+    // R3 (right stick click, index 11) — save a 20s clip
+    if(pressed(11)) _clipSave();
     // B button (index 1) — hold 1s to cashout
     if(pressed(1)&&!_cashoutTimer&&!_localDead){
       addToast('HOLD B to cash out…','#FFD700');
