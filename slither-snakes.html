@@ -4375,49 +4375,13 @@ function drawFood(){
   });
 }
 
-// Render-only jitter smoothing for the trailing body. getBodyPoints() re-resamples the whole
-// body by arc length every frame, so tiny frame-to-frame shifts in where the head anchor sits
-// (interpolation/reconciliation) ripple into small position changes further down the body —
-// visible as a faint shake even though the underlying path/collision data is fine. This just
-// blends each body point toward its freshly-resampled position instead of snapping to it
-// outright. Purely cosmetic: it never touches snake.path, collision, or network code, and the
-// head (index 0) is always left exact so camera-lock on your own snake stays pixel-perfect.
-//
-// numSections changes by ±1 fairly often (growth from food, boost length drain) — every such
-// tick, bPts.length changes too. That used to blow away the ENTIRE smoothing cache and snap
-// back to raw/unsmoothed for one frame, which happens often enough to read as a rhythmic
-// hitch rather than a one-off. Now only the newly added/removed tail point(s) reset; the rest
-// of the body keeps its smoothed history across a length change.
-const BODY_SMOOTH_F=0.2; // lower = smoother/more lag, higher = snappier/less smoothing
-function _smoothBodyPoints(snake,bPts){
-  const prev=snake._smoothPts;
-  const n=bPts.length;
-  if(!prev){
-    snake._smoothPts=bPts.map(p=>({x:p.x,y:p.y}));
-    return snake._smoothPts;
-  }
-  const overlap=Math.min(prev.length,n);
-  const out=new Array(n);
-  out[0]={x:bPts[0].x,y:bPts[0].y}; // head always exact
-  for(let i=1;i<n;i++){
-    if(i<overlap){
-      const pv=prev[i];
-      out[i]={x:pv.x+(bPts[i].x-pv.x)*BODY_SMOOTH_F,y:pv.y+(bPts[i].y-pv.y)*BODY_SMOOTH_F};
-    }else{
-      out[i]={x:bPts[i].x,y:bPts[i].y}; // newly-added tail point — no history to blend from yet
-    }
-  }
-  snake._smoothPts=out;
-  return out;
-}
 function drawSnake(snake){
   if(!snake.path||snake.path.length<2)return;
-  let bPts=getBodyPoints(snake);
+  const bPts=getBodyPoints(snake);
   if(bPts.length<2)return;
   // Rendered head only: draw the head end at the extrapolated position (remote snakes).
   // Replaces the transient array slot with s._exHead — does NOT mutate snake.path[0].
   if(snake._exHead)bPts[0]=snake._exHead;
-  bPts=_smoothBodyPoints(snake,bPts);
   const r=sectionRadius(snake); // damnbruh visual radius
   const col=snake.color;
   const n=bPts.length;
@@ -4444,15 +4408,7 @@ function drawSnake(snake){
   }
   ctx.fill();
 
-  // Shadow/highlight alpha halved from the original damnbruh values (0.25/0.22 -> 0.12/0.10).
-  // Video evidence showed the outer body silhouette tracks smoothly frame-to-frame, but these
-  // two overlapping-circle passes (each segment's shadow/highlight blob overlaps its neighbors'
-  // by a lot, since spacing is only 0.5x radius) visibly reflow/pulse independently as the arc-
-  // length resampling phase drifts a fraction of a segment each frame — that's the "shaking"
-  // people are seeing, not the actual body position. Toning down the alpha keeps the 3D-tube
-  // shading look but makes that reflow far less perceptually salient without touching geometry,
-  // path data, or collision.
-  ctx.fillStyle='rgba(0,0,0,0.12)';
+  ctx.fillStyle='rgba(0,0,0,0.25)';
   ctx.beginPath();
   for(let i=n-1;i>=0;i--){
     const p=bPts[i];if(!p)continue;
@@ -4460,7 +4416,7 @@ function drawSnake(snake){
   }
   ctx.fill();
 
-  ctx.fillStyle='rgba(255,255,255,0.10)';
+  ctx.fillStyle='rgba(255,255,255,0.22)';
   ctx.beginPath();
   for(let i=n-1;i>=0;i--){
     const p=bPts[i];if(!p)continue;
