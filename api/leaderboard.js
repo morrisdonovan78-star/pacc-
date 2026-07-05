@@ -85,6 +85,43 @@ module.exports = async function handler(req, res) {
     }
   }
 
+  // ── TEMP one-time migration — remove after running once ─────────────────────
+  // Commit 6640ac3 split leaderboard stats per-game but left the pre-existing unscoped
+  // data (ph:{addr} / lb:earned / ph:global) behind, so the new pac-scoped keys came up
+  // empty. That old data all predates Slither Snakes' paid lobbies going live, so it's
+  // safe to copy it forward as Pac-Man history. Non-destructive: only copies, never deletes.
+  if (req.method === 'GET' && req.query && req.query.do === 'migrate-pac-once' &&
+      req.query.token === 'heMYW9wYbzmafdoNfJrEO1S99t7SFSZd') {
+    try {
+      const raw = await kvZrevrange('lb:earned', 0, -1) || [];
+      const pairs = [];
+      for (let i = 0; i < raw.length; i += 2) pairs.push({ address: raw[i], score: raw[i + 1] });
+
+      const FIELDS = ['earned', 'wagered', 'games', 'kills', 'deaths', 'wins', 'losses'];
+      let migrated = 0;
+      for (const { address, score } of pairs) {
+        await kvZadd('lb:pac:earned', Number(score) || 0, address);
+        const h = await kvHgetall('ph:' + address);
+        if (h) {
+          for (const f of FIELDS) if (h[f] !== undefined) await kvHset('ph:pac:' + address, f, h[f]);
+        }
+        migrated++;
+      }
+
+      const g = await kvHgetall('ph:global');
+      if (g) {
+        for (const f of ['totalEarned', 'totalWagered', 'gamesPlayed']) {
+          if (g[f] !== undefined) await kvHset('ph:pac:global', f, g[f]);
+        }
+      }
+
+      return res.status(200).json({ ok: true, migrated, players: pairs.length });
+    } catch (err) {
+      console.error('[leaderboard/migrate]', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   const game = gameOf(req.query && req.query.game);
