@@ -3,7 +3,15 @@
 const nacl    = require('tweetnacl');
 const crypto  = require('crypto');
 const GAME_SECRET = (process.env.GAME_SECRET || '').trim();
-const { kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvHincrby } = require('../lib/kv');
+const { kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvHincrby, kvLpush, kvLtrim } = require('../lib/kv');
+
+// Appends a timestamped earnings snapshot (for the player-profile chart) and caps the
+// list at 200 points so it can't grow unbounded for long-lived accounts.
+async function pushEarningsPoint(game, address, earned) {
+  const key = 'ph:' + game + ':hist:' + address;
+  await kvLpush(key, JSON.stringify({ t: Date.now(), e: Number(earned) || 0 }));
+  await kvLtrim(key, 0, 199);
+}
 
 // ── Ed25519 wallet signature verification ─────────────────────────────────────
 // The client signs: "pac-arena:{action}:{playerAddress}:{wagerLamports}:{unixTs}"
@@ -397,6 +405,7 @@ module.exports = async function handler(req, res) {
                 await kvHincrby(pk,'wins',1);
                 await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
                 await kvHincrby('ph:'+game+':global','totalEarned',playerCut);
+                await pushEarningsPoint(game,playerAddress,newEarned);
               }catch(_){}
             })();
             break;
@@ -502,6 +511,7 @@ module.exports = async function handler(req, res) {
               await kvHincrby(pk,'kills',1);
               const newEarned=await kvHincrby(pk,'earned',killerCut||0);
               await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
+              await pushEarningsPoint(game,playerAddress,newEarned);
               // Track death for victim — must happen regardless of wager since victim's
               // wager was already deleted above, so their settle/lose won't count it.
               if(vaBody && vaBody!==playerAddress) {

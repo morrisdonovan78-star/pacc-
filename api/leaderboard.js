@@ -1,7 +1,7 @@
 'use strict';
 // api/leaderboard.js — GET top-20 players; POST to register/update display name
 const { kvGet, kvSetPerm, kvDel, kvZadd, kvZrevrange,
-        kvHget, kvHset, kvHgetall } = require('../lib/kv');
+        kvHget, kvHset, kvHgetall, kvLrange } = require('../lib/kv');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -89,14 +89,22 @@ module.exports = async function handler(req, res) {
 
   const game = gameOf(req.query && req.query.game);
 
-  // ── GET ?address= — single player profile ───────────────────────────────────
+  // ── GET ?address= — single player profile (+ earnings history for the chart) ────
   if (req.query && req.query.address) {
     try {
       const addr = String(req.query.address).trim();
-      const stats = await readStats(game, addr);
+      const [stats, histRaw] = await Promise.all([
+        readStats(game, addr),
+        kvLrange('ph:' + game + ':hist:' + addr, 0, 199).catch(() => null),
+      ]);
       const hasData = stats.earned > 0 || stats.wagered > 0 || stats.games > 0 || stats.name;
       if (!hasData) return res.status(200).json({ player: null });
-      return res.status(200).json({ player: { address: addr, ...stats } });
+      // kvLpush writes newest-first; reverse to chronological order for the chart
+      const history = (histRaw || [])
+        .map(s => { try { return JSON.parse(s); } catch (_) { return null; } })
+        .filter(Boolean)
+        .reverse();
+      return res.status(200).json({ player: { address: addr, ...stats, history } });
     } catch (err) {
       console.error('[leaderboard/player]', err);
       return res.status(500).json({ error: 'Internal server error' });

@@ -127,6 +127,12 @@ html,body{background:#07070f;color:var(--txt);font-family:'Exo 2',sans-serif;min
 #lb-rows tr.lb-top3{background:rgba(255,105,180,.05);}
 #lb-rows tr.lb-me{box-shadow:inset 0 0 0 1px rgba(57,255,20,.45);}
 #lb-rows td{padding:7px 4px;}
+#lb-rows tr[data-address]{cursor:pointer;}
+.lb-icon-btn{background:none;border:none;color:rgba(255,255,255,.5);font-size:12px;cursor:pointer;padding:2px 4px;}
+.lb-icon-btn:hover{color:#fff;}
+.pf-tf{opacity:.5;}
+.pf-tf.active{opacity:1;border-color:var(--g);color:var(--g);}
+.fr-row{display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:7px;}
 .otp-box{width:44px;height:52px;background:rgba(255,255,255,.04);border:2px solid var(--border);border-radius:8px;font-family:'Press Start 2P',monospace;font-size:20px;text-align:center;color:var(--y);outline:none;}
 .otp-box:focus{border-color:var(--g);box-shadow:0 0 0 3px rgba(57,255,20,.1);}
 #scr-game.on{position:fixed;top:0;left:0;width:100vw;height:100vh;padding:0;overflow:hidden;z-index:50;background:#000;display:flex;align-items:center;justify-content:center;cursor:none;}
@@ -292,14 +298,15 @@ body.mctl #voice-speakers{left:150px;}
     <button id="practice-btn" class="btn btn-c btn-sm" onclick="launchPractice()" style="display:none;margin-bottom:10px;">⚙ PRACTICE (PRIVATE)</button>
     <button class="btn btn-c btn-sm" onclick="showWithdraw()" style="margin-bottom:10px;">💸 WITHDRAW SOL</button>
     <button class="btn btn-y btn-sm" onclick="openLeaderboard()" style="margin-bottom:10px;">🏆 LEADERBOARD</button>
+    <button class="btn btn-c btn-sm" onclick="openFriends()" style="margin-bottom:10px;">👥 FRIENDS</button>
     <button class="btn btn-r btn-sm" onclick="doLogout()" style="margin:0 auto;width:auto;">LOGOUT</button>
   </div>
 </div>
 
 <!-- Withdrawal modal -->
-<div id="wd-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:none;align-items:center;justify-content:center;">
+<div id="wd-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:10002;display:none;align-items:center;justify-content:center;">
   <div class="card" style="max-width:420px;width:90%;padding:1.5rem;">
-    <div style="font-family:'Press Start 2P',monospace;font-size:12px;color:var(--acc);margin-bottom:.6rem;text-align:center;">WITHDRAW SOL</div>
+    <div id="wd-modal-title" style="font-family:'Press Start 2P',monospace;font-size:12px;color:var(--acc);margin-bottom:.6rem;text-align:center;">WITHDRAW SOL</div>
     <div id="wd-bal-line" style="font-size:10px;color:var(--muted);text-align:center;margin-bottom:1rem;">Available: $0.00</div>
     <div style="font-size:10px;color:var(--muted);margin-bottom:6px;">DESTINATION WALLET</div>
     <div style="display:flex;gap:6px;margin-bottom:10px;">
@@ -357,6 +364,7 @@ body.mctl #voice-speakers{left:150px;}
             <th style="padding:6px 4px;text-align:right;">GAMES</th>
             <th style="padding:6px 4px;text-align:right;">W/L</th>
             <th style="padding:6px 4px;text-align:right;">KILLS</th>
+            <th style="padding:6px 4px;text-align:right;"></th>
           </tr>
         </thead>
         <tbody id="lb-rows"></tbody>
@@ -364,7 +372,91 @@ body.mctl #voice-speakers{left:150px;}
       <div id="lb-loading" style="text-align:center;color:var(--muted);font-size:11px;padding:2rem 0;">Loading…</div>
       <div id="lb-empty" style="display:none;text-align:center;color:var(--muted);font-size:11px;padding:2rem 0;line-height:1.8;">No paid games played yet.<br>Be the first name on the board!</div>
     </div>
-    <div style="text-align:center;font-size:9px;color:var(--muted);margin-top:.6rem;">Updated <span id="lb-updated">--</span> · refreshes every 15s</div>
+    <div style="text-align:center;font-size:9px;color:var(--muted);margin-top:.6rem;">Updated <span id="lb-updated">--</span> · refreshes every 15s · click a player for full stats</div>
+  </div>
+</div>
+
+<!-- Player profile modal — full stats + earnings chart (opened from a leaderboard row) -->
+<div id="profile-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10001;align-items:center;justify-content:center;padding:1rem;" onclick="if(event.target===this)closeProfile()">
+  <div class="card" style="max-width:560px;width:100%;padding:1.5rem;max-height:88vh;overflow-y:auto;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem;">
+      <div>
+        <div id="pf-name" style="font-family:'Press Start 2P',monospace;font-size:13px;color:var(--y);">--</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:5px;">
+          <div id="pf-addr" style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);">--</div>
+          <button class="copy-btn" onclick="copyAddress(_pfAddress)" style="font-size:7px;padding:3px 7px;">📋</button>
+        </div>
+      </div>
+      <button class="copy-btn" onclick="closeProfile()">✕ CLOSE</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:7px;margin-bottom:1rem;">
+      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">EARNED</div>
+        <div style="font-size:11px;color:var(--g);font-weight:700;" id="pf-earned">--</div>
+      </div>
+      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">WAGERED</div>
+        <div style="font-size:11px;color:var(--y);font-weight:700;" id="pf-wagered">--</div>
+      </div>
+      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">GAMES</div>
+        <div style="font-size:11px;font-weight:700;" id="pf-games">--</div>
+      </div>
+      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">WIN %</div>
+        <div style="font-size:11px;color:var(--c);font-weight:700;" id="pf-winrate">--</div>
+      </div>
+      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">WINS</div>
+        <div style="font-size:11px;color:var(--g);font-weight:700;" id="pf-wins">--</div>
+      </div>
+      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">LOSSES</div>
+        <div style="font-size:11px;color:var(--r);font-weight:700;" id="pf-losses">--</div>
+      </div>
+      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">KILLS</div>
+        <div style="font-size:11px;color:var(--r);font-weight:700;" id="pf-kills">--</div>
+      </div>
+      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">K/D</div>
+        <div style="font-size:11px;font-weight:700;" id="pf-kd">--</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+      <div style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);">EARNINGS OVER TIME</div>
+      <div style="display:flex;gap:4px;">
+        <button class="copy-btn pf-tf" data-tf="1" onclick="setProfileTimeframe('1')" style="padding:4px 8px;font-size:6px;">1D</button>
+        <button class="copy-btn pf-tf" data-tf="7" onclick="setProfileTimeframe('7')" style="padding:4px 8px;font-size:6px;">7D</button>
+        <button class="copy-btn pf-tf" data-tf="30" onclick="setProfileTimeframe('30')" style="padding:4px 8px;font-size:6px;">30D</button>
+        <button class="copy-btn pf-tf" data-tf="all" onclick="setProfileTimeframe('all')" style="padding:4px 8px;font-size:6px;">ALL</button>
+      </div>
+    </div>
+    <canvas id="pf-chart" width="600" height="180" style="width:100%;height:150px;background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:8px;"></canvas>
+    <div id="pf-chart-empty" style="display:none;text-align:center;color:var(--muted);font-size:10px;padding:1rem 0;">No earnings history yet — cash out or win a kill to start the chart.</div>
+    <div style="display:flex;gap:8px;margin-top:1rem;">
+      <button class="btn btn-g btn-sm" style="flex:1;" onclick="openSendModal(_pfAddress,_pfName)">💸 SEND</button>
+      <button class="btn btn-c btn-sm" style="flex:1;" onclick="addFriend(_pfName,_pfAddress)">➕ ADD FRIEND</button>
+    </div>
+  </div>
+</div>
+
+<!-- Friends modal — personal contact book (localStorage), copy/send to saved wallets -->
+<div id="friends-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:10000;align-items:center;justify-content:center;padding:1rem;" onclick="if(event.target===this)closeFriends()">
+  <div class="card" style="max-width:460px;width:100%;padding:1.5rem;max-height:85vh;display:flex;flex-direction:column;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.85rem;">
+      <div class="logo" style="font-size:clamp(16px,3vw,22px);letter-spacing:2px;">👥 FRIENDS</div>
+      <button class="copy-btn" onclick="closeFriends()">✕ CLOSE</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:6px;">
+      <input id="fr-name" placeholder="Nickname" maxlength="20" autocomplete="off"
+        style="width:110px;background:rgba(0,0,0,.4);border:1px solid rgba(57,255,20,.3);border-radius:6px;color:#fff;font-size:11px;padding:9px 10px;outline:none;"/>
+      <input id="fr-addr" placeholder="Solana wallet address…" autocomplete="off"
+        style="flex:1;background:rgba(0,0,0,.4);border:1px solid rgba(57,255,20,.3);border-radius:6px;color:#fff;font-size:11px;padding:9px 10px;outline:none;"/>
+    </div>
+    <button class="btn btn-g btn-sm" style="margin-bottom:1rem;" onclick="addFriendFromForm()">➕ ADD FRIEND</button>
+    <div id="fr-list" style="overflow-y:auto;flex:1;min-height:80px;"></div>
+    <div id="fr-empty" style="display:none;text-align:center;color:var(--muted);font-size:11px;padding:1.5rem 0;">No friends saved yet.<br>Add a wallet address above, or use ➕ ADD FRIEND from a player's profile.</div>
   </div>
 </div>
 
@@ -751,7 +843,8 @@ async function loadLeaderboard(){
         const medal=p.rank===1?'🥇':p.rank===2?'🥈':p.rank===3?'🥉':'#'+p.rank;
         const cls='lb-top'+p.rank+(p.address===ST.address?' lb-me':'');
         const name=(p.name||_lbShortAddr(p.address)).replace(/[<>&]/g,'').slice(0,14);
-        return '<tr class="'+cls+'">'+
+        const attrName=name.replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+        return '<tr class="'+cls+'" data-address="'+p.address+'" data-name="'+attrName+'">'+
           '<td style="font-family:\'Press Start 2P\',monospace;font-size:9px;color:var(--y);">'+medal+'</td>'+
           '<td style="font-weight:600;">'+name+(p.address===ST.address?' <span style="color:var(--g);font-size:9px;">(YOU)</span>':'')+'</td>'+
           '<td style="text-align:right;color:var(--g);">'+_lbFmtSol(p.earned)+'</td>'+
@@ -759,6 +852,10 @@ async function loadLeaderboard(){
           '<td style="text-align:right;">'+p.games+'</td>'+
           '<td style="text-align:right;"><span style="color:var(--g);">'+p.wins+'</span>-<span style="color:var(--r);">'+p.losses+'</span></td>'+
           '<td style="text-align:right;color:var(--r);">'+p.kills+'</td>'+
+          '<td style="text-align:right;white-space:nowrap;">'+
+            '<button class="lb-icon-btn" data-copy title="Copy wallet">📋</button>'+
+            '<button class="lb-icon-btn" data-send title="Send SOL">💸</button>'+
+          '</td>'+
         '</tr>';
       }).join('');
     }
@@ -794,6 +891,177 @@ async function loadLeaderboard(){
     if(rowsEl.children.length===0){emptyEl.style.display='block';emptyEl.textContent='Could not load leaderboard — try again shortly.';}
   }
 }
+
+// Delegated click handling for leaderboard rows — set up once, survives re-renders
+// since #lb-rows itself is never replaced, only its innerHTML.
+(function _initLbRowEvents(){
+  const rowsEl=document.getElementById('lb-rows');
+  if(!rowsEl)return;
+  rowsEl.addEventListener('click',(e)=>{
+    const copyBtn=e.target.closest('[data-copy]');
+    const sendBtn=e.target.closest('[data-send]');
+    const row=e.target.closest('tr[data-address]');
+    if(!row)return;
+    const addr=row.dataset.address, name=row.dataset.name||'';
+    if(copyBtn){copyAddress(addr);return;}
+    if(sendBtn){openSendModal(addr,name);return;}
+    openPlayerProfile(addr,name);
+  });
+})();
+
+function copyAddress(addr){
+  if(!addr)return;
+  navigator.clipboard.writeText(addr).then(()=>addToast('Wallet copied!','#39FF14'))
+    .catch(()=>{try{const t=document.createElement('textarea');t.value=addr;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);addToast('Wallet copied!','#39FF14');}catch(_){}});
+}
+
+// ══ PLAYER PROFILE (stats + earnings-over-time chart, damnbruh-style) ══════════
+let _pfAddress=null,_pfName='',_pfHistory=[],_pfTimeframe='all';
+
+async function openPlayerProfile(address,name){
+  if(!address)return;
+  _pfAddress=address; _pfName=name||_lbShortAddr(address);
+  document.getElementById('profile-modal').style.display='flex';
+  document.getElementById('pf-name').textContent=_pfName;
+  document.getElementById('pf-addr').textContent=address;
+  ['earned','wagered','games','winrate','wins','losses','kills','kd'].forEach(f=>{
+    const el=document.getElementById('pf-'+f); if(el)el.textContent='…';
+  });
+  document.getElementById('pf-chart-empty').style.display='none';
+  document.getElementById('pf-chart').style.display='block';
+  try{
+    const r=await fetch('/api/leaderboard?game=ss&address='+encodeURIComponent(address));
+    const d=await r.json();
+    const p=d.player||{name:_pfName,earned:0,wagered:0,games:0,kills:0,deaths:0,wins:0,losses:0,history:[]};
+    if(p.name)_pfName=p.name;
+    document.getElementById('pf-name').textContent=_pfName;
+    document.getElementById('pf-earned').textContent=_lbFmtSol(p.earned);
+    document.getElementById('pf-wagered').textContent=_lbFmtSol(p.wagered);
+    document.getElementById('pf-games').textContent=p.games||0;
+    document.getElementById('pf-winrate').textContent=(p.games>0?Math.round((p.wins||0)/p.games*100):0)+'%';
+    document.getElementById('pf-wins').textContent=p.wins||0;
+    document.getElementById('pf-losses').textContent=p.losses||0;
+    document.getElementById('pf-kills').textContent=p.kills||0;
+    document.getElementById('pf-kd').textContent=((p.kills||0)/Math.max(p.deaths||0,1)).toFixed(1);
+    _pfHistory=p.history||[];
+    setProfileTimeframe('all');
+  }catch(e){
+    console.warn('[profile] load failed',e);
+    addToast('Could not load player stats','#f55');
+  }
+}
+function closeProfile(){document.getElementById('profile-modal').style.display='none';}
+
+function setProfileTimeframe(tf){
+  _pfTimeframe=tf;
+  document.querySelectorAll('.pf-tf').forEach(b=>b.classList.toggle('active',b.dataset.tf===tf));
+  _pfDrawChart();
+}
+
+function _pfDrawChart(){
+  const canvas=document.getElementById('pf-chart');
+  const emptyEl=document.getElementById('pf-chart-empty');
+  const now=Date.now();
+  const windowMs=_pfTimeframe==='all'?Infinity:Number(_pfTimeframe)*86400000;
+  const pts=_pfHistory.filter(pt=>windowMs===Infinity||now-pt.t<=windowMs);
+  if(pts.length<2){
+    canvas.style.display='none'; emptyEl.style.display='block';
+    return;
+  }
+  canvas.style.display='block'; emptyEl.style.display='none';
+
+  const ctx=canvas.getContext('2d');
+  const W=canvas.width,H=canvas.height,PAD=8;
+  ctx.clearRect(0,0,W,H);
+
+  const minT=pts[0].t,maxT=pts[pts.length-1].t;
+  const vals=pts.map(p=>p.e);
+  const minV=Math.min(...vals),maxV=Math.max(...vals);
+  const spanV=Math.max(maxV-minV,1);
+  const spanT=Math.max(maxT-minT,1);
+  const x=t=>PAD+((t-minT)/spanT)*(W-PAD*2);
+  const y=v=>H-PAD-((v-minV)/spanV)*(H-PAD*2);
+
+  // gridlines
+  ctx.strokeStyle='rgba(255,255,255,.06)'; ctx.lineWidth=1;
+  for(let i=0;i<=3;i++){const gy=PAD+(H-PAD*2)*i/3;ctx.beginPath();ctx.moveTo(PAD,gy);ctx.lineTo(W-PAD,gy);ctx.stroke();}
+
+  // line color: green if net up over the window, red if down (crypto-chart convention)
+  const trendUp=vals[vals.length-1]>=vals[0];
+  const lineColor=trendUp?'#39FF14':'#FF4444';
+
+  // filled area under the line
+  ctx.beginPath();
+  ctx.moveTo(x(pts[0].t),H-PAD);
+  pts.forEach(p=>ctx.lineTo(x(p.t),y(p.e)));
+  ctx.lineTo(x(pts[pts.length-1].t),H-PAD);
+  ctx.closePath();
+  const grad=ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,trendUp?'rgba(57,255,20,.25)':'rgba(255,68,68,.25)');
+  grad.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=grad; ctx.fill();
+
+  // line
+  ctx.beginPath();
+  pts.forEach((p,i)=>{const px=x(p.t),py=y(p.e);if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);});
+  ctx.strokeStyle=lineColor; ctx.lineWidth=2; ctx.stroke();
+
+  // last point dot
+  const lastP=pts[pts.length-1];
+  ctx.beginPath(); ctx.arc(x(lastP.t),y(lastP.e),3.5,0,Math.PI*2);
+  ctx.fillStyle=lineColor; ctx.fill();
+
+  // min/max SOL labels
+  ctx.font='9px monospace'; ctx.fillStyle='rgba(255,255,255,.5)'; ctx.textAlign='left';
+  ctx.fillText(_lbFmtSol(maxV),PAD+2,PAD+10);
+  ctx.fillText(_lbFmtSol(minV),PAD+2,H-PAD-3);
+}
+
+// ══ FRIENDS (personal contact book — localStorage, shared across both PAC ARENA games) ══
+function getFriends(){try{return JSON.parse(localStorage.getItem('ss_friends')||'[]');}catch(_){return [];}}
+function saveFriends(list){localStorage.setItem('ss_friends',JSON.stringify(list));}
+
+function addFriend(name,address){
+  if(!address||address.length<32){addToast('Enter a valid wallet address','#f55');return;}
+  const list=getFriends();
+  if(list.some(f=>f.address===address)){addToast('Already in your friends list','#FFD700');return;}
+  list.push({name:(name||'').trim().slice(0,20)||_lbShortAddr(address),address});
+  saveFriends(list);
+  addToast('Friend added','#39FF14');
+  renderFriends();
+}
+function addFriendFromForm(){
+  const name=document.getElementById('fr-name').value;
+  const addr=document.getElementById('fr-addr').value.trim();
+  addFriend(name,addr);
+  document.getElementById('fr-name').value='';
+  document.getElementById('fr-addr').value='';
+}
+function removeFriend(address){
+  saveFriends(getFriends().filter(f=>f.address!==address));
+  renderFriends();
+}
+function renderFriends(){
+  const list=getFriends();
+  const listEl=document.getElementById('fr-list');
+  const emptyEl=document.getElementById('fr-empty');
+  if(list.length===0){listEl.innerHTML='';emptyEl.style.display='block';return;}
+  emptyEl.style.display='none';
+  listEl.innerHTML=list.map(f=>{
+    const name=String(f.name||'').replace(/[<>&]/g,'').slice(0,20);
+    return '<div class="fr-row">'+
+      '<div><div style="font-weight:600;font-size:12px;">'+name+'</div>'+
+      '<div style="font-family:\'Press Start 2P\',monospace;font-size:6px;color:var(--muted);margin-top:3px;">'+_lbShortAddr(f.address)+'</div></div>'+
+      '<div style="display:flex;gap:4px;">'+
+        '<button class="lb-icon-btn" onclick="copyAddress(\''+f.address+'\')" title="Copy wallet">📋</button>'+
+        '<button class="lb-icon-btn" onclick="openSendModal(\''+f.address+'\',\''+name.replace(/'/g,"\\'")+'\')" title="Send SOL">💸</button>'+
+        '<button class="lb-icon-btn" onclick="removeFriend(\''+f.address+'\')" title="Remove" style="color:var(--r);">✕</button>'+
+      '</div>'+
+    '</div>';
+  }).join('');
+}
+function openFriends(){document.getElementById('friends-modal').style.display='flex';renderFriends();}
+function closeFriends(){document.getElementById('friends-modal').style.display='none';}
 
 function _onSnakeColorPick(col){
   const _r=parseInt(col.slice(1,3),16),_g=parseInt(col.slice(3,5),16),_b=parseInt(col.slice(5,7),16);
@@ -1004,7 +1272,26 @@ async function checkSession(){
 
 const WD_TX_FEE=5000; // lamports — 1 signature base fee
 function showWithdraw(){
+  document.getElementById('wd-modal-title').textContent='WITHDRAW SOL';
   document.getElementById('wd-addr').value='';
+  document.getElementById('wd-addr').readOnly=false;
+  document.getElementById('wd-amt').value='';
+  document.getElementById('wd-preview').textContent='';
+  const balLamps=Math.round(ST.balance*1e9);
+  const maxLamps=Math.max(0,balLamps-WD_TX_FEE);
+  const balUsd=ST.solPrice>0?(balLamps/1e9*ST.solPrice).toFixed(2):'?';
+  const maxUsd=ST.solPrice>0?(maxLamps/1e9*ST.solPrice).toFixed(2):'?';
+  document.getElementById('wd-bal-line').textContent='Available: $'+balUsd+' (max send: $'+maxUsd+')';
+  document.getElementById('wd-modal').style.display='flex';
+}
+
+// Reuses the withdraw modal/transfer flow to send SOL straight to another player's
+// wallet — same on-chain transfer doWithdraw() already does, just a prefilled recipient.
+function openSendModal(addr,name){
+  if(!addr){addToast('No wallet address','#f55');return;}
+  document.getElementById('wd-modal-title').textContent=name?('SEND TO '+String(name).toUpperCase()):'SEND SOL';
+  document.getElementById('wd-addr').value=addr;
+  document.getElementById('wd-addr').readOnly=true;
   document.getElementById('wd-amt').value='';
   document.getElementById('wd-preview').textContent='';
   const balLamps=Math.round(ST.balance*1e9);
