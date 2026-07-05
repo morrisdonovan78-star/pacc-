@@ -58,7 +58,8 @@
 :root{--y:#FFD700;--c:#00FFFF;--g:#39FF14;--r:#FF3333;--pk:#FF69B4;--dark:#07070f;--panel:#0e0e1c;--border:#1c1c38;--txt:#e0e0ff;--muted:#555588;}
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{background:#07070f;color:var(--txt);font-family:'Exo 2',sans-serif;min-height:100vh;overflow-x:hidden;touch-action:manipulation;}
-.scr{display:none;min-height:100vh;flex-direction:column;align-items:center;justify-content:center;padding:1.5rem 1rem;}
+#menu-bg{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none;display:block;}
+.scr{position:relative;z-index:1;display:none;min-height:100vh;flex-direction:column;align-items:center;justify-content:center;padding:1.5rem 1rem;}
 .scr.on{display:flex;}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:2rem 1.75rem;width:100%;max-width:440px;}
 .logo{font-family:'Orbitron',sans-serif;font-weight:900;font-size:clamp(28px,6vw,56px);letter-spacing:4px;line-height:1.1;text-align:center;}
@@ -184,6 +185,11 @@ body.mctl #voice-speakers{left:150px;}
 </style>
 </head>
 <body>
+
+<!-- Decorative space/hex backdrop behind the menu screens (home, sign-in, lobby) — matches
+     the in-game arena's hex-grid look. Static single draw + redraw on resize, not a per-frame
+     loop, so it costs nothing while the actual game canvas (#gc) is active and covering it. -->
+<canvas id="menu-bg"></canvas>
 
 <!-- ══ HOME ══════════════════════════════════════════════════ -->
 <div id="scr-home" class="scr on">
@@ -704,6 +710,65 @@ const KILL_FOOD_COLOR='#FFD700'; // gold — food dropped from a killed player (
 const SNAKE_COLORS=['#FFD700','#FF69B4','#00BFFF','#FF4500','#39FF14','#FF1493','#00FFFF','#DA70D6'];
 const RPC_REGIONS={'US':'https://api.mainnet-beta.solana.com','EU':'https://solana.public-rpc.com'};
 
+// ══ MENU BACKGROUND (static space/hex backdrop behind home/sign-in/lobby) ══════
+// Same hex-grid math/style as the in-game arena (drawArena(), further down) so the menus
+// feel like the same space, but with no camera/zoom — just tiled flat across the viewport.
+// Drawn once (+ on resize), not per-frame — this canvas isn't part of the game loop.
+let _menuBgResizeT=null;
+function drawMenuBackground(){
+  const c=document.getElementById('menu-bg');
+  if(!c)return;
+  const W=window.innerWidth,H=window.innerHeight;
+  c.width=W; c.height=H;
+  const ctx=c.getContext('2d');
+
+  const grad=ctx.createRadialGradient(W/2,H*0.3,0,W/2,H*0.3,Math.max(W,H)*0.9);
+  grad.addColorStop(0,'#0a0a22'); grad.addColorStop(1,'#05050f');
+  ctx.fillStyle=grad; ctx.fillRect(0,0,W,H);
+
+  // Hex grid, flat-top — same R/proportions as drawArena()'s in-game grid
+  const R=46, hx=1.5*R, hy=Math.sqrt(3)*R;
+  const cMax=Math.ceil(W/hx)+2, rMax=Math.ceil(H/hy)+2;
+  ctx.strokeStyle='rgba(0,255,255,0.07)'; ctx.lineWidth=1;
+  ctx.beginPath();
+  for(let cCol=-1;cCol<=cMax;cCol++){
+    const cx=cCol*hx, yoff=(cCol&1)?hy/2:0;
+    for(let rr=-1;rr<=rMax;rr++){
+      const cy=rr*hy+yoff;
+      for(let k=0;k<6;k++){
+        const a=Math.PI/3*k, vx=cx+R*Math.cos(a), vy=cy+R*Math.sin(a);
+        if(k===0)ctx.moveTo(vx,vy);else ctx.lineTo(vx,vy);
+      }
+      ctx.closePath();
+    }
+  }
+  ctx.stroke();
+
+  // Scattered stars — deterministic PRNG so they don't jump around on resize/redraw
+  let seed=1337;
+  const rnd=()=>{seed=(seed*9301+49297)%233280;return seed/233280;};
+  const starColors=['#ffffff','#8fd7ff','#ffd27f','#ff8fd0','#8fffb0'];
+  const starCount=Math.floor((W*H)/9000);
+  for(let i=0;i<starCount;i++){
+    const x=rnd()*W, y=rnd()*H, r=rnd()*1.6+0.4;
+    ctx.globalAlpha=rnd()*0.6+0.3;
+    ctx.fillStyle=starColors[Math.floor(rnd()*starColors.length)];
+    ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  // A couple of soft comet-tail streaks for flavor, echoing the reference art
+  [['rgba(80,120,255,0.22)',0.15,0.7],['rgba(255,80,80,0.16)',0.85,0.25]].forEach(([color,fx,fy])=>{
+    const gx=W*fx, gy=H*fy;
+    const streak=ctx.createLinearGradient(gx-70,gy-150,gx+70,gy+150);
+    streak.addColorStop(0,'rgba(0,0,0,0)'); streak.addColorStop(0.5,color); streak.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.strokeStyle=streak; ctx.lineWidth=36; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(gx-60,gy-130); ctx.lineTo(gx+60,gy+130); ctx.stroke();
+  });
+}
+drawMenuBackground();
+window.addEventListener('resize',()=>{clearTimeout(_menuBgResizeT);_menuBgResizeT=setTimeout(drawMenuBackground,150);});
+
 // ══ STATE ═══════════════════════════════════════════════════
 const ST={email:'',address:'',balance:0,solPrice:0,wagerSol:0,lobbyUsd:0,conn:null,hasEscrow:false,cashoutLamports:0,entryToken:null};
 let _keypair=null,_jwt='',_pendingBackupKp=null;
@@ -1056,7 +1121,7 @@ function _pfDrawChart(){
   const now=Date.now();
   const windowMs=_pfTimeframe==='all'?Infinity:Number(_pfTimeframe)*86400000;
   const pts=_pfHistory.filter(pt=>windowMs===Infinity||now-pt.t<=windowMs);
-  if(pts.length<2){
+  if(pts.length===0){
     canvas.style.display='none'; emptyEl.style.display='block';
     return;
   }
@@ -1065,6 +1130,22 @@ function _pfDrawChart(){
   const ctx=canvas.getContext('2d');
   const W=canvas.width,H=canvas.height,PAD=8;
   ctx.clearRect(0,0,W,H);
+
+  // Single earning event (e.g. one cashout) — nothing to draw a trend line between yet.
+  // Show a flat reference line + labeled dot instead of hiding the chart entirely.
+  if(pts.length===1){
+    const val=pts[0].e, y0=H/2;
+    ctx.strokeStyle='rgba(255,255,255,.06)'; ctx.lineWidth=1;
+    for(let i=0;i<=3;i++){const gy=PAD+(H-PAD*2)*i/3;ctx.beginPath();ctx.moveTo(PAD,gy);ctx.lineTo(W-PAD,gy);ctx.stroke();}
+    ctx.setLineDash([4,4]);
+    ctx.beginPath();ctx.moveTo(PAD,y0);ctx.lineTo(W-PAD,y0);
+    ctx.strokeStyle='#39FF14';ctx.lineWidth=2;ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();ctx.arc(W-PAD-6,y0,4,0,Math.PI*2);ctx.fillStyle='#39FF14';ctx.fill();
+    ctx.font='9px monospace'; ctx.fillStyle='rgba(255,255,255,.6)'; ctx.textAlign='left';
+    ctx.fillText(_lbFmtSol(val)+' — first earning event, chart builds from here',PAD+2,y0-8);
+    return;
+  }
 
   const minT=pts[0].t,maxT=pts[pts.length-1].t;
   const vals=pts.map(p=>p.e);
