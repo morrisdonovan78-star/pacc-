@@ -3454,7 +3454,7 @@ const SS_IS_PC = !(('ontouchstart' in window) || (navigator.maxTouchPoints||0) >
 // Discord webhook for auto-posting clips to your #clips channel. Empty string = clips just
 // download to the player's device instead. Exposed in client code by necessity (browser →
 // Discord direct); if it ever gets abused, regenerate it in Discord and paste the new one here.
-const SS_CLIP_WEBHOOK = '';
+const SS_CLIP_WEBHOOK = 'https://discord.com/api/webhooks/1523452307268833333/zEoRKlhURKzFv-Q7pdDEVOGEPltlfSQjP8wA0s1W2C9FwCgZfze2Yv6rLFpXCZ06IYlU';
 
 // action → default keys (first is the primary shown in Settings). Boost keeps Space+Shift.
 const SS_BIND_DEFS = [
@@ -3592,6 +3592,14 @@ document.addEventListener('keydown', function(e){
   try{ localStorage.setItem('ss_keybinds', JSON.stringify(_ssBinds)); }catch(_){}
   _cancelRebind(); _renderSettings();
 }, true);
+
+// Real page-unload (refresh / close tab / navigate away) — tell the server we're leaving for good
+// so our snake dies and the wager drops as food right away, instead of sitting frozen for the
+// disconnect grace. pagehide fires on genuine unload only; a tab-switch fires visibilitychange
+// (NOT this) and keeps the socket open, so backgrounding never triggers a forfeit. Registered once.
+window.addEventListener('pagehide', function(){
+  try{ if(_sio && SG && !SG.over && !isSpectating && !_localDead && myPid) _sio.emit('ss-quit'); }catch(_){}
+});
 
 // ══ LAUNCH / END GAME ═══════════════════════════════════════
 

@@ -539,6 +539,28 @@ function ssPlayerLeft(lid, pid, io) {
   }
 }
 
+// Immediate forfeit-on-leave for SS: the player actually left the page (refresh / closed the tab /
+// navigated away, or explicitly emitted 'ss-quit'), so their wager converts to food RIGHT NOW —
+// identical to the grace-expiry path, just without the wait, so their body doesn't sit there
+// frozen. Deliberately NOT used for a mere backgrounded tab or a brief network blip: those don't
+// cleanly leave (the socket stays open, or drops with a ping-timeout that keeps the reconnect
+// grace). Idempotent — safe to call from both the 'ss-quit' emit and the transport-close disconnect.
+function ssForfeitNow(lid, pid, io) {
+  const sg = ssGames.get(lid);
+  if (!sg) return;
+  const sn = sg.snakes.get(pid);
+  if (sn && sn.alive) {
+    if (!sg.food) sg.food = [];
+    ssSpawnKillFood(sg, sn);
+    sg._foodDirty = true;
+    sn.alive = false; sn._killedAt = Date.now(); sn.segs = []; sn.path = [];
+    io.to(lid).emit('leave', { id: pid });
+    console.log(`[${lid}] ${pid} left the page — wager dropped as food (immediate forfeit)`);
+  }
+  sg.snakes.delete(pid);
+  if (sg.snakes.size === 0) { clearInterval(sg.tickInterval); sg.tickInterval = null; ssGames.delete(lid); }
+}
+
 // ── MoneySlither stepMovement port — ONE 60 Hz sub-step (verbatim from client.js) ──
 // Continuous `size` is authoritative; ns/thickness derived. Chord-based path sampling.
 function ssGrowCap(sn) {
@@ -1659,13 +1681,39 @@ io.on('connection', socket => {
   });
 
   // ── Disconnect ────────────────────────────────────────────────
-  socket.on('disconnect', () => {
+  // Explicit "I'm leaving the page" signal from the client (fires on pagehide/refresh/close,
+  // before the socket tears down). An unambiguous leave — forfeit immediately so the body never
+  // sits frozen. You can only quit your OWN pid (the socket's), so there's nothing to authorize.
+  socket.on('ss-quit', () => {
+    if (!lobbyId.startsWith('ss-')) return;
+    const dp = room.players.get(pid);
+    if (dp && dp.socketId !== socket.id) return; // superseded by a newer socket — leave it alone
+    ssForfeitNow(lobbyId, pid, io);              // die where they were + wager drops as food, now
+    // Keep the room.players entry as a DEAD tombstone (do NOT delete it) so a reconnect is treated
+    // as a dead player and blocked by the single-use-token gate — you can't rejoin a wager you just
+    // forfeited. The disconnect that immediately follows this (transport close) handles its cleanup.
+    if (dp) dp.alive = false;
+  });
+
+  socket.on('disconnect', (reason) => {
     const dp = room.players.get(pid);
     // Stale-socket guard: if a newer connection for this pid has already taken over
     // (e.g. a duplicate/racing join reconnected before this older socket's disconnect
     // event arrived), dp.socketId no longer matches this socket. Acting on it here would
     // freeze/delete the CURRENT live session out from under the player. No-op instead.
     if (dp && dp.socketId !== socket.id) return;
+    // Refresh / close tab / navigate away shows up as a clean 'transport close' — the player
+    // genuinely left, so kill their snake NOW (wager drops as food where they were) instead of
+    // freezing it for the grace window, and mark them dead so a reconnect is blocked by the
+    // single-use-token gate. We still fall through to the normal room.players cleanup below (which
+    // keeps the dead tombstone through the grace window, then removes it). A backgrounded tab never
+    // reaches here (its socket stays open — handled by the SS_GHOST_MS freeze); a dead/blipped
+    // network arrives as 'ping timeout'/'transport error' and keeps the reconnect grace instead.
+    // (This is the server-side backup for the client's 'ss-quit' emit, for when it didn't flush.)
+    if (lobbyId.startsWith('ss-') && reason === 'transport close') {
+      ssForfeitNow(lobbyId, pid, io);
+      if (dp) dp.alive = false;
+    }
     // Grace period: a brief network blip / heartbeat timeout shouldn't wipe the player.
     // Keep them frozen + non-collidable so they resume the SAME spot and score on
     // reconnect, instead of vanishing (looked like a cashout/kill) and respawning fresh.
