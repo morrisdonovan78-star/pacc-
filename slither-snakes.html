@@ -3982,16 +3982,6 @@ document.addEventListener('keydown',function(e){
     window._OWN_CORRECT=(cur>0)?0:TEST;
     addToast('own-head correct: '+window._OWN_CORRECT+(window._OWN_CORRECT===0?'  (baseline)':'  (test)'), window._OWN_CORRECT===0?'#888':'#4CFF9E', 1800);
   }
-  // Shift+B — owner-only toggle: baseline (off) <-> test body-jitter smoothing. Off by default
-  // for every player, always — drawSnake() only reads window._BODY_SMOOTH, never assumes it
-  // exists, so nobody's rendering changes unless the owner explicitly flips this on their own
-  // client to A/B it. Nothing ships as a new default until it's actually confirmed to help.
-  if((e.key==='b'||e.key==='B')&&e.shiftKey&&!e.repeat&&localStorage.getItem('ss_owner')==='1'){
-    const TEST=0.35;
-    const cur=(typeof window._BODY_SMOOTH==='number')?window._BODY_SMOOTH:0;
-    window._BODY_SMOOTH=(cur>0)?0:TEST;
-    addToast('body smoothing: '+window._BODY_SMOOTH+(window._BODY_SMOOTH===0?'  (baseline)':'  (test)'), window._BODY_SMOOTH===0?'#888':'#4CFF9E', 1800);
-  }
 });
 
 // Local-player prediction — MoneySlither-exact 60 Hz sub-steps (boost ramp + chord speed),
@@ -4402,41 +4392,13 @@ function drawFood(){
   });
 }
 
-// Opt-in only (Shift+B, owner client only, see keydown handler) — off (0) for every player by
-// default, always. getBodyPoints() re-resamples the whole body by arc length every frame, so
-// tiny frame-to-frame shifts in the head anchor ripple into small position changes further
-// down the body. This blends each body point toward its freshly-resampled position instead of
-// snapping to it, without touching snake.path/collision/network. Head (index 0) stays exact
-// so camera-lock on your own snake is unaffected. A length change (growth/boost drain) only
-// resets the newly added/removed tail point, not the whole cache.
-function _smoothBodyPointsIfEnabled(snake,bPts){
-  const f=(typeof window._BODY_SMOOTH==='number')?window._BODY_SMOOTH:0;
-  if(f<=0){snake._smoothPts=null;return bPts;} // baseline: untouched, byte-identical to stock
-  const prev=snake._smoothPts;
-  const n=bPts.length;
-  if(!prev){snake._smoothPts=bPts.map(p=>({x:p.x,y:p.y}));return snake._smoothPts;}
-  const overlap=Math.min(prev.length,n);
-  const out=new Array(n);
-  out[0]={x:bPts[0].x,y:bPts[0].y};
-  for(let i=1;i<n;i++){
-    if(i<overlap){
-      const pv=prev[i];
-      out[i]={x:pv.x+(bPts[i].x-pv.x)*f,y:pv.y+(bPts[i].y-pv.y)*f};
-    }else{
-      out[i]={x:bPts[i].x,y:bPts[i].y};
-    }
-  }
-  snake._smoothPts=out;
-  return out;
-}
 function drawSnake(snake){
   if(!snake.path||snake.path.length<2)return;
-  let bPts=getBodyPoints(snake);
+  const bPts=getBodyPoints(snake);
   if(bPts.length<2)return;
   // Rendered head only: draw the head end at the extrapolated position (remote snakes).
   // Replaces the transient array slot with s._exHead — does NOT mutate snake.path[0].
   if(snake._exHead)bPts[0]=snake._exHead;
-  bPts=_smoothBodyPointsIfEnabled(snake,bPts);
   const r=sectionRadius(snake); // damnbruh visual radius
   const col=snake.color;
   const n=bPts.length;
