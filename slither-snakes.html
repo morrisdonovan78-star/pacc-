@@ -1063,11 +1063,28 @@ function getMyName(){
   const inp=(document.getElementById('name-input')?.value||'').trim().toUpperCase().slice(0,12);
   return inp||(localStorage.getItem('ss_name_'+(ST.address||''))||'').trim()||'SNAKE';
 }
-function saveDisplayName(){
+// Was localStorage-only — the SAVE button showed a "Name saved!" confirmation but never told
+// the server at all. The ONLY thing that ever pushed a name server-side was joining a PAID
+// lobby (api/join.js), which meant fixing a wrong/stuck name required spending real money on
+// a new wager, and a name typed here would silently vanish until your next paid join. Now
+// actually calls the same setname endpoint index.html (Pac-Man) already used, which also
+// maintains nameReg/nameIndex — so a name change here takes effect immediately AND becomes
+// searchable right away, no wager required.
+async function saveDisplayName(){
   const v=(document.getElementById('name-input').value||'').trim().toUpperCase().slice(0,12);
   if(!v){addToast('Enter a name first','#FF4444');return;}
   localStorage.setItem('ss_name_'+(ST.address||''),v);
-  addToast('Name saved: '+v,'#39FF14');
+  if(!ST.address){addToast('Name saved: '+v,'#39FF14');return;} // not logged in yet — local only until they are
+  try{
+    const r=await fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'setname',address:ST.address,name:v})});
+    const d=await r.json().catch(()=>({}));
+    if(d.error==='taken'){addToast('That name is already taken — try another','#FF4444');return;}
+    if(!r.ok||d.error){addToast('Saved locally, but server sync failed — will retry next game','#FFD700');return;}
+    addToast('Name saved: '+(d.name||v),'#39FF14');
+  }catch(e){
+    addToast('Saved locally, but couldn\'t reach server — will retry next game','#FFD700');
+  }
 }
 
 // ══ LEADERBOARD (paid lobbies only — powered by /api/leaderboard?game=ss, backed by
