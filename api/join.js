@@ -6,7 +6,7 @@
 
 const nacl   = require('tweetnacl');
 const crypto = require('crypto');
-const { kvGet, kvSet, kvDel, kvSetPerm, kvZadd, kvHincrby, kvHget, kvHset, kvHsetnx } = require('../lib/kv');
+const { kvGet, kvSet, kvDel, kvSetPerm, kvZadd, kvZrem, kvHincrby, kvHget, kvHset } = require('../lib/kv');
 
 // Game token — HMAC-signed proof of payment for the Socket.io game server.
 // Format matches server.js makeGameToken() so the server can validate it.
@@ -212,8 +212,34 @@ module.exports = async function handler(req, res) {
       const game=(lobbyId&&lobbyId.startsWith('ss-'))?'ss':'pac';
       const namePk='ph:'+walletAddress;      // display name is shared across both games
       const statsPk='ph:'+game+':'+walletAddress;
-      // Set display name only if player doesn't have one yet
-      if(playerName&&typeof playerName==='string') await kvHsetnx(namePk,'name',playerName.slice(0,20).toUpperCase());
+      // Register/update display name. This is the ONLY place Slither Snakes ever registers a
+      // name server-side (its client-side "save name" button is localStorage-only) — so
+      // nameReg/nameIndex have to be maintained here too, or player-search would never find
+      // any Slither Snakes player.
+      //
+      // 'SNAKE' is the client's fallback name (slither-snakes.html getMyName()) sent whenever
+      // someone hasn't typed a custom one — NOT a real chosen name. Two things this guards
+      // against, both previously live bugs:
+      //  1. Registering it would let one arbitrary address squat nameReg:SNAKE, and every
+      //     other un-named player's join would silently overwrite that mapping too.
+      //  2. The old kvHsetnx (set-only-if-absent) permanently locked a player's name to
+      //     whatever they had on their FIRST-EVER join. If that first join happened before
+      //     they typed a real name, they were stuck showing as "SNAKE" forever — even after
+      //     typing and saving a real one, since the field already had a value. Using an
+      //     unconditional update (when the new name differs and isn't the fallback) lets a
+      //     real name set later actually take effect on the next join.
+      if(playerName&&typeof playerName==='string'){
+        const clean=String(playerName).replace(/[^A-Za-z0-9_\- ]/g,'').trim().slice(0,20).toUpperCase();
+        if(clean&&clean!=='SNAKE'){
+          const current=await kvHget(namePk,'name');
+          if(current!==clean){
+            if(current) { await kvDel('nameReg:'+current).catch(()=>{}); await kvZrem('nameIndex',current).catch(()=>{}); }
+            await kvHset(namePk,'name',clean);
+            await kvSetPerm('nameReg:'+clean, walletAddress);
+            await kvZadd('nameIndex', 0, clean);
+          }
+        }
+      }
       await kvHincrby(statsPk,'wagered',lamps);
       await kvHincrby(statsPk,'games',1);
       // Keep sorted set score in sync (score = current earned lamports)

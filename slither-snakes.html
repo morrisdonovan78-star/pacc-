@@ -710,17 +710,15 @@ const KILL_FOOD_COLOR='#FFD700'; // gold — food dropped from a killed player (
 const SNAKE_COLORS=['#FFD700','#FF69B4','#00BFFF','#FF4500','#39FF14','#FF1493','#00FFFF','#DA70D6'];
 const RPC_REGIONS={'US':'https://api.mainnet-beta.solana.com','EU':'https://solana.public-rpc.com'};
 
-// ══ MENU BACKGROUND (static space/hex backdrop behind home/sign-in/lobby) ══════
-// Same hex-grid math/style as the in-game arena (drawArena(), further down) so the menus
-// feel like the same space, but with no camera/zoom — just tiled flat across the viewport.
-// Drawn once (+ on resize), not per-frame — this canvas isn't part of the game loop.
-let _menuBgResizeT=null;
-function drawMenuBackground(){
-  const c=document.getElementById('menu-bg');
-  if(!c)return;
-  const W=window.innerWidth,H=window.innerHeight;
-  c.width=W; c.height=H;
-  const ctx=c.getContext('2d');
+// ══ MENU BACKGROUND — space/hex backdrop + animated attract-mode snakes ═══════
+// Static layer: same hex-grid math/style as the in-game arena (drawArena(), further down) so
+// the menus feel like the same space. Rendered once to an offscreen buffer (+ on resize), not
+// per-frame — it's just an image underneath the animated layer.
+let _menuBgResizeT=null, _bgStaticCanvas=null;
+function _drawMenuBgStatic(W,H){
+  if(!_bgStaticCanvas)_bgStaticCanvas=document.createElement('canvas');
+  _bgStaticCanvas.width=W; _bgStaticCanvas.height=H;
+  const ctx=_bgStaticCanvas.getContext('2d');
 
   const grad=ctx.createRadialGradient(W/2,H*0.3,0,W/2,H*0.3,Math.max(W,H)*0.9);
   grad.addColorStop(0,'#0a0a22'); grad.addColorStop(1,'#05050f');
@@ -766,7 +764,184 @@ function drawMenuBackground(){
     ctx.beginPath(); ctx.moveTo(gx-60,gy-130); ctx.lineTo(gx+60,gy+130); ctx.stroke();
   });
 }
+
+// ── Animated layer: a handful of decorative snakes that roam, hunt, fight, drop gold loot on
+// death, and either "cash out" (fade + $ popup) or respawn fresh — entirely self-contained
+// (own arrays, never touches SG/the real match state) but drawn with the REAL drawSnake()
+// renderer so they're pixel-identical to actual gameplay. Randomized so no two runs play out
+// the same way. Paused whenever a real game is on screen (the real game's own canvas fully
+// covers this one anyway, so animating it further would be wasted work).
+let _bgSnakes=[], _bgLoot=[], _bgLastT=0, _bgSpawnCooldown=0;
+const BG_MAX_SNAKES=4;
+const BG_NAMES=['DEGEN','SLYTHER','PYTHON','VIPER','COBRA','ANACONDA','MAMBA','BOA'];
+
+function _bgMakeSnake(x,y,sections,color){
+  const angle=Math.random()*Math.PI*2, speed=1.6;
+  const path=[];
+  for(let i=0;i<40;i++)path.push({x:x-Math.cos(angle)*i*speed,y:y-Math.sin(angle)*i*speed});
+  return{
+    id:'bg'+Math.random().toString(36).slice(2), path, numSections:sections, color, angle,
+    alive:true, boost:false, name:BG_NAMES[Math.floor(Math.random()*BG_NAMES.length)],
+    usd:+(Math.random()*4+0.5).toFixed(2), state:'roam', stateT:1000+Math.random()*2000,
+    targetId:null, _wander:0,
+  };
+}
+function _bgSpawnSnake(W,H){
+  const pad=100;
+  const x=pad+Math.random()*(W-pad*2), y=pad+Math.random()*(H-pad*2);
+  const sections=14+Math.floor(Math.random()*26);
+  const color=SNAKE_COLORS[Math.floor(Math.random()*SNAKE_COLORS.length)];
+  _bgSnakes.push(_bgMakeSnake(x,y,sections,color));
+}
+function _bgSpawnLoot(x,y,count){
+  const now=performance.now();
+  for(let i=0;i<count;i++)_bgLoot.push({x:x+(Math.random()-0.5)*40,y:y+(Math.random()-0.5)*40,r:3+Math.random()*3,t0:now});
+}
+function _bgKill(victim,killer){
+  victim.alive=false; victim._deathT=performance.now();
+  // Variety: sometimes the victim "cashes out" instead of just dying — never the same every time
+  victim._cashout=Math.random()<0.5;
+  _bgSpawnLoot(victim.path[0].x,victim.path[0].y,Math.min(10,4+Math.floor(victim.numSections/6)));
+  if(killer)killer.numSections=Math.min(70,killer.numSections+4);
+}
+
+function _bgUpdate(dt,W,H){
+  _bgSpawnCooldown-=dt;
+  if(_bgSnakes.filter(s=>s.alive).length<BG_MAX_SNAKES&&_bgSpawnCooldown<=0){
+    _bgSpawnSnake(W,H);
+    _bgSpawnCooldown=900+Math.random()*1800;
+  }
+
+  const baseSpeed=1.6;
+  for(const s of _bgSnakes){
+    if(!s.alive)continue;
+    s.stateT-=dt;
+    if(s.stateT<=0){
+      const r=Math.random();
+      if(r<0.35){
+        const others=_bgSnakes.filter(o=>o!==s&&o.alive);
+        if(others.length){ s.state='hunt'; s.targetId=others[Math.floor(Math.random()*others.length)].id; s.stateT=2000+Math.random()*3000; }
+        else { s.state='roam'; s.stateT=1500+Math.random()*2500; }
+      } else if(r<0.55){ s.state='boost'; s.stateT=600+Math.random()*900; }
+      else { s.state='roam'; s.stateT=1500+Math.random()*2500; }
+    }
+
+    const h=s.path[0];
+    let desiredAngle=s.angle;
+    if(s.state==='hunt'){
+      const target=_bgSnakes.find(o=>o.id===s.targetId&&o.alive);
+      if(target)desiredAngle=Math.atan2(target.path[0].y-h.y,target.path[0].x-h.x);
+      else s.state='roam';
+    }
+    if(s.state!=='hunt'){
+      s._wander+=(Math.random()-0.5)*0.15;
+      s._wander=Math.max(-1,Math.min(1,s._wander));
+      desiredAngle=s.angle+s._wander*dt/16;
+    }
+    let da=desiredAngle-s.angle;
+    while(da>Math.PI)da-=Math.PI*2; while(da<-Math.PI)da+=Math.PI*2;
+    s.angle+=Math.max(-0.05,Math.min(0.05,da*0.08));
+
+    s.boost=(s.state==='boost')||(s.state==='hunt'&&Math.random()<0.02);
+    const spd=(s.boost?baseSpeed*2:baseSpeed)*dt/16.6;
+    let nx=h.x+Math.cos(s.angle)*spd, ny=h.y+Math.sin(s.angle)*spd;
+    const pad=60; // soft-bounce off viewport edges instead of wandering offscreen
+    if(nx<pad){nx=pad;s.angle=0;} if(nx>W-pad){nx=W-pad;s.angle=Math.PI;}
+    if(ny<pad){ny=pad;s.angle=Math.PI/2;} if(ny>H-pad){ny=H-pad;s.angle=-Math.PI/2;}
+    s.path.unshift({x:nx,y:ny});
+    const maxLen=Math.ceil(s.numSections*3+40);
+    if(s.path.length>maxLen)s.path.length=maxLen;
+
+    for(let i=_bgLoot.length-1;i>=0;i--){
+      if(Math.hypot(_bgLoot[i].x-nx,_bgLoot[i].y-ny)<14){_bgLoot.splice(i,1); if(s.numSections<60)s.numSections++;}
+    }
+  }
+
+  const now=performance.now();
+  for(let i=_bgLoot.length-1;i>=0;i--){ if(now-_bgLoot[i].t0>9000)_bgLoot.splice(i,1); }
+
+  // Combat — a snake's head touching a bigger rival's body loses (proximity-only, decorative;
+  // not the real combat math, just enough to look plausible in the background)
+  for(const a of _bgSnakes){
+    if(!a.alive)continue;
+    const ar=sectionRadius(a), ah=a.path[0];
+    for(const b of _bgSnakes){
+      if(a===b||!b.alive)continue;
+      const br=sectionRadius(b);
+      for(let i=0;i<b.path.length;i+=3){
+        if(Math.hypot(b.path[i].x-ah.x,b.path[i].y-ah.y)<(ar+br)*0.85){
+          if(a.numSections>b.numSections*1.05)_bgKill(b,a);
+          break;
+        }
+      }
+    }
+  }
+
+  for(let i=_bgSnakes.length-1;i>=0;i--){
+    const s=_bgSnakes[i];
+    if(!s.alive&&now-s._deathT>1200)_bgSnakes.splice(i,1);
+  }
+}
+
+function _bgRenderFrame(){
+  const c=document.getElementById('menu-bg');
+  if(!c){requestAnimationFrame(_bgRenderFrame);return;}
+  const gameEl=document.getElementById('scr-game');
+  if(gameEl&&gameEl.classList.contains('on')){requestAnimationFrame(_bgRenderFrame);return;} // real game covers this canvas — don't bother animating
+
+  const now=performance.now();
+  const dt=Math.min(now-(_bgLastT||now),50);
+  _bgLastT=now;
+  const W=c.width,H=c.height;
+  _bgUpdate(dt,W,H);
+
+  const bctx=c.getContext('2d');
+  bctx.clearRect(0,0,W,H);
+  if(_bgStaticCanvas)bctx.drawImage(_bgStaticCanvas,0,0);
+
+  bctx.globalAlpha=1;
+  for(const f of _bgLoot){
+    const age=now-f.t0;
+    bctx.globalAlpha=Math.max(0,1-age/9000);
+    bctx.fillStyle='rgba(255,215,0,0.35)';bctx.beginPath();bctx.arc(f.x,f.y,f.r*2.2,0,Math.PI*2);bctx.fill();
+    bctx.fillStyle='#FFD700';bctx.beginPath();bctx.arc(f.x,f.y,f.r,0,Math.PI*2);bctx.fill();
+  }
+  bctx.globalAlpha=1;
+
+  // Reuse the REAL game's snake renderer so these look pixel-identical to actual gameplay.
+  // Safe to swap the shared globals here: this only ever runs while #scr-game is inactive,
+  // and the real render loop only ever runs while it IS active — rAF callbacks run one at a
+  // time and this function returns before yielding, so they can never interleave.
+  const savedCtx=ctx, savedCanvas=canvas, savedZoom=_camZoom;
+  ctx=bctx; canvas=c; _camZoom=1;
+  for(const s of _bgSnakes){
+    if(s.alive){ drawSnake(s); continue; }
+    const age=now-s._deathT;
+    if(age<1200){
+      bctx.save();
+      bctx.globalAlpha=Math.max(0,1-age/1200);
+      drawSnake(s);
+      if(s._cashout){
+        bctx.font='bold 16px "Exo 2",sans-serif'; bctx.textAlign='center';
+        bctx.fillStyle='#39FF14'; bctx.fillText('CASHED OUT +$'+(s.usd||1).toFixed(2),s.path[0].x,s.path[0].y-30-age*0.05);
+      }
+      bctx.restore();
+    }
+  }
+  ctx=savedCtx; canvas=savedCanvas; _camZoom=savedZoom;
+
+  requestAnimationFrame(_bgRenderFrame);
+}
+
+function drawMenuBackground(){
+  const c=document.getElementById('menu-bg');
+  if(!c)return;
+  const W=window.innerWidth,H=window.innerHeight;
+  c.width=W; c.height=H;
+  _drawMenuBgStatic(W,H);
+}
 drawMenuBackground();
+requestAnimationFrame(_bgRenderFrame);
 window.addEventListener('resize',()=>{clearTimeout(_menuBgResizeT);_menuBgResizeT=setTimeout(drawMenuBackground,150);});
 
 // ══ STATE ═══════════════════════════════════════════════════
@@ -902,7 +1077,13 @@ function saveDisplayName(){
 // (index.html) leaderboard, which shares the same /api/leaderboard endpoint) ═══
 let _lbTimer=null;
 function _lbSol(lamports){return (Number(lamports)||0)/1e9;}
-function _lbFmtSol(lamports){const s=_lbSol(lamports);return (s>=1?s.toFixed(2):s.toFixed(3))+' SOL';}
+// Leaderboard/profile amounts display in USD (not SOL) — falls back to a SOL readout only
+// if the live SOL/USD price hasn't loaded yet.
+function _lbFmtUsd(lamports){
+  const sol=_lbSol(lamports);
+  if(!ST.solPrice||ST.solPrice<=0) return (sol>=1?sol.toFixed(2):sol.toFixed(3))+' SOL';
+  return '$'+(sol*ST.solPrice).toFixed(2);
+}
 function _lbShortAddr(addr){return addr?addr.slice(0,4)+'…'+addr.slice(-4):'--';}
 
 function openLeaderboard(){
@@ -911,6 +1092,9 @@ function openLeaderboard(){
   document.getElementById('lb-table').style.display='table';
   document.getElementById('lb-search-table').style.display='none';
   document.getElementById('lb-search-empty').style.display='none';
+  // Not-logged-in visitors can open the leaderboard before any other flow has fetched the SOL
+  // price — without this, USD amounts would silently fall back to a SOL readout for them.
+  if(!ST.solPrice||ST.solPrice<=0) fetchPrice().then(loadLeaderboard).catch(()=>{});
   loadLeaderboard();
   if(_lbTimer)clearInterval(_lbTimer);
   _lbTimer=setInterval(loadLeaderboard,15000);
@@ -948,8 +1132,8 @@ async function loadLeaderboard(){
         return '<tr class="'+cls+'" data-address="'+p.address+'" data-name="'+attrName+'" tabindex="0">'+
           '<td style="font-family:\'Press Start 2P\',monospace;font-size:9px;color:var(--y);">'+medal+'</td>'+
           '<td style="font-weight:600;">'+name+(p.address===ST.address?' <span style="color:var(--g);font-size:9px;">(YOU)</span>':'')+'</td>'+
-          '<td style="text-align:right;color:var(--g);">'+_lbFmtSol(p.earned)+'</td>'+
-          '<td style="text-align:right;color:var(--muted);">'+_lbFmtSol(p.wagered)+'</td>'+
+          '<td style="text-align:right;color:var(--g);">'+_lbFmtUsd(p.earned)+'</td>'+
+          '<td style="text-align:right;color:var(--muted);">'+_lbFmtUsd(p.wagered)+'</td>'+
           '<td style="text-align:right;">'+p.games+'</td>'+
           '<td style="text-align:right;"><span style="color:var(--g);">'+p.wins+'</span>-<span style="color:var(--r);">'+p.losses+'</span></td>'+
           '<td style="text-align:right;color:var(--r);">'+p.kills+'</td>'+
@@ -963,8 +1147,8 @@ async function loadLeaderboard(){
     document.getElementById('lb-updated').textContent=new Date().toLocaleTimeString();
 
     const g=d.global||{};
-    document.getElementById('lb-g-wagered').textContent=_lbFmtSol(g.totalWagered);
-    document.getElementById('lb-g-earned').textContent=_lbFmtSol(g.totalEarned);
+    document.getElementById('lb-g-wagered').textContent=_lbFmtUsd(g.totalWagered);
+    document.getElementById('lb-g-earned').textContent=_lbFmtUsd(g.totalEarned);
     document.getElementById('lb-g-games').textContent=g.gamesPlayed||0;
 
     // "Your rank" strip — shows even if you're outside the visible top 20
@@ -972,13 +1156,13 @@ async function loadLeaderboard(){
       const mine=players.find(p=>p.address===ST.address);
       if(mine){
         youEl.style.display='block';
-        youEl.innerHTML='YOUR RANK <b style="color:var(--y);">#'+mine.rank+'</b> &nbsp;·&nbsp; '+_lbFmtSol(mine.earned)+' earned &nbsp;·&nbsp; '+mine.games+' games';
+        youEl.innerHTML='YOUR RANK <b style="color:var(--y);">#'+mine.rank+'</b> &nbsp;·&nbsp; '+_lbFmtUsd(mine.earned)+' earned &nbsp;·&nbsp; '+mine.games+' games';
       }else{
         const pr=await fetch('/api/leaderboard?game=ss&address='+encodeURIComponent(ST.address));
         const pd=await pr.json();
         if(pd.player&&(pd.player.games>0||pd.player.earned>0)){
           youEl.style.display='block';
-          youEl.innerHTML='YOUR STATS &nbsp;·&nbsp; '+_lbFmtSol(pd.player.earned)+' earned &nbsp;·&nbsp; '+pd.player.games+' games &nbsp;·&nbsp; not yet in the top 20';
+          youEl.innerHTML='YOUR STATS &nbsp;·&nbsp; '+_lbFmtUsd(pd.player.earned)+' earned &nbsp;·&nbsp; '+pd.player.games+' games &nbsp;·&nbsp; not yet in the top 20';
         }else{
           youEl.style.display='none';
         }
@@ -1051,7 +1235,7 @@ async function _lbDoSearch(q){
       const cls=p.address===ST.address?'lb-me':'';
       return '<tr class="'+cls+'" data-address="'+p.address+'" data-name="'+attrName+'" tabindex="0">'+
         '<td style="font-weight:600;">'+name+(p.address===ST.address?' <span style="color:var(--g);font-size:9px;">(YOU)</span>':'')+'</td>'+
-        '<td style="text-align:right;color:var(--g);">'+_lbFmtSol(p.earned)+'</td>'+
+        '<td style="text-align:right;color:var(--g);">'+_lbFmtUsd(p.earned)+'</td>'+
         '<td style="text-align:right;">'+p.games+'</td>'+
         '<td style="text-align:right;"><span style="color:var(--g);">'+p.wins+'</span>-<span style="color:var(--r);">'+p.losses+'</span></td>'+
         '<td style="text-align:right;white-space:nowrap;">'+
@@ -1092,8 +1276,8 @@ async function openPlayerProfile(address,name){
     const p=d.player||{name:_pfName,earned:0,wagered:0,games:0,kills:0,deaths:0,wins:0,losses:0,history:[]};
     if(p.name)_pfName=p.name;
     document.getElementById('pf-name').textContent=_pfName;
-    document.getElementById('pf-earned').textContent=_lbFmtSol(p.earned);
-    document.getElementById('pf-wagered').textContent=_lbFmtSol(p.wagered);
+    document.getElementById('pf-earned').textContent=_lbFmtUsd(p.earned);
+    document.getElementById('pf-wagered').textContent=_lbFmtUsd(p.wagered);
     document.getElementById('pf-games').textContent=p.games||0;
     document.getElementById('pf-winrate').textContent=(p.games>0?Math.round((p.wins||0)/p.games*100):0)+'%';
     document.getElementById('pf-wins').textContent=p.wins||0;
@@ -1143,7 +1327,7 @@ function _pfDrawChart(){
     ctx.setLineDash([]);
     ctx.beginPath();ctx.arc(W-PAD-6,y0,4,0,Math.PI*2);ctx.fillStyle='#39FF14';ctx.fill();
     ctx.font='9px monospace'; ctx.fillStyle='rgba(255,255,255,.6)'; ctx.textAlign='left';
-    ctx.fillText(_lbFmtSol(val)+' — first earning event, chart builds from here',PAD+2,y0-8);
+    ctx.fillText(_lbFmtUsd(val)+' — first earning event, chart builds from here',PAD+2,y0-8);
     return;
   }
 
@@ -1186,8 +1370,8 @@ function _pfDrawChart(){
 
   // min/max SOL labels
   ctx.font='9px monospace'; ctx.fillStyle='rgba(255,255,255,.5)'; ctx.textAlign='left';
-  ctx.fillText(_lbFmtSol(maxV),PAD+2,PAD+10);
-  ctx.fillText(_lbFmtSol(minV),PAD+2,H-PAD-3);
+  ctx.fillText(_lbFmtUsd(maxV),PAD+2,PAD+10);
+  ctx.fillText(_lbFmtUsd(minV),PAD+2,H-PAD-3);
 }
 
 // ══ FRIENDS (personal contact book — localStorage, shared across both PAC ARENA games) ══
@@ -1241,7 +1425,7 @@ async function _frDoSearch(q){
       const isFriend=already.has(p.address);
       return '<div class="fr-row">'+
         '<div><div style="font-weight:600;font-size:12px;">'+name+(p.address===ST.address?' <span style="color:var(--g);font-size:9px;">(YOU)</span>':'')+'</div>'+
-        '<div style="font-family:\'Press Start 2P\',monospace;font-size:6px;color:var(--muted);margin-top:3px;">'+_lbShortAddr(p.address)+' · '+_lbFmtSol(p.earned)+' earned</div></div>'+
+        '<div style="font-family:\'Press Start 2P\',monospace;font-size:6px;color:var(--muted);margin-top:3px;">'+_lbShortAddr(p.address)+' · '+_lbFmtUsd(p.earned)+' earned</div></div>'+
         (isFriend
           ? '<span style="font-size:9px;color:var(--g);">✓ ADDED</span>'
           : '<button class="btn btn-g btn-sm" style="width:auto;padding:6px 10px;" onclick="_frAddFromSearch(\''+jsName+'\',\''+p.address+'\')">➕ ADD</button>')+
@@ -4177,13 +4361,34 @@ function drawFood(){
   });
 }
 
+// Render-only jitter smoothing for the trailing body. getBodyPoints() re-resamples the whole
+// body by arc length every frame, so tiny frame-to-frame shifts in where the head anchor sits
+// (interpolation/reconciliation) ripple into small position changes further down the body —
+// visible as a faint shake even though the underlying path/collision data is fine. This just
+// blends each body point 50% toward its freshly-resampled position instead of snapping to it
+// outright. Purely cosmetic: it never touches snake.path, collision, or network code, and the
+// head (index 0) is always left exact so camera-lock on your own snake stays pixel-perfect.
+function _smoothBodyPoints(snake,bPts){
+  const prev=snake._smoothPts;
+  if(!prev||prev.length!==bPts.length){
+    snake._smoothPts=bPts.map(p=>({x:p.x,y:p.y}));
+    return snake._smoothPts;
+  }
+  for(let i=1;i<bPts.length;i++){
+    prev[i].x+=(bPts[i].x-prev[i].x)*0.5;
+    prev[i].y+=(bPts[i].y-prev[i].y)*0.5;
+  }
+  prev[0].x=bPts[0].x; prev[0].y=bPts[0].y;
+  return prev;
+}
 function drawSnake(snake){
   if(!snake.path||snake.path.length<2)return;
-  const bPts=getBodyPoints(snake);
+  let bPts=getBodyPoints(snake);
   if(bPts.length<2)return;
   // Rendered head only: draw the head end at the extrapolated position (remote snakes).
   // Replaces the transient array slot with s._exHead — does NOT mutate snake.path[0].
   if(snake._exHead)bPts[0]=snake._exHead;
+  bPts=_smoothBodyPoints(snake,bPts);
   const r=sectionRadius(snake); // damnbruh visual radius
   const col=snake.color;
   const n=bPts.length;
