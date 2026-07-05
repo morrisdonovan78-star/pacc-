@@ -1317,6 +1317,23 @@ io.on('connection', socket => {
         ssSendJoinBodies(socket, sg, '__spectator__'); // full current bodies, frame one
         ssBroadcastStateTo(socket, sg);                // immediate snapshot, don't wait ~33ms for the next tick
       }
+    } else {
+      // Legacy Pac-Man room — same 'init' shape a real joiner gets, so a spectator's client
+      // can call its normal initGame(players) path. rooms.get (not getOrCreateRoom) on purpose:
+      // never spin up a fresh empty room/game-loop just because a spectator looked at it.
+      const room = rooms.get(watchLobbyId);
+      if (room) {
+        socket.emit('init', {
+          pid: '__spectator__',
+          maze: room.maze,
+          spec: [...room.players.values()].filter(p => !p.alive).length,
+          players: [...room.players.values()].map(p => ({
+            id: p.id, name: p.name, color: p.color,
+            x: p.x, y: p.y, dx: p.dx, dy: p.dy,
+            sc: p.sc, alive: p.alive, num: p.num, sol: p.sol
+          }))
+        });
+      }
     }
     console.log(`[${watchLobbyId}] spectator connected (read-only, no token)`);
     socket.on('disconnect', () => {}); // nothing to clean up — no player/snake state was ever created

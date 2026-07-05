@@ -628,6 +628,27 @@ body{touch-action:manipulation;}
   <div id="voice-speakers" style="position:fixed;bottom:16px;left:12px;z-index:200;display:none;flex-direction:column;gap:4px;pointer-events:none;"></div>
   <!-- In-game keybind strip — bottom-center, adapts to keyboard vs controller -->
   <div id="kb-hud" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:105;display:none;gap:7px;flex-wrap:wrap;justify-content:center;pointer-events:none;"></div>
+  <!-- Public "watch live" viewer HUD (Discord links etc.) — top-left, separate from the
+       spectate-panel below (that one is for real players who died/cashed out mid-match). -->
+  <!-- Vertically centered on the left edge — every other HUD cluster on this screen (game-hud
+       top-center, mute/voice top-right, kb-hud bottom-center, pow/cashout bottom-right) leaves
+       this strip clear on any viewport width, so a long label or the 6-button lobby switcher
+       below it can never collide with them. -->
+  <div id="watch-hud" style="display:none;position:fixed;top:50%;left:8px;transform:translateY(-50%);flex-direction:column;align-items:flex-start;gap:8px;z-index:200;max-width:150px;">
+    <div id="watch-bar" style="display:flex;align-items:center;gap:8px;background:rgba(0,0,0,0.7);border:1px solid rgba(255,215,0,0.4);border-radius:8px;padding:6px 14px;flex-wrap:wrap;justify-content:flex-start;">
+      <span id="watch-label" style="color:#FFD700;font-family:'Press Start 2P',monospace;font-size:8px;letter-spacing:1px;white-space:nowrap;">👁 WATCHING</span>
+      <button class="btn btn-y btn-sm" style="font-size:7px;padding:6px 10px;" onclick="go('scr-home')">▶ PLAY NOW</button>
+      <button class="btn btn-c btn-sm" style="font-size:7px;padding:6px 10px;" onclick="exitWatchMode()">⌂ HOME</button>
+    </div>
+    <div id="watch-switch" style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;">
+      <button class="copy-btn" onclick="enterWatchMode('NA',1)">🇺🇸 NA $1</button>
+      <button class="copy-btn" onclick="enterWatchMode('NA',5)">🇺🇸 NA $5</button>
+      <button class="copy-btn" onclick="enterWatchMode('NA',25)">🇺🇸 NA $25</button>
+      <button class="copy-btn" onclick="enterWatchMode('EU',1)">🇩🇪 EU $1</button>
+      <button class="copy-btn" onclick="enterWatchMode('EU',5)">🇩🇪 EU $5</button>
+      <button class="copy-btn" onclick="enterWatchMode('EU',25)">🇩🇪 EU $25</button>
+    </div>
+  </div>
   <!-- Spectate panel — shown only while spectating, bottom-center -->
   <div id="spectate-panel" style="display:none;position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:200;display:none;flex-direction:column;align-items:center;gap:8px;pointer-events:auto;">
     <div style="font-family:'Press Start 2P',monospace;font-size:6px;color:rgba(255,255,255,0.5);margin-bottom:2px;letter-spacing:1px;">👁 SPECTATING</div>
@@ -1505,24 +1526,34 @@ let _pkTick=0;
 let _pkSentTick=0;
 let _myHelloTs=0;
 
-async function pkConnect(roomId, gameToken){
+// spectate=true connects read-only (no gameToken, no wager, no room.players entry ever created
+// for us) — used by the public "watch live" viewer (see enterWatchMode). The server's spectator
+// connection branch never registers input/action handlers for this socket at all, so nothing
+// sent from here could ever join, move a player, or claim money even if this client were
+// modified — see _server_na.js.
+async function pkConnect(roomId, gameToken, spectate){
   if(_sio){ try{ _sio.disconnect(); }catch(_){} _sio=null; }
   _kickedOut=false;
   _localFirstSyncDone=false;
   pkRoomId=roomId;
-  myPid=ST.address||('anon-'+Math.random().toString(36).slice(2,8));
   isHost=false;
   _playerMeta.clear();
 
-  const isPaidLobby=roomId!=='free-lobby';
-  if(isPaidLobby && !gameToken){
-    lg('mm-log','❌ Paid lobby requires a verified deposit — use the lobby buttons to join','lerr');
-    return;
+  let myName;
+  if(spectate){
+    myPid='__watch__'+Math.random().toString(36).slice(2); // never matches a real wallet/player id
+    isSpectating=true;
+  }else{
+    myPid=ST.address||('anon-'+Math.random().toString(36).slice(2,8));
+    const isPaidLobby=roomId!=='free-lobby';
+    if(isPaidLobby && !gameToken){
+      lg('mm-log','❌ Paid lobby requires a verified deposit — use the lobby buttons to join','lerr');
+      return;
+    }
+    myName=getMyName();
+    _cachedMyName=myName;
+    _playerMeta.set(myPid,{color:_mySkin.color,hat:_mySkin.hat,trail:_mySkin.trail||'none',eyes:_mySkin.eyes||'dot',aura:_mySkin.aura||'none',name:myName,sol:ST.wagerSol||0});
   }
-
-  const myName=getMyName();
-  _cachedMyName=myName;
-  _playerMeta.set(myPid,{color:_mySkin.color,hat:_mySkin.hat,trail:_mySkin.trail||'none',eyes:_mySkin.eyes||'dot',aura:_mySkin.aura||'none',name:myName,sol:ST.wagerSol||0});
 
   document.getElementById('mm-sub').textContent='Connecting to server…';
   lg('mm-log','Connecting…','lhi');
@@ -1532,12 +1563,16 @@ async function pkConnect(roomId, gameToken){
   const _isBrave=!!(navigator.brave);
   if(_isBrave) lg('mm-log','Brave detected — if connection fails, tap the lion icon (Shields) and disable for this site','lwarn');
 
+  // A real join sets this before calling pkConnect; spectate never goes through that flow,
+  // so set it here — lets the normal 'init' handler's guard accept a real init if the lobby's
+  // game is already running, exactly like a fresh join.
+  if(spectate) _joiningLobby=true;
+
   try{
     _sio=io(getSioUrl(),{
-      auth:{
-        pid:myPid, lobbyId:roomId, gameToken:gameToken||null,
-        name:myName, color:_mySkin.color, wagerSol:ST.wagerSol||0
-      },
+      auth: spectate ? { spectate:true, lobbyId:roomId }
+                     : { pid:myPid, lobbyId:roomId, gameToken:gameToken||null,
+                         name:myName, color:_mySkin.color, wagerSol:ST.wagerSol||0 },
       transports:['websocket','polling'],
       reconnectionAttempts:Infinity,
       reconnectionDelay:1000,
@@ -1549,6 +1584,20 @@ async function pkConnect(roomId, gameToken){
     // to HTTP polling if init doesn't arrive within 4s of connecting.
     // Covers Firefox silently dropping WebSocket data frames after a successful handshake.
     let _initRecv=false, _initGuard=null;
+
+    // Spectating an empty lobby (no game running) means no 'init' ever arrives — the server
+    // only sends one if a room already exists. Render an empty maze after a short wait instead
+    // of leaving the viewer stuck on "Connecting…" forever; the real 'init' handler below still
+    // wins if a game genuinely is live (it fires first and clears _initRecv).
+    if(spectate){
+      setTimeout(()=>{
+        if(!_initRecv && _sio){
+          document.getElementById('mm-sub').textContent='No live game here right now…';
+          initGame([]);
+          launchGame(true);
+        }
+      }, 1200);
+    }
 
     // Register BEFORE the await: Firefox can deliver 'init' in the same WebSocket
     // frame as the connect ack, before handlers registered after the await exist.
@@ -1588,8 +1637,10 @@ async function pkConnect(roomId, gameToken){
           hat:'none', trail:'none', eyes:'dot', aura:'none'
         }));
         initGame(allPlayers);
-        // Defensive: ensure local player is always in G — guards against alive:false edge cases
-        if(G && myPid && !G.players.get(myPid)){
+        // Defensive: ensure local player is always in G — guards against alive:false edge cases.
+        // Never applies to a spectator: myPid is a fake watch-id that will never match a real
+        // player, and inserting one here would spawn a phantom playable Pac-Man for them.
+        if(!isSpectating && G && myPid && !G.players.get(myPid)){
           const _md=(data.players||[]).find(h=>h.id===myPid)||{};
           G.players.set(myPid, mkP({
             id:myPid, num:G.players.size, color:_mySkin.color||colorFromId(myPid),
@@ -1605,9 +1656,9 @@ async function pkConnect(roomId, gameToken){
           if(el) el.textContent=data.spec;
           if(box) box.style.display=data.spec>0?'flex':'none';
         }
-        document.getElementById('mm-sub').textContent='Connected!';
+        document.getElementById('mm-sub').textContent=isSpectating?'Watching live…':'Connected!';
         lg('mm-log','Joined with '+allPlayers.length+' player(s)','lok');
-        setTimeout(()=>launchGame(),300);
+        setTimeout(()=>launchGame(isSpectating),300);
       }catch(e){
         lg('mm-log','❌ Game init error: '+e.message,'lerr');
         console.error('[init]',e);
@@ -1621,14 +1672,18 @@ async function pkConnect(roomId, gameToken){
         clearTimeout(tOut);
         // If init hasn't arrived 4s after connect, force-switch to polling and reconnect.
         // Covers Firefox silently dropping WebSocket data frames after a successful handshake.
-        _initGuard=setTimeout(()=>{
-          if(!_initRecv&&_sio){
-            lg('mm-log','No server response — switching to HTTP polling…','lwarn');
-            _sio.io.opts.transports=['polling','websocket'];
-            _sio.disconnect();
-            _sio.connect();
-          }
-        },4000);
+        // Skipped for spectate: a lobby with no game running legitimately never sends init,
+        // and that's not a transport problem — the 1200ms fallback above handles it instead.
+        if(!spectate){
+          _initGuard=setTimeout(()=>{
+            if(!_initRecv&&_sio){
+              lg('mm-log','No server response — switching to HTTP polling…','lwarn');
+              _sio.io.opts.transports=['polling','websocket'];
+              _sio.disconnect();
+              _sio.connect();
+            }
+          },4000);
+        }
         res();
       });
       _sio.on('connect_error',(e)=>{
@@ -2465,6 +2520,35 @@ function leaveSpectate(){
   populateLobby();
 }
 
+// ── Public "watch live" viewer (Discord links etc.) ────────────────────────────
+// Read-only, no wallet/login required: connects via pkConnect's spectate=true path, which the
+// server only ever lets join the room to receive broadcasts (see _server_na.js's dedicated
+// spectator connection branch) — there is no code path from here that could join, move a
+// player, or claim money, even from a hand-modified client. Deliberately separate from
+// leaveSpectate()/spectate-panel above, which are for a real player who died/cashed out
+// mid-match and has an actual lobby/wallet context to return to.
+async function enterWatchMode(region,tier){
+  if(_sio) pkDisconnect(); // switching lobbies from an existing watch session, or first entry
+  document.getElementById('watch-switch').style.display='flex';
+  ST.lobbyUsd=tier; // cosmetic only — drives the POT readout, spectators never wager/cash out
+  setGameServer(region==='EU'?'EU':'NA');
+  await pkConnect('paid-lobby-'+tier, null, true);
+  const hud=document.getElementById('watch-hud');
+  if(hud){
+    hud.style.display='flex';
+    const lbl=document.getElementById('watch-label'); if(lbl) lbl.textContent='👁 WATCHING '+region+' $'+tier;
+  }
+}
+
+function exitWatchMode(){
+  if(rafHandle){ cancelAnimationFrame(rafHandle); rafHandle=null; }
+  clearInterval(_guestInputLoop); _guestInputLoop=null;
+  isSpectating=false;
+  const hud=document.getElementById('watch-hud'); if(hud) hud.style.display='none';
+  pkDisconnect();
+  go('scr-home');
+}
+
 // ── In-game chat ──────────────────────────────────────────────
 function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -2917,7 +3001,7 @@ function enterSpectateMode(){
   if(mb){ mb.style.display='flex'; mb.textContent=_muted?'🔇':'🔊'; }
 }
 
-function launchGame(){
+function launchGame(spectateMode){
   go('scr-game');
   canvas=document.getElementById('gc');
   ctx=canvas.getContext('2d');
@@ -3045,7 +3129,7 @@ function launchGame(){
   },{passive:false});
   canvas.addEventListener('touchcancel',()=>{ _swActive=false; });
   frm=0;
-  isSpectating=false;
+  isSpectating=!!spectateMode;
   _cashoutInProgress=false; ST.cashoutLamports=ST.cashoutLamports||Math.floor((ST.wagerSol||0)*solanaWeb3.LAMPORTS_PER_SOL);
   _toasts=[];
   // Hide spectate panel (in case player is rejoining from spectate)
@@ -3085,6 +3169,13 @@ function launchGame(){
   // (initGame sets held:['cherry','pepper'] but UI isn't updated until first 's' tick)
   const _lMe=G&&G.players?G.players.get(myPid):null;
   if(_lMe) _updatePowBtns(_lMe);
+  // Spectators have no player of their own — hide the action controls that don't apply
+  // (powerups, cashout, movement joystick). Live leaderboard/scoreboard/minimap stay visible.
+  if(spectateMode){
+    ['pow-btns','cash-btn-wrap','joy-canvas'].forEach(id=>{
+      const el=document.getElementById(id); if(el) el.style.display='none';
+    });
+  }
 }
 
 function mkP(info){
@@ -5988,6 +6079,19 @@ window.addEventListener('load',()=>{
   // Restore region selector
   const rsel=document.getElementById('region-sel'); if(rsel) rsel.value=REGION;
   checkSession().then(()=>{ updateExplorerLink(); updateCashoutBal(); });
+
+  // Public "watch live" links (Discord etc.): /index.html?watch=1&region=NA&tier=1
+  // Takes priority over whatever checkSession() just restored — a spectator link should always
+  // land you watching, logged in or not; PLAY NOW from there goes through the normal flow.
+  try{
+    const qp=new URLSearchParams(location.search);
+    if(qp.get('watch')==='1'){
+      const region=(qp.get('region')||'NA').toUpperCase()==='EU'?'EU':'NA';
+      const tierRaw=qp.get('tier');
+      const tier=(tierRaw==='5'||tierRaw==='25')?parseInt(tierRaw):1;
+      enterWatchMode(region,tier);
+    }
+  }catch(_){}
 
   // SPACE = instant cashout — blocked when spectating (no wager at stake)
   document.addEventListener('keydown',e=>{

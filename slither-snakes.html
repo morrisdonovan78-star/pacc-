@@ -698,6 +698,9 @@ const FOOD_GROW    = 2;     // sections added per food orb
 const MIN_SECTIONS = 8;     // die below this
 const BOOST_MIN    = 12;    // boost stops draining below this length
 const INIT_SECTIONS= 17;    // starting section count (join length)
+// Eye size grows at half the rate of head radius past spawn size (eyes were scaling 1:1
+// with head radius and looked oversized on big/long snakes) — see _drawHeadCircle's eR.
+const EYE_BASE_R   = BASE_RADIUS+Math.pow(INIT_SECTIONS*SIZE_PER_SEGMENT,RADIUS_GROWTH)*RADIUS_SCALE;
 const MAX_SECTIONS = 300;   // absolute hard cap; effective cap = floor(usd*70) per paid lobby
 const MAX_TURN     = 0.274; // rad/tick
 const BOOST_DRAIN  = 8;     // ticks between boost drain events
@@ -4584,8 +4587,11 @@ function _drawHeadCircle(snake,r){
   ctx.rotate(angle);
   // Head circle drawn by body batch (bPts[0]) — only add eyes and boost flame here
 
-  // Eyes — damnbruh.com exact ratios from tP() function
-  const eR=r*0.38, eFwd=r*0.34, eSide=r*0.42;
+  // Eyes — damnbruh.com exact ratios from tP() function, but eye SIZE grows at half the
+  // rate of head radius past spawn size (position offsets still follow full head size so
+  // eyes stay correctly placed on a bigger head — only their size growth is dampened).
+  const _rEye=EYE_BASE_R+(r-EYE_BASE_R)*0.5;
+  const eR=_rEye*0.38, eFwd=r*0.34, eSide=r*0.42;
   // White sclera
   ctx.fillStyle='#fff';
   ctx.beginPath();ctx.arc(eFwd,-eSide,eR,0,Math.PI*2);ctx.fill();
