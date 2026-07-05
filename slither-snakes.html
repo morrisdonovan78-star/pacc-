@@ -583,10 +583,22 @@ body.mctl #voice-speakers{left:150px;}
     <button onclick="spawnBotSnake('fight')" style="padding:7px 10px;background:#AA3300;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">⚔ FIGHTER</button>
     <button onclick="clearBotSnakes()" style="padding:7px 10px;background:#1a0000;border:1px solid #FF4444;color:#FF4444;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">✕ BOTS</button>
   </div>
-  <div id="spectate-bar" style="display:none;position:absolute;top:10px;left:50%;transform:translateX(-50%);display:none;align-items:center;gap:12px;background:rgba(0,0,0,0.7);border:1px solid rgba(255,215,0,0.4);border-radius:8px;padding:6px 14px;z-index:100;">
-    <span style="color:#FFD700;font-family:Orbitron,sans-serif;font-size:11px;letter-spacing:2px;">👁 SPECTATING</span>
-    <button id="spec-rejoin-btn" class="btn btn-g btn-sm" style="display:none;padding:4px 10px;font-size:10px;" onclick="rejoinGame()">↩ REJOIN</button>
-    <button class="btn btn-c btn-sm" style="padding:4px 10px;font-size:10px;" onclick="goHome()">⌂ HOME</button>
+  <!-- Column wrapper: spectate-bar + watch-switch stack via normal flow, so a wrapped/taller
+       bar (long "WATCHING LIVE" label on narrow screens) can never overlap the buttons below it. -->
+  <div id="watch-hud" style="position:absolute;top:10px;left:10px;display:flex;flex-direction:column;align-items:flex-start;gap:8px;z-index:100;max-width:calc(100vw - 220px);">
+    <div id="spectate-bar" style="display:none;align-items:center;gap:12px;background:rgba(0,0,0,0.7);border:1px solid rgba(255,215,0,0.4);border-radius:8px;padding:6px 14px;flex-wrap:wrap;justify-content:center;">
+      <span id="spec-label" style="color:#FFD700;font-family:Orbitron,sans-serif;font-size:11px;letter-spacing:2px;white-space:nowrap;">👁 SPECTATING</span>
+      <button id="spec-rejoin-btn" class="btn btn-g btn-sm" style="display:none;padding:4px 10px;font-size:10px;" onclick="rejoinGame()">↩ REJOIN</button>
+      <button id="spec-play-btn" class="btn btn-y btn-sm" style="display:none;padding:4px 10px;font-size:10px;" onclick="goHome()">▶ PLAY NOW</button>
+      <button class="btn btn-c btn-sm" style="padding:4px 10px;font-size:10px;" onclick="goHome()">⌂ HOME</button>
+    </div>
+    <!-- Public "watch live" viewer: lobby switcher, only shown while spectating via a watch link -->
+    <div id="watch-switch" style="display:none;gap:6px;flex-wrap:wrap;justify-content:center;">
+      <button class="copy-btn" onclick="enterWatchMode('NA',1)">🇺🇸 NA $1</button>
+      <button class="copy-btn" onclick="enterWatchMode('NA',5)">🇺🇸 NA $5</button>
+      <button class="copy-btn" onclick="enterWatchMode('EU',1)">🇩🇪 EU $1</button>
+      <button class="copy-btn" onclick="enterWatchMode('EU',5)">🇩🇪 EU $5</button>
+    </div>
   </div>
   <canvas id="minimap" width="120" height="120"></canvas>
 </div>
@@ -2089,23 +2101,34 @@ function cancelJoin(){
 // ══ NETWORK / SOCKET ════════════════════════════════════════
 let _hostPid=null,_pkTick=0,_pkSentTick=0,_myHelloTs=0,_pingInterval=null,_lastSsTs=0,_hostWatch=null;
 
-async function pkConnect(roomId,gameToken){
+// spectate=true connects read-only (no gameToken, no wager, no snake ever created for us) — used
+// by the public "watch live" viewer (see enterWatchMode). The server's spectator connection path
+// never registers input/action handlers for this socket at all, so nothing sent from here could
+// ever join, move a snake, or claim money even if this client were modified — see _server_na.js.
+async function pkConnect(roomId,gameToken,spectate){
   if(_sio){try{_sio.disconnect();}catch(_){}  _sio=null;}
   pkRoomId=roomId;
   _lastRoomId=roomId;
-  myPid=ST.address||('anon-'+Math.random().toString(36).slice(2,8));
   isHost=false;
   _playerMeta.clear();
-  const myName=getMyName();
-  const _myCol=localStorage.getItem('ss_snake_color')||colorFromId(myPid);
-  _playerMeta.set(myPid,{color:_myCol,name:myName});
+  let myName,_myCol;
+  if(spectate){
+    myPid='__watch__'+Math.random().toString(36).slice(2); // never matches a real wallet/snake id
+    isSpectating=true;
+  }else{
+    myPid=ST.address||('anon-'+Math.random().toString(36).slice(2,8));
+    myName=getMyName();
+    _myCol=localStorage.getItem('ss_snake_color')||colorFromId(myPid);
+    _playerMeta.set(myPid,{color:_myCol,name:myName});
+  }
 
   document.getElementById('mm-sub').textContent='Connecting to server…';
   lg('mm-log','Connecting…','lhi');
 
   try{
     _sio=io(getSioUrl(),{
-      auth:{pid:myPid,lobbyId:roomId,gameToken:gameToken||null,name:myName,color:_myCol,wagerSol:ST.wagerSol||0},
+      auth:spectate?{spectate:true,lobbyId:roomId}
+                   :{pid:myPid,lobbyId:roomId,gameToken:gameToken||null,name:myName,color:_myCol,wagerSol:ST.wagerSol||0},
       transports:['websocket','polling'],
       reconnectionAttempts:Infinity,
       reconnectionDelay:500,
@@ -2144,13 +2167,18 @@ async function pkConnect(roomId,gameToken){
       let _wsRetried=false;
       _sio.once('connect',()=>{
         clearTimeout(tOut);
-        _initGuard=setTimeout(()=>{
-          if(!_initRecv&&_sio){
-            lg('mm-log','Switching to HTTP polling…','lwarn');
-            _sio.io.opts.transports=['polling','websocket'];
-            _sio.disconnect(); _sio.connect();
-          }
-        },5000);
+        // Spectators never receive 'init' (there's no player/room bookkeeping for them server-
+        // side at all) — the polling-fallback retry below exists to recover from a real 'init'
+        // never arriving, which would misfire every time for a spectator otherwise.
+        if(!spectate){
+          _initGuard=setTimeout(()=>{
+            if(!_initRecv&&_sio){
+              lg('mm-log','Switching to HTTP polling…','lwarn');
+              _sio.io.opts.transports=['polling','websocket'];
+              _sio.disconnect(); _sio.connect();
+            }
+          },5000);
+        }
         res();
       });
       _sio.on('connect_error',(e)=>{
@@ -2434,7 +2462,7 @@ async function pkConnect(roomId,gameToken){
       if(reason==='io client disconnect')return;
       addToast('Connection lost — reconnecting…','#FFD700');
     });
-    _sio.on('reconnect',()=>{addToast('Reconnected!','#39FF14');if(!_guestInputLoop&&!isHost&&!_localDead&&SG&&!SG.over)startGuestLoop();});
+    _sio.on('reconnect',()=>{addToast('Reconnected!','#39FF14');if(!isSpectating&&!_guestInputLoop&&!isHost&&!_localDead&&SG&&!SG.over)startGuestLoop();});
 
     // Ping
     _pingInterval=setInterval(()=>{if(_sio)_sio.emit('ping_req',performance.now());},3000);
@@ -2446,6 +2474,16 @@ async function pkConnect(roomId,gameToken){
     });
 
     _joiningLobby=false;
+
+    // Spectators get no 'init' event (there's no player/room bookkeeping server-side for a
+    // read-only connection) — start rendering immediately instead of waiting for one. No self
+    // snake is ever created (initSnakeGame() is NOT called), so SG.snakes only ever fills with
+    // real players as their state broadcasts arrive.
+    if(spectate){
+      SG={snakes:new Map(),food:[],tick:0,over:false};
+      document.getElementById('mm-sub').textContent='Watching live…';
+      launchSnakeGame();
+    }
 
   }catch(e){
     lg('mm-log','❌ '+e.message,'lerr');
@@ -2475,6 +2513,25 @@ function pkDisconnect(){
   _guestInputs.clear();
   _ssBuf.clear();
   _guestPredTs=0;
+}
+
+// Public read-only "watch live" viewer — Discord links point here (?watch=1&region=NA&tier=1).
+// No wallet, no login, no payment: connects via pkConnect's spectate=true path, which the
+// server only ever lets join the room to receive broadcasts (see _server_na.js's dedicated
+// spectator connection branch) — there is no code path from here that could join, move a
+// snake, or claim money, even from a hand-modified client.
+async function enterWatchMode(region,tier){
+  if(_sio)pkDisconnect(); // switching lobbies from an existing watch session, or first entry
+  document.getElementById('watch-switch').style.display='flex';
+  setGameServer(region==='EU'?'EU':'NA');
+  await pkConnect('ss-paid-lobby-'+tier,null,true);
+  const bar=document.getElementById('spectate-bar');
+  if(bar){
+    bar.style.display='flex';
+    const lbl=document.getElementById('spec-label'); if(lbl)lbl.textContent='👁 WATCHING '+region+' $'+tier;
+    const rb=document.getElementById('spec-rejoin-btn'); if(rb)rb.style.display='none';
+    const pb=document.getElementById('spec-play-btn'); if(pb)pb.style.display='inline-flex';
+  }
 }
 
 // ══ SNAKE GAME LOGIC ════════════════════════════════════════
@@ -3374,7 +3431,16 @@ function launchSnakeGame(){
   // Start camera at own snake's locally-guessed spawn; first SS will snap it to the real one.
   if(my&&my.path.length){_camX=my.path[0].x;_camY=my.path[0].y;}
 
-  document.getElementById('hud-pot').textContent=ST.lobbyUsd===0?'FREE':'$'+(ST.lobbyUsd*2);
+  // Spectators have no snake of their own — hide the controls/HUD bits that only make sense
+  // for an active player (boost hint, cash-out button, joystick, own length/score readout).
+  // The top-right live leaderboard, minimap, and kill feed stay — all generically useful.
+  if(isSpectating){
+    ['boost-hint','m-cashout','m-joy','m-zoom-wrap','game-hud'].forEach(id=>{
+      const el=document.getElementById(id); if(el)el.style.display='none';
+    });
+  }else{
+    document.getElementById('hud-pot').textContent=ST.lobbyUsd===0?'FREE':'$'+(ST.lobbyUsd*2);
+  }
 
   document.addEventListener('mousemove',onMouseMove);
   window.addEventListener('wheel',onWheel,{passive:false});
@@ -3392,8 +3458,12 @@ function launchSnakeGame(){
   // Init mouse to center so snake doesn't immediately spin
   _mouseX=canvas.width/2; _mouseY=canvas.height/2-10;
 
-  if(isHost&&_isPractice)startHostLoop();
-  else startGuestLoop(); // All live players: send inputs only, server runs physics
+  // Spectators never send input at all — nothing to steer/boost/cash out, and the server's
+  // read-only spectator connection has no listener registered for it anyway.
+  if(!isSpectating){
+    if(isHost&&_isPractice)startHostLoop();
+    else startGuestLoop(); // All live players: send inputs only, server runs physics
+  }
   // Reload owner's saved tuning on every game start (covers rejoin without page reload).
   // Push to server regardless of isHost — in ss-* lobbies the owner isn't always amFirst.
   if(localStorage.getItem('ss_owner')==='1'){
@@ -3866,6 +3936,8 @@ function goHome(){
   if(srb)srb.style.display='none';
   const sb=document.getElementById('spectate-bar');
   if(sb)sb.style.display='none';
+  const ws=document.getElementById('watch-switch');
+  if(ws)ws.style.display='none';
   pkDisconnect();
   go('scr-home');
 }
@@ -4760,6 +4832,17 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   _showPracticeBtn();
   _loadSnakeColorPick();
   await checkSession();
+  // Public "watch live" links (Discord etc.): /slither-snakes.html?watch=1&region=NA&tier=1
+  // Takes priority over whatever checkSession() just restored — a spectator link should always
+  // land you watching, logged in or not; hitting PLAY NOW from there goes to the normal flow.
+  try{
+    const qp=new URLSearchParams(location.search);
+    if(qp.get('watch')==='1'){
+      const region=(qp.get('region')||'NA').toUpperCase()==='EU'?'EU':'NA';
+      const tier=qp.get('tier')==='5'?5:1;
+      enterWatchMode(region,tier);
+    }
+  }catch(_){}
 });
 </script>
 </body>

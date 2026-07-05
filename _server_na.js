@@ -809,6 +809,33 @@ function ssBroadcastState(sg, lid, io) {
   io.to(lid).emit('ss-state', pkt);
 }
 
+// One-off full snapshot sent directly to a single (spectator) socket on connect, so they don't
+// stare at a blank arena for up to ~33ms waiting for the next regular tick broadcast. Always
+// includes food (no _foodDirty throttling — this fires once per spectator, not every tick).
+// Read-only and additive: never touches sg._lastFoodSend/_foodDirty, so it can't skip or delay
+// the real room-wide broadcast for actual players.
+function ssBroadcastStateTo(socket, sg) {
+  if (!sg) return;
+  const snakePkts = [];
+  sg.snakes.forEach(sn => {
+    if (!sn.alive) return;
+    snakePkts.push({
+      id: sn.pid, x: Math.round(sn.x), y: Math.round(sn.y),
+      angle: sn.angle, ns: sn.ns, boost: sn.boost, circle: !!sn.circling,
+      score: sn.score || 0, usd: sn.usd || 0, color: sn.color, name: sn.name
+    });
+  });
+  const pkt = {
+    snakes: snakePkts, t: Date.now(), tick: sg.tick || 0,
+    food: sg.food.map(f => [
+      Math.round(f.x), Math.round(f.y),
+      f.ci || 0, Math.round((f.size || 6) * 10) / 10,
+      f.k ? 1 : 0, f.w ? Math.round(f.w * 1e6) : 0
+    ])
+  };
+  socket.emit('ss-state', pkt);
+}
+
 // One-time JOIN body seed: send each OTHER alive snake's authoritative body (sn.path decimated
 // head->tail to render resolution) to the JOINING socket ONLY, once per connection. Lets a fresh
 // or rejoining client render full tails on frame one instead of a straight stub. Additive +
@@ -1269,6 +1296,33 @@ const io = new Server(httpServer, {
 });
 
 io.on('connection', socket => {
+  // ── Read-only spectator connection (Discord "watch live" links etc.) ─────────────
+  // Deliberately handled as its own branch, completely separate from the real player-join
+  // logic below, and returns immediately: no game token is checked (none is issued or needed —
+  // there is nothing here to pay for), no room.players/sg.snakes entry is ever created for this
+  // socket, and NO input/action listeners (ssin, ss, cashout, disconnect-grace, etc.) are ever
+  // registered on it. That last part is what actually makes this safe against a modified client:
+  // even if someone hand-crafts a fake 'ssin' or cashout emit, the server never attached a
+  // listener for those events on a spectator socket, so there is no code path here that could
+  // ever spawn a snake, move one, or send money — not a permission check that could be bypassed,
+  // but a listener that was simply never wired up in the first place.
+  if (socket.handshake.auth && socket.handshake.auth.spectate === true) {
+    const watchLobbyId = socket.handshake.auth.lobbyId;
+    if (!watchLobbyId || !LOBBY_IDS.has(watchLobbyId)) { socket.disconnect(); return; }
+    socket.isSpectator = true;
+    socket.join(watchLobbyId);
+    if (watchLobbyId.startsWith('ss-')) {
+      const sg = ssGames.get(watchLobbyId);
+      if (sg) {
+        ssSendJoinBodies(socket, sg, '__spectator__'); // full current bodies, frame one
+        ssBroadcastStateTo(socket, sg);                // immediate snapshot, don't wait ~33ms for the next tick
+      }
+    }
+    console.log(`[${watchLobbyId}] spectator connected (read-only, no token)`);
+    socket.on('disconnect', () => {}); // nothing to clean up — no player/snake state was ever created
+    return;
+  }
+
   socket.walletAddress = (socket.handshake.auth && socket.handshake.auth.pid) || null;
   socket.playerName    = (socket.handshake.auth && socket.handshake.auth.name) || '';
   socket.joinedAt      = Date.now();
