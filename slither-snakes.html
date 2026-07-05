@@ -4388,7 +4388,7 @@ function drawFood(){
 // back to raw/unsmoothed for one frame, which happens often enough to read as a rhythmic
 // hitch rather than a one-off. Now only the newly added/removed tail point(s) reset; the rest
 // of the body keeps its smoothed history across a length change.
-const BODY_SMOOTH_F=0.35; // lower = smoother/more lag, higher = snappier/less smoothing
+const BODY_SMOOTH_F=0.2; // lower = smoother/more lag, higher = snappier/less smoothing
 function _smoothBodyPoints(snake,bPts){
   const prev=snake._smoothPts;
   const n=bPts.length;
@@ -4444,7 +4444,15 @@ function drawSnake(snake){
   }
   ctx.fill();
 
-  ctx.fillStyle='rgba(0,0,0,0.25)';
+  // Shadow/highlight alpha halved from the original damnbruh values (0.25/0.22 -> 0.12/0.10).
+  // Video evidence showed the outer body silhouette tracks smoothly frame-to-frame, but these
+  // two overlapping-circle passes (each segment's shadow/highlight blob overlaps its neighbors'
+  // by a lot, since spacing is only 0.5x radius) visibly reflow/pulse independently as the arc-
+  // length resampling phase drifts a fraction of a segment each frame — that's the "shaking"
+  // people are seeing, not the actual body position. Toning down the alpha keeps the 3D-tube
+  // shading look but makes that reflow far less perceptually salient without touching geometry,
+  // path data, or collision.
+  ctx.fillStyle='rgba(0,0,0,0.12)';
   ctx.beginPath();
   for(let i=n-1;i>=0;i--){
     const p=bPts[i];if(!p)continue;
@@ -4452,7 +4460,7 @@ function drawSnake(snake){
   }
   ctx.fill();
 
-  ctx.fillStyle='rgba(255,255,255,0.22)';
+  ctx.fillStyle='rgba(255,255,255,0.10)';
   ctx.beginPath();
   for(let i=n-1;i>=0;i--){
     const p=bPts[i];if(!p)continue;
