@@ -89,47 +89,6 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // ── TEMP one-time migration — remove after running once ─────────────────────
-  // The previous nameIndex backfill only wrote nameIndex, never nameReg — so search could
-  // list a name but could never resolve it to an address (readStats needs nameReg to find
-  // the wallet). Worse, join.js (the ONLY place Slither Snakes ever registers a name
-  // server-side — its client "save name" button is localStorage-only) never wrote either
-  // key at all, so no Slither Snakes player was ever searchable. This redoes the backfill
-  // correctly (nameReg + nameIndex, for anyone in either game's leaderboard sorted set) now
-  // that join.js also maintains both going forward.
-  if (req.method === 'GET' && req.query && req.query.do === 'backfill-names-v2' &&
-      req.query.token === 'MkX8KbjmendOkpqoRa_RklStNx6J-DM-') {
-    try {
-      let indexed = 0, skippedFallback = 0;
-      const seen = new Set();
-      // 'SNAKE' is the client's generic fallback name, not a real chosen one (see join.js) —
-      // never index it, and scrub it out if some earlier join already registered it for
-      // whichever address happened to join without a custom name most recently.
-      await kvDel('nameReg:SNAKE').catch(() => {});
-      await kvZrem('nameIndex', 'SNAKE').catch(() => {});
-      for (const g of ['ss', 'pac']) {
-        const raw = await kvZrevrange('lb:' + g + ':earned', 0, -1) || [];
-        for (let i = 0; i < raw.length; i += 2) {
-          const addr = raw[i];
-          if (seen.has(addr)) continue;
-          seen.add(addr);
-          const name = await kvHget('ph:' + addr, 'name');
-          if (name && name !== 'SNAKE') {
-            await kvSetPerm('nameReg:' + name, addr);
-            await kvZadd('nameIndex', 0, name);
-            indexed++;
-          } else if (name === 'SNAKE') {
-            skippedFallback++;
-          }
-        }
-      }
-      return res.status(200).json({ ok: true, indexed, skippedFallback });
-    } catch (err) {
-      console.error('[leaderboard/backfill-v2]', err);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
-  }
-
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   const game = gameOf(req.query && req.query.game);
