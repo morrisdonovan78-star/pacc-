@@ -77,6 +77,13 @@ const CHERRY_TICKS=300, PEPPER_TICKS=390;
 // How long a dropped player is kept (frozen) in the room before removal,
 // so a brief network blip resumes the same spot/score instead of respawning.
 const DISCONNECT_GRACE_MS = 15000;
+// Slither Snakes: real money is on the line, so a backgrounded tab / brief network blip must
+// never cost a player their wager. Browsers throttle background-tab timers hard (the client
+// sends input via setInterval every 33ms — background tabs can drop this to ~1/s or fully
+// suspend it), so input silence alone does NOT mean the player quit. SS_GHOST_MS is now only
+// the "start protecting them" threshold (freeze + collision-immune); the wager isn't actually
+// forfeited until SS_DISCONNECT_GRACE_MS of continuous disconnection with no reconnect.
+const SS_DISCONNECT_GRACE_MS = 600000; // 10 minutes
 const CHERRY_RESPAWN=300, PEPPER_RESPAWN=240, MYSTERY_RESPAWN=300;
 
 // ── Maze ──────────────────────────────────────────────────────────────────────
@@ -192,7 +199,8 @@ const ssElimPairs = new Map();
 
 const SS_SPD      = 288 / 30;   // moneyslither BASE_SPEED  288 px/s ÷ 30 TPS = 9.6 px/tick
 const SS_BSPD     = 630 / 30;   // moneyslither BOOST_SPEED 630 px/s ÷ 30 TPS = 21 px/tick
-const SS_GHOST_MS = 6000;    // ms of silence before server eliminates as ghost
+const SS_GHOST_MS = 6000;    // ms of input silence before freezing as (protected) disconnected —
+                              // no longer eliminates outright; see SS_DISCONNECT_GRACE_MS above
 const SS_HB       = 0.95;    // HITBOX_BASE
 const SS_HBS      = 1.07;    // combatHitboxScale
 const SS_HHBS     = 1.18;    // combatHeadHitboxScale
@@ -481,10 +489,10 @@ function ssSectionRadius(ns) {
 // ssHandleInput: receive direction/boost input — server owns position, no x/y needed from client
 function ssHandleInput(lid, pid, d, io) {
   const sg = getSsGame(lid);
-  // Player is (re)sending input -> they're present. Cancel any pending disconnect-delete so a
-  // stale 15s timer from an earlier socket blip can't delete this now-live snake.
-  if (sg.delTimers && sg.delTimers.has(pid)) { clearTimeout(sg.delTimers.get(pid)); sg.delTimers.delete(pid); }
   let sn = sg.snakes.get(pid);
+  // Player is (re)sending input -> they're present again. Un-freeze immediately — this is the
+  // ONLY place a resumed connection is detected for SS games (see ssTick's grace-window check).
+  if (sn && sn.disconnected) { sn.disconnected = false; sn.disconnectedAt = null; }
   if (!sn || (!sn.alive && (!sn._killedAt || Date.now() - sn._killedAt > 2000))) {
     // First input OR dead snake rejoin (2s cooldown prevents revival from in-flight packets)
     sn = ssSpawnSnake(pid, (sn && sn.color) || d.color || '#FFD700', (sn && sn.name) || d.name || 'SNAKE', sg);
@@ -515,41 +523,20 @@ function ssHandleInput(lid, pid, d, io) {
   if (typeof d.angle === 'number') sn.faceAngle = d.angle;
 }
 
+// Socket-level disconnect (WebSocket dropped/closed). Does NOT kill or drop the wager as food —
+// only freezes the snake (movement paused, collision-immune, see ssTick) and starts the grace
+// clock. ssTick's per-tick check is what actually converts the wager to food, and only once
+// SS_DISCONNECT_GRACE_MS has fully elapsed with no reconnect (ssHandleInput un-freezes on any
+// fresh input, cancelling this — see there for why a simple flag/timestamp beats a setTimeout
+// here: reconnecting just stops matching the check next tick, no timer bookkeeping needed).
 function ssPlayerLeft(lid, pid, io) {
   const sg = ssGames.get(lid);
   if (!sg) return;
   const sn = sg.snakes.get(pid);
-  if (sn && sn.alive) {
-    console.log('leave', pid, sn.ns, Date.now());
-    if (!sg.food) sg.food = [];
-    ssSpawnKillFood(sg, sn);
-    sg._foodDirty = true;
-    sn.alive = false; sn._killedAt = Date.now(); sn.segs = []; sn.path = [];
-  } else if (sn) { sn.segs = []; sn.path = []; }
-  // Per-pid delete timer: tracked so a reconnect can cancel it, and never stacked during
-  // socket flapping. Only delete if, AT FIRE TIME, the socket is still disconnected AND the
-  // snake is still in a left/dead state (not just at the disconnect moment).
-  if (!sg.delTimers) sg.delTimers = new Map();
-  const _prevT = sg.delTimers.get(pid);
-  if (_prevT) clearTimeout(_prevT);
-  const _delT = setTimeout(() => {
-    const g = ssGames.get(lid);
-    if (!g) return;
-    if (g.delTimers) g.delTimers.delete(pid);
-    const _room = rooms.get(lid);
-    const _dp = _room && _room.players.get(pid);
-    const _stillDisc = !_dp || _dp.disconnected === true;   // reconnect sets disconnected=false
-    const _cur = g.snakes.get(pid);
-    const _stillLeft = !_cur || !_cur.alive;                // respawn sets alive=true
-    if (!(_stillDisc && _stillLeft)) return;                // reconnected / revived -> keep live snake
-    g.snakes.delete(pid);
-    if (g.snakes.size === 0) {
-      clearInterval(g.tickInterval);
-      ssGames.delete(lid);
-      console.log(`[${lid}] ss game loop stopped`);
-    }
-  }, DISCONNECT_GRACE_MS);
-  sg.delTimers.set(pid, _delT);
+  if (sn && sn.alive && !sn.disconnected) {
+    console.log('disconnected (frozen, grace pending)', pid, sn.ns, Date.now());
+    sn.disconnected = true; sn.disconnectedAt = Date.now();
+  }
 }
 
 // ── MoneySlither stepMovement port — ONE 60 Hz sub-step (verbatim from client.js) ──
@@ -662,13 +649,41 @@ function ssTick(lid, io) {
     sn._botTick++;
   });
 
-  // 1. Ghost timeout (network check, 30 Hz), then run the 60 Hz authoritative sim:
-  //    SS_SUBSTEPS × (move every snake one 1/60 step, then check collisions).
-  sg.snakes.forEach(sn => { if (sn.alive && now - sn.lastTs > SS_GHOST_MS) ssKill(sn, null, lid, io); });
+  // 1. Ghost timeout (network check, 30 Hz) — freezes (does NOT kill/eliminate) a snake once its
+  //    input has gone quiet for a bit. This fires long before any real abandonment: it's the
+  //    normal signature of a backgrounded tab (the 33ms input-send timer gets throttled hard by
+  //    the browser), not just an actual disconnect. Freezing early is protective — it makes them
+  //    collision-immune sooner rather than leaving them moving-but-uncontrolled and vulnerable.
+  //    The wager itself is only forfeited after SS_DISCONNECT_GRACE_MS with zero reconnect —
+  //    see the grace-expiry check below and ssHandleInput (un-freezes on any fresh input).
+  sg.snakes.forEach(sn => {
+    if (sn.alive && !sn.disconnected && now - sn.lastTs > SS_GHOST_MS) {
+      sn.disconnected = true; sn.disconnectedAt = now;
+    }
+  });
+  // 1b. Grace-expiry — only NOW (after the full grace window, still no reconnect) does a
+  // disconnected player actually lose their wager, converted to food exactly like a real death.
+  sg.snakes.forEach((sn, pid) => {
+    if (!sn.disconnected || now - sn.disconnectedAt <= SS_DISCONNECT_GRACE_MS) return;
+    if (sn.alive) {
+      console.log(`[${lid}] ${pid} forfeited after ${SS_DISCONNECT_GRACE_MS/1000}s disconnected`);
+      if (!sg.food) sg.food = [];
+      ssSpawnKillFood(sg, sn);
+      sg._foodDirty = true;
+      sn.alive = false; sn._killedAt = now; sn.segs = []; sn.path = [];
+      io.to(lid).emit('leave', { id: pid });
+    }
+    sg.snakes.delete(pid);
+    if (sg.snakes.size === 0) {
+      clearInterval(sg.tickInterval); sg.tickInterval = null;
+      ssGames.delete(lid);
+      console.log(`[${lid}] ss game loop stopped`);
+    }
+  });
   // Remember each head's pre-tick position so food pickup can test the swept segment.
   sg.snakes.forEach(sn => { if (sn.alive) { sn._phx = sn.x; sn._phy = sn.y; } });
   for (let _sub = 0; _sub < SS_SUBSTEPS; _sub++) {
-    sg.snakes.forEach(sn => { if (sn.alive) ssStepMovement(sn, sg, lid, io, now); });
+    sg.snakes.forEach(sn => { if (sn.alive && !sn.disconnected) ssStepMovement(sn, sg, lid, io, now); });
     ssCheckCollisions(sg, lid, io);
     // Mid-tick broadcast: send each sub-step's position instead of only the final one, so
     // clients receive state at 60Hz (matching the 60Hz sim) instead of 30Hz. Halves the
@@ -849,7 +864,9 @@ function ssPathTail(path, n, stride) {
 function ssCheckCollisions(sg, lid, io) {
   const T = sg.tuning;
   // MoneySlither: collide on the exact head (s.x,s.y) against the raw 1.6px path — no segs.
-  const alive = [...sg.snakes.values()].filter(s => s.alive && s.path && s.path.length > 1);
+  // Disconnected (frozen) snakes are excluded entirely — collision-immune both ways, so nobody
+  // can be killed while their input is stuck (backgrounded tab) and unable to react or flee.
+  const alive = [...sg.snakes.values()].filter(s => s.alive && !s.disconnected && s.path && s.path.length > 1);
   const died = new Set();
   const _evalOrder = alive.map(s => s.pid.slice(0, 8));
   let _h2hKilled = false;
@@ -1242,7 +1259,11 @@ const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: CORS_ORIGIN, methods: ['GET', 'POST'] },
   pingInterval: 25000,
-  pingTimeout: 20000,
+  // 20s was tight enough that a backgrounded/throttled tab could miss enough pongs to trigger a
+  // real socket.io disconnect on its own, on top of the input-silence (SS_GHOST_MS) path. Wagers
+  // are now protected either way (see SS_DISCONNECT_GRACE_MS), but there's no reason to force an
+  // avoidable reconnect for a tab that's still technically alive, just slow to respond.
+  pingTimeout: 60000,
   transports: ['websocket', 'polling'],
   perMessageDeflate: false
 });
@@ -1303,8 +1324,8 @@ io.on('connection', socket => {
     // Came back within grace window — cancel pending removal, resume same spot + score
     if (existing.dcTimer) { clearTimeout(existing.dcTimer); existing.dcTimer = null; }
     existing.disconnected = false;
-    // Reconnect owns cancellation of the snake disconnect-delete timer (not input timing).
-    { const _sg = ssGames.get(lobbyId); if (_sg && _sg.delTimers && _sg.delTimers.has(pid)) { clearTimeout(_sg.delTimers.get(pid)); _sg.delTimers.delete(pid); } }
+    // SS games: the snake itself un-freezes in ssHandleInput on the client's next input packet
+    // (arrives moments after this socket reconnect) — nothing to cancel here, no timer to clear.
     // Was dead when they left — other clients already removed them (lives=0 broadcast).
     // Give a fresh spawn and mark alive so: (a) tick() accepts their input again,
     // (b) others get a 'join' announcement so they re-add the player.
@@ -1565,23 +1586,34 @@ io.on('connection', socket => {
     if (dp) {
       dp.disconnected = true;
       dp.dx = 0; dp.dy = 0; dp.nx = 0; dp.ny = 0; // freeze in place
-      if (dp.dcTimer) clearTimeout(dp.dcTimer);
+      if (dp.dcTimer) { clearTimeout(dp.dcTimer); dp.dcTimer = null; }
+      const isSsLobby = lobbyId.startsWith('ss-');
+      // SS lobbies use the much longer SS_DISCONNECT_GRACE_MS here too — this room.players
+      // entry is what a reconnecting socket looks up (`existing`) to be recognized as the SAME
+      // alive session and skip re-validating its (single-use) game token. If this fired at the
+      // old 15s, a reconnect any time after that would look like a brand-new join. It would
+      // still have been let back in (the token itself is valid for 2h), but keeping this window
+      // aligned with the snake's own grace period is what makes reconnecting seamless instead of
+      // roundabout. The 'leave' broadcast that visually removes an SS snake is also skipped here
+      // — ssTick's grace-expiry check (same window) is the sole source of that for SS games, so
+      // other players don't see someone vanish 15s into a merely-backgrounded tab.
+      const graceMs = isSsLobby ? SS_DISCONNECT_GRACE_MS : DISCONNECT_GRACE_MS;
       dp.dcTimer = setTimeout(() => {
         const cur = room.players.get(pid);
         if (cur && cur.disconnected) {
           room.players.delete(pid);
-          io.to(lobbyId).emit('leave', { id: pid });
-          console.log(`[${lobbyId}] ${name} removed after ${DISCONNECT_GRACE_MS/1000}s grace`);
+          if (!isSsLobby) io.to(lobbyId).emit('leave', { id: pid });
+          console.log(`[${lobbyId}] ${name} removed after ${graceMs/1000}s grace`);
           if (room.players.size === 0) {
             clearInterval(room.interval); room.interval = null;
             rooms.delete(lobbyId);
             console.log(`[${lobbyId}] room closed`);
           }
         }
-      }, DISCONNECT_GRACE_MS);
-      console.log(`[${lobbyId}] ${name} disconnected — ${DISCONNECT_GRACE_MS/1000}s grace before removal`);
+      }, graceMs);
+      console.log(`[${lobbyId}] ${name} disconnected — ${graceMs/1000}s grace before removal`);
       // Snake rooms: freeze snake immediately; ssPlayerLeft removes after grace
-      if (lobbyId.startsWith('ss-')) ssPlayerLeft(lobbyId, pid, io);
+      if (isSsLobby) ssPlayerLeft(lobbyId, pid, io);
     } else if (room.players.size === 0) {
       clearInterval(room.interval); room.interval = null;
       rooms.delete(lobbyId);
