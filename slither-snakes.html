@@ -354,9 +354,14 @@ body.mctl #voice-speakers{left:150px;}
         <div style="font-size:12px;color:var(--c);font-weight:700;" id="lb-g-games">--</div>
       </div>
     </div>
+    <div style="display:flex;gap:6px;margin-bottom:.85rem;">
+      <input id="lb-search" placeholder="🔍 Search any player by name…" autocomplete="off" oninput="lbSearchInput()"
+        style="flex:1;background:rgba(0,0,0,.4);border:1px solid rgba(57,255,20,.3);border-radius:6px;color:#fff;font-size:11px;padding:8px 10px;outline:none;"/>
+      <button class="copy-btn" onclick="lbSearchClear()" style="white-space:nowrap;">✕ CLEAR</button>
+    </div>
     <div id="lb-you" style="display:none;background:rgba(0,255,255,.07);border:1px solid rgba(0,255,255,.3);border-radius:8px;padding:9px 12px;margin-bottom:.85rem;font-size:11px;"></div>
     <div style="overflow-y:auto;flex:1;min-height:120px;">
-      <table style="width:100%;border-collapse:collapse;font-size:11px;">
+      <table id="lb-table" style="width:100%;border-collapse:collapse;font-size:11px;">
         <thead>
           <tr style="font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);text-align:left;">
             <th style="padding:6px 4px;">#</th>
@@ -373,6 +378,19 @@ body.mctl #voice-speakers{left:150px;}
       </table>
       <div id="lb-loading" style="text-align:center;color:var(--muted);font-size:11px;padding:2rem 0;">Loading…</div>
       <div id="lb-empty" style="display:none;text-align:center;color:var(--muted);font-size:11px;padding:2rem 0;line-height:1.8;">No paid games played yet.<br>Be the first name on the board!</div>
+      <table id="lb-search-table" style="display:none;width:100%;border-collapse:collapse;font-size:11px;">
+        <thead>
+          <tr style="font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);text-align:left;">
+            <th style="padding:6px 4px;">PLAYER</th>
+            <th style="padding:6px 4px;text-align:right;">EARNED</th>
+            <th style="padding:6px 4px;text-align:right;">GAMES</th>
+            <th style="padding:6px 4px;text-align:right;">W/L</th>
+            <th style="padding:6px 4px;text-align:right;"></th>
+          </tr>
+        </thead>
+        <tbody id="lb-search-rows"></tbody>
+      </table>
+      <div id="lb-search-empty" style="display:none;text-align:center;color:var(--muted);font-size:11px;padding:2rem 0;">No players found with that name.</div>
     </div>
     <div style="text-align:center;font-size:9px;color:var(--muted);margin-top:.6rem;">Updated <span id="lb-updated">--</span> · refreshes every 15s · click a player for full stats</div>
   </div>
@@ -450,15 +468,23 @@ body.mctl #voice-speakers{left:150px;}
       <div class="logo" style="font-size:clamp(16px,3vw,22px);letter-spacing:2px;">👥 FRIENDS</div>
       <button class="copy-btn" onclick="closeFriends()">✕ CLOSE</button>
     </div>
+    <input id="fr-search" placeholder="🔍 Search player by name…" autocomplete="off" oninput="frSearchInput()"
+      style="width:100%;background:rgba(0,0,0,.4);border:1px solid rgba(57,255,20,.3);border-radius:6px;color:#fff;font-size:11px;padding:9px 10px;outline:none;margin-bottom:6px;"/>
+    <div id="fr-search-results" style="margin-bottom:.5rem;"></div>
+    <div id="fr-search-empty" style="display:none;text-align:center;color:var(--muted);font-size:10px;padding:.5rem 0 1rem;">No players found with that name.</div>
+
+    <div style="font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);margin:2px 0 6px;">CAN'T FIND THEM? ADD BY WALLET ADDRESS</div>
     <div style="display:flex;gap:6px;margin-bottom:6px;">
       <input id="fr-name" placeholder="Nickname" maxlength="20" autocomplete="off"
         style="width:110px;background:rgba(0,0,0,.4);border:1px solid rgba(57,255,20,.3);border-radius:6px;color:#fff;font-size:11px;padding:9px 10px;outline:none;"/>
       <input id="fr-addr" placeholder="Solana wallet address…" autocomplete="off"
         style="flex:1;background:rgba(0,0,0,.4);border:1px solid rgba(57,255,20,.3);border-radius:6px;color:#fff;font-size:11px;padding:9px 10px;outline:none;"/>
     </div>
-    <button class="btn btn-g btn-sm" style="margin-bottom:1rem;" onclick="addFriendFromForm()">➕ ADD FRIEND</button>
+    <button class="btn btn-c btn-sm" style="margin-bottom:1rem;" onclick="addFriendFromForm()">➕ ADD BY ADDRESS</button>
+
+    <div style="font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);margin-bottom:6px;">YOUR FRIENDS</div>
     <div id="fr-list" style="overflow-y:auto;flex:1;min-height:80px;"></div>
-    <div id="fr-empty" style="display:none;text-align:center;color:var(--muted);font-size:11px;padding:1.5rem 0;">No friends saved yet.<br>Add a wallet address above, or use ➕ ADD FRIEND from a player's profile.</div>
+    <div id="fr-empty" style="display:none;text-align:center;color:var(--muted);font-size:11px;padding:1.5rem 0;">No friends saved yet — search a name above to add one.</div>
   </div>
 </div>
 
@@ -816,6 +842,10 @@ function _lbShortAddr(addr){return addr?addr.slice(0,4)+'…'+addr.slice(-4):'--
 
 function openLeaderboard(){
   document.getElementById('lb-modal').style.display='flex';
+  document.getElementById('lb-search').value='';
+  document.getElementById('lb-table').style.display='table';
+  document.getElementById('lb-search-table').style.display='none';
+  document.getElementById('lb-search-empty').style.display='none';
   loadLeaderboard();
   if(_lbTimer)clearInterval(_lbTimer);
   _lbTimer=setInterval(loadLeaderboard,15000);
@@ -826,6 +856,10 @@ function closeLeaderboard(){
 }
 
 async function loadLeaderboard(){
+  // Skip the periodic refresh while the user is actively browsing search results —
+  // otherwise the 15s auto-refresh would silently swap the search view back to the
+  // ranked table out from under them.
+  if(document.getElementById('lb-search').value.trim())return;
   const rowsEl=document.getElementById('lb-rows');
   const loadingEl=document.getElementById('lb-loading');
   const emptyEl=document.getElementById('lb-empty');
@@ -895,21 +929,77 @@ async function loadLeaderboard(){
 }
 
 // Delegated click handling for leaderboard rows — set up once, survives re-renders
-// since #lb-rows itself is never replaced, only its innerHTML.
+// since the tbody elements themselves are never replaced, only their innerHTML.
+// Shared by the ranked table (#lb-rows) and the name-search results (#lb-search-rows).
+function _lbRowClickHandler(e){
+  const copyBtn=e.target.closest('[data-copy]');
+  const sendBtn=e.target.closest('[data-send]');
+  const row=e.target.closest('tr[data-address]');
+  if(!row)return;
+  const addr=row.dataset.address, name=row.dataset.name||'';
+  if(copyBtn){copyAddress(addr);return;}
+  if(sendBtn){openSendModal(addr,name);return;}
+  openPlayerProfile(addr,name);
+}
 (function _initLbRowEvents(){
-  const rowsEl=document.getElementById('lb-rows');
-  if(!rowsEl)return;
-  rowsEl.addEventListener('click',(e)=>{
-    const copyBtn=e.target.closest('[data-copy]');
-    const sendBtn=e.target.closest('[data-send]');
-    const row=e.target.closest('tr[data-address]');
-    if(!row)return;
-    const addr=row.dataset.address, name=row.dataset.name||'';
-    if(copyBtn){copyAddress(addr);return;}
-    if(sendBtn){openSendModal(addr,name);return;}
-    openPlayerProfile(addr,name);
+  ['lb-rows','lb-search-rows'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el)el.addEventListener('click',_lbRowClickHandler);
   });
 })();
+
+// ══ PLAYER SEARCH (leaderboard modal) — find anyone by name, not just the top 20 ══
+let _lbSearchTimer=null;
+function lbSearchInput(){
+  clearTimeout(_lbSearchTimer);
+  const q=document.getElementById('lb-search').value.trim();
+  if(!q){lbSearchClear();return;}
+  _lbSearchTimer=setTimeout(()=>_lbDoSearch(q),300);
+}
+function lbSearchClear(){
+  document.getElementById('lb-search').value='';
+  document.getElementById('lb-table').style.display='table';
+  document.getElementById('lb-search-table').style.display='none';
+  document.getElementById('lb-search-empty').style.display='none';
+  loadLeaderboard(); // recomputes lb-you visibility itself
+}
+async function _lbDoSearch(q){
+  document.getElementById('lb-table').style.display='none';
+  document.getElementById('lb-loading').style.display='none';
+  document.getElementById('lb-empty').style.display='none';
+  document.getElementById('lb-you').style.display='none';
+  const rowsEl=document.getElementById('lb-search-rows');
+  const emptyEl=document.getElementById('lb-search-empty');
+  const tableEl=document.getElementById('lb-search-table');
+  try{
+    const r=await fetch('/api/leaderboard?game=ss&search='+encodeURIComponent(q));
+    const d=await r.json();
+    const results=d.results||[];
+    if(results.length===0){
+      tableEl.style.display='none'; rowsEl.innerHTML=''; emptyEl.style.display='block';
+      return;
+    }
+    emptyEl.style.display='none'; tableEl.style.display='table';
+    rowsEl.innerHTML=results.map(p=>{
+      const name=(p.name||_lbShortAddr(p.address)).replace(/[<>&]/g,'').slice(0,14);
+      const attrName=name.replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+      const cls=p.address===ST.address?'lb-me':'';
+      return '<tr class="'+cls+'" data-address="'+p.address+'" data-name="'+attrName+'" tabindex="0">'+
+        '<td style="font-weight:600;">'+name+(p.address===ST.address?' <span style="color:var(--g);font-size:9px;">(YOU)</span>':'')+'</td>'+
+        '<td style="text-align:right;color:var(--g);">'+_lbFmtSol(p.earned)+'</td>'+
+        '<td style="text-align:right;">'+p.games+'</td>'+
+        '<td style="text-align:right;"><span style="color:var(--g);">'+p.wins+'</span>-<span style="color:var(--r);">'+p.losses+'</span></td>'+
+        '<td style="text-align:right;white-space:nowrap;">'+
+          '<button class="lb-icon-btn" data-copy title="Copy wallet">📋</button>'+
+          '<button class="lb-icon-btn" data-send title="Send SOL">💸</button>'+
+        '</td>'+
+      '</tr>';
+    }).join('');
+  }catch(e){
+    console.warn('[lb-search] failed',e);
+    tableEl.style.display='none'; emptyEl.style.display='block'; emptyEl.textContent='Search failed — try again.';
+  }
+}
 
 function copyAddress(addr){
   if(!addr)return;
@@ -1039,6 +1129,53 @@ function addFriendFromForm(){
   document.getElementById('fr-name').value='';
   document.getElementById('fr-addr').value='';
 }
+
+// Search-by-name for adding friends — fixes "invalid wallet address" when someone tries
+// to add a friend by typing a name: they no longer need to know the address at all, it's
+// resolved server-side from the name they search for.
+let _frSearchTimer=null;
+function frSearchInput(){
+  clearTimeout(_frSearchTimer);
+  const q=document.getElementById('fr-search').value.trim();
+  const resEl=document.getElementById('fr-search-results');
+  const emptyEl=document.getElementById('fr-search-empty');
+  if(!q){resEl.innerHTML='';emptyEl.style.display='none';return;}
+  _frSearchTimer=setTimeout(()=>_frDoSearch(q),300);
+}
+async function _frDoSearch(q){
+  const resEl=document.getElementById('fr-search-results');
+  const emptyEl=document.getElementById('fr-search-empty');
+  try{
+    const r=await fetch('/api/leaderboard?game=ss&search='+encodeURIComponent(q));
+    const d=await r.json();
+    const results=d.results||[];
+    if(results.length===0){resEl.innerHTML='';emptyEl.style.display='block';return;}
+    emptyEl.style.display='none';
+    const already=new Set(getFriends().map(f=>f.address));
+    resEl.innerHTML=results.map(p=>{
+      const name=(p.name||_lbShortAddr(p.address)).replace(/[<>&]/g,'').slice(0,20);
+      // Registered names are already alnum/_/-/space only (server-sanitized in setname),
+      // but escape both quote styles anyway since this is embedded in an onclick attribute.
+      const jsName=name.replace(/"/g,'&quot;').replace(/'/g,"\\'");
+      const isFriend=already.has(p.address);
+      return '<div class="fr-row">'+
+        '<div><div style="font-weight:600;font-size:12px;">'+name+(p.address===ST.address?' <span style="color:var(--g);font-size:9px;">(YOU)</span>':'')+'</div>'+
+        '<div style="font-family:\'Press Start 2P\',monospace;font-size:6px;color:var(--muted);margin-top:3px;">'+_lbShortAddr(p.address)+' · '+_lbFmtSol(p.earned)+' earned</div></div>'+
+        (isFriend
+          ? '<span style="font-size:9px;color:var(--g);">✓ ADDED</span>'
+          : '<button class="btn btn-g btn-sm" style="width:auto;padding:6px 10px;" onclick="_frAddFromSearch(\''+jsName+'\',\''+p.address+'\')">➕ ADD</button>')+
+      '</div>';
+    }).join('');
+  }catch(e){
+    console.warn('[fr-search] failed',e);
+    resEl.innerHTML=''; emptyEl.style.display='block'; emptyEl.textContent='Search failed — try again.';
+  }
+}
+function _frAddFromSearch(name,address){
+  addFriend(name,address);
+  const q=document.getElementById('fr-search').value.trim();
+  if(q)_frDoSearch(q); // refresh so the button flips to "✓ ADDED" immediately
+}
 function removeFriend(address){
   saveFriends(getFriends().filter(f=>f.address!==address));
   renderFriends();
@@ -1062,7 +1199,13 @@ function renderFriends(){
     '</div>';
   }).join('');
 }
-function openFriends(){document.getElementById('friends-modal').style.display='flex';renderFriends();}
+function openFriends(){
+  document.getElementById('friends-modal').style.display='flex';
+  document.getElementById('fr-search').value='';
+  document.getElementById('fr-search-results').innerHTML='';
+  document.getElementById('fr-search-empty').style.display='none';
+  renderFriends();
+}
 function closeFriends(){document.getElementById('friends-modal').style.display='none';}
 
 function _onSnakeColorPick(col){

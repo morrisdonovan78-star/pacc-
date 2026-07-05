@@ -1,6 +1,6 @@
 'use strict';
 // api/leaderboard.js — GET top-20 players; POST to register/update display name
-const { kvGet, kvSetPerm, kvDel, kvZadd, kvZrevrange,
+const { kvGet, kvSetPerm, kvDel, kvZadd, kvZrem, kvZrevrange,
         kvHget, kvHset, kvHgetall, kvLrange } = require('../lib/kv');
 
 const CORS = {
@@ -72,11 +72,15 @@ module.exports = async function handler(req, res) {
       const oldName = await kvHget('ph:' + address, 'name');
       if (oldName && oldName !== clean) {
         await kvDel('nameReg:' + oldName.toUpperCase()).catch(()=>{});
+        await kvZrem('nameIndex', oldName.toUpperCase()).catch(()=>{});
       }
 
       // Register new name and persist to player hash
       await kvSetPerm('nameReg:' + clean, address);
       await kvHset('ph:' + address, 'name', clean);
+      // nameIndex is a flat list of every registered name (score 0 for all) — the only way
+      // to support "search for a player by name" against a KV store with no native scan.
+      await kvZadd('nameIndex', 0, clean);
 
       return res.status(200).json({ ok: true, name: clean });
     } catch (err) {
@@ -85,9 +89,67 @@ module.exports = async function handler(req, res) {
     }
   }
 
+  // ── TEMP one-time migration — remove after running once ─────────────────────
+  // nameIndex (added alongside player search) only gets populated going forward from
+  // setname. Backfills every name already visible in either game's leaderboard sorted
+  // set so existing players are searchable immediately, not just after their next rename.
+  if (req.method === 'GET' && req.query && req.query.do === 'backfill-names-once' &&
+      req.query.token === 'lLmQmyLjbm8MHMLRiS88zq-3ln15JdnD') {
+    try {
+      let indexed = 0;
+      for (const g of ['ss', 'pac']) {
+        const raw = await kvZrevrange('lb:' + g + ':earned', 0, -1) || [];
+        for (let i = 0; i < raw.length; i += 2) {
+          const addr = raw[i];
+          const name = await kvHget('ph:' + addr, 'name');
+          if (name) { await kvZadd('nameIndex', 0, name); indexed++; }
+        }
+      }
+      return res.status(200).json({ ok: true, indexed });
+    } catch (err) {
+      console.error('[leaderboard/backfill]', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   const game = gameOf(req.query && req.query.game);
+
+  // ── GET ?search= — find any player by (partial) name, not just the top 20 ──────
+  // Backed by nameIndex, a flat set of every registered name — there's no native
+  // "search" in a KV store, so this is a substring scan over that list. Fine at
+  // current scale; would need a real search index if the player base gets huge.
+  if (req.query && req.query.search) {
+    try {
+      const q = String(req.query.search).trim().toUpperCase().slice(0, 20);
+      if (!q) return res.status(200).json({ results: [] });
+      const raw = await kvZrevrange('nameIndex', 0, -1) || [];
+      const names = [];
+      for (let i = 0; i < raw.length; i += 2) names.push(raw[i]);
+      const matches = [...new Set(names)].filter(n => n.includes(q)).slice(0, 20);
+      const addrs = await Promise.all(matches.map(n => kvGet('nameReg:' + n)));
+      const results = (await Promise.all(matches.map(async (name, idx) => {
+        const address = addrs[idx];
+        if (!address) return null;
+        const stats = await readStats(game, address);
+        return {
+          address, name,
+          earned:  stats.earned  || 0,
+          wagered: stats.wagered || 0,
+          games:   stats.games   || 0,
+          kills:   stats.kills   || 0,
+          deaths:  stats.deaths  || 0,
+          wins:    stats.wins    || 0,
+          losses:  stats.losses  || 0,
+        };
+      }))).filter(Boolean);
+      return res.status(200).json({ results });
+    } catch (err) {
+      console.error('[leaderboard/search]', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  }
 
   // ── GET ?address= — single player profile (+ earnings history for the chart) ────
   if (req.query && req.query.address) {
