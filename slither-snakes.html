@@ -1487,10 +1487,24 @@ function _loadSnakeColorPick(){
   const pick=document.getElementById('snake-color-pick');
   if(pick&&saved)pick.value=saved;
 }
+// Sets inline styles rather than just toggling the .btn-g class: both srv-na/srv-eu carry
+// the base .btn-c class, and since .btn-c is declared AFTER .btn-g in the stylesheet, its
+// color/border-color win the cascade even with .btn-g added on top — the "selected" button
+// rendered with a green background but cyan text/border, an ambiguous half-selected look.
+// That's almost certainly why switching felt unreliable: the server DID switch (GAME_SERVER
+// updates immediately below in setGameServer), but nothing clearly showed which one was
+// active, so people didn't trust it and kept clicking. Inline styles always win the cascade
+// regardless of class order, so the selected button is now unambiguous every time.
 function syncServerBtns(){
-  document.querySelectorAll('[id^="srv-"]').forEach(b=>b.classList.remove('btn-g'));
-  const a=document.getElementById('srv-'+GAME_SERVER.toLowerCase());
-  if(a) a.classList.add('btn-g');
+  ['na','eu'].forEach(r=>{
+    const b=document.getElementById('srv-'+r);
+    if(!b)return;
+    const active=r===GAME_SERVER.toLowerCase();
+    b.classList.toggle('btn-g',active);
+    b.style.background=active?'var(--g)':'transparent';
+    b.style.color=active?'#001500':'var(--c)';
+    b.style.borderColor=active?'var(--g)':'var(--c)';
+  });
 }
 function setGameServer(r){
   GAME_SERVER=r; localStorage.setItem('ss_server',r);
