@@ -200,26 +200,29 @@ module.exports = async function handler(req, res) {
     kvDel('lock:co:' + walletAddress).catch(() => {});
     kvDel('dead:' + walletAddress).catch(() => {});
 
-    // Fire-and-forget leaderboard join stat — atomic HINCRBY, no read-modify-write race.
-    // Stats are scoped per-game (ss-* lobbyId = Slither Snakes, everything else = Pac-Man)
-    // so the two games' leaderboards never mix, even for a wallet that plays both.
-    (async()=>{
-      try{
-        const game=(lobbyId&&lobbyId.startsWith('ss-'))?'ss':'pac';
-        const namePk='ph:'+walletAddress;      // display name is shared across both games
-        const statsPk='ph:'+game+':'+walletAddress;
-        // Set display name only if player doesn't have one yet
-        if(playerName&&typeof playerName==='string') await kvHsetnx(namePk,'name',playerName.slice(0,20).toUpperCase());
-        await kvHincrby(statsPk,'wagered',lamps);
-        await kvHincrby(statsPk,'games',1);
-        // Keep sorted set score in sync (score = current earned lamports)
-        const earned=await kvHget(statsPk,'earned');
-        await kvZadd('lb:'+game+':earned',Number(earned)||0,walletAddress);
-        // Global counters
-        await kvHincrby('ph:'+game+':global','totalWagered',lamps);
-        await kvHincrby('ph:'+game+':global','gamesPlayed',1);
-      }catch(_){}
-    })();
+    // Leaderboard join stat — atomic HINCRBY, no read-modify-write race. Stats are scoped
+    // per-game (ss-* lobbyId = Slither Snakes, everything else = Pac-Man) so the two games'
+    // leaderboards never mix, even for a wallet that plays both.
+    // AWAITED (not fire-and-forget): Vercel can freeze/kill the function the instant the
+    // response is sent, so an un-awaited background write is a coin flip on whether it
+    // finishes — that's exactly what caused games/wagered to go missing while a later,
+    // properly-awaited request (e.g. cashout) recorded fine. Errors are still swallowed so
+    // a stats hiccup never fails the actual join.
+    try{
+      const game=(lobbyId&&lobbyId.startsWith('ss-'))?'ss':'pac';
+      const namePk='ph:'+walletAddress;      // display name is shared across both games
+      const statsPk='ph:'+game+':'+walletAddress;
+      // Set display name only if player doesn't have one yet
+      if(playerName&&typeof playerName==='string') await kvHsetnx(namePk,'name',playerName.slice(0,20).toUpperCase());
+      await kvHincrby(statsPk,'wagered',lamps);
+      await kvHincrby(statsPk,'games',1);
+      // Keep sorted set score in sync (score = current earned lamports)
+      const earned=await kvHget(statsPk,'earned');
+      await kvZadd('lb:'+game+':earned',Number(earned)||0,walletAddress);
+      // Global counters
+      await kvHincrby('ph:'+game+':global','totalWagered',lamps);
+      await kvHincrby('ph:'+game+':global','gamesPlayed',1);
+    }catch(_){}
 
     // Issue a game token — HMAC-signed proof of payment for the Socket.io server.
     // The Socket.io server validates this on connection; without it paid lobbies are rejected.

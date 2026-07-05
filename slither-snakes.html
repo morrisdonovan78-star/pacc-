@@ -128,6 +128,8 @@ html,body{background:#07070f;color:var(--txt);font-family:'Exo 2',sans-serif;min
 #lb-rows tr.lb-me{box-shadow:inset 0 0 0 1px rgba(57,255,20,.45);}
 #lb-rows td{padding:7px 4px;}
 #lb-rows tr[data-address]{cursor:pointer;}
+#lb-rows tr[data-address]:focus-visible{outline:2px solid var(--y);outline-offset:-2px;}
+.lb-icon-btn:focus-visible{outline:2px solid var(--y);outline-offset:1px;}
 .lb-icon-btn{background:none;border:none;color:rgba(255,255,255,.5);font-size:12px;cursor:pointer;padding:2px 4px;}
 .lb-icon-btn:hover{color:#fff;}
 .pf-tf{opacity:.5;}
@@ -844,7 +846,7 @@ async function loadLeaderboard(){
         const cls='lb-top'+p.rank+(p.address===ST.address?' lb-me':'');
         const name=(p.name||_lbShortAddr(p.address)).replace(/[<>&]/g,'').slice(0,14);
         const attrName=name.replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-        return '<tr class="'+cls+'" data-address="'+p.address+'" data-name="'+attrName+'">'+
+        return '<tr class="'+cls+'" data-address="'+p.address+'" data-name="'+attrName+'" tabindex="0">'+
           '<td style="font-family:\'Press Start 2P\',monospace;font-size:9px;color:var(--y);">'+medal+'</td>'+
           '<td style="font-weight:600;">'+name+(p.address===ST.address?' <span style="color:var(--g);font-size:9px;">(YOU)</span>':'')+'</td>'+
           '<td style="text-align:right;color:var(--g);">'+_lbFmtSol(p.earned)+'</td>'+
@@ -3468,31 +3470,58 @@ function pollGamepad(){
     }
   } else {
     // Menu: stick/d-pad to navigate, A to confirm, B to back
+    // When a modal (leaderboard/profile/friends/withdraw) is open, scope navigation to it —
+    // otherwise the d-pad can wander into buttons on the screen underneath that the modal covers.
+    const modal=_topModal();
+    const scope=modal||document;
     const ae=document.activeElement;
-    // Auto-redirect to first button if nothing focused, off-screen, or stuck in a text input
+    // Auto-redirect to first button if nothing focused, off-screen, stuck in a text input,
+    // or focused on something outside the currently-open modal (e.g. it was open when a
+    // modal appeared on top of it).
     const stuckInInput=ae&&ae.tagName==='INPUT';
-    if(!ae||ae===document.body||stuckInInput){gpadFocus(0);}
+    const aeInScope=!!ae&&scope.contains(ae);
+    if(!ae||ae===document.body||stuckInInput||!aeInScope){gpadFocus(0);}
     else{const rb=ae.getBoundingClientRect();if(!(rb.width>0&&rb.height>0&&rb.bottom>0&&rb.right>0&&rb.top<window.innerHeight&&rb.left<window.innerWidth))gpadFocus(0);}
     const sy=axes[1]||0,sx=axes[0]||0;
     const dUp=cur(12)||sy<-0.5,dDown=cur(13)||sy>0.5;
     const dLeft=cur(14)||sx<-0.5,dRight=cur(15)||sx>0.5;
     if(dUp||dDown||dLeft||dRight){
-      // If nothing is focused yet, anchor first (handles switching from mouse→controller mid-session)
-      if(!document.activeElement||document.activeElement===document.body){gpadFocus(0);_gpadNavTs=now;}
+      // If nothing is focused yet (or focus escaped the modal), anchor first
+      if(!document.activeElement||document.activeElement===document.body||!aeInScope){gpadFocus(0);_gpadNavTs=now;}
       else if(now-_gpadNavTs>GPAD_NAV_MS){_gpadNavTs=now;gpadFocus((dDown||dRight)?1:-1);}
     }
     if(pressed(0)){const f=document.activeElement;if(f&&f.id!=='voice-btn')f.click();}
     if(pressed(1)){
-      const back=document.querySelector('.scr[style*="flex"] .copy-btn,[id="wd-modal"] .btn-r');
-      if(back)back.click();
+      if(modal&&modal.id==='wd-modal'){const c=modal.querySelector('.btn-r');if(c)c.click();}
+      else if(modal&&modal.id==='profile-modal')closeProfile();
+      else if(modal&&modal.id==='friends-modal')closeFriends();
+      else if(modal&&modal.id==='lb-modal')closeLeaderboard();
+      else{
+        const back=document.querySelector('.scr[style*="flex"] .copy-btn');
+        if(back)back.click();
+      }
     }
   }
   _gpadLastBtn=Array.from(btns).map(b=>!!(b&&b.pressed));
 }
+// Returns the DOM element of whichever full-screen modal is currently open (topmost by
+// z-index first, since they can stack — e.g. Send opened from a profile opened from the
+// leaderboard), or null if none is open. B-button "back" and d-pad navigation both scope
+// to this so a controller never focuses/clicks something the modal is covering.
+function _topModal(){
+  // Highest z-index first — modals can stack (e.g. Send opened from a Profile opened from the Leaderboard)
+  for(const id of ['wd-modal','profile-modal','friends-modal','lb-modal']){
+    const el=document.getElementById(id);
+    if(el&&el.style.display==='flex')return el;
+  }
+  return null;
+}
 function gpadFocus(dir){
   const vw=window.innerWidth,vh=window.innerHeight;
-  // Only navigate buttons — inputs require a keyboard to be useful and cause controller lockout
-  const all=[...document.querySelectorAll('button:not([disabled])')].filter(e=>{
+  const scope=_topModal()||document;
+  // Only navigate buttons + leaderboard rows — text inputs require a keyboard to be useful
+  // and would cause controller lockout (no on-screen keyboard to escape them with).
+  const all=[...scope.querySelectorAll('button:not([disabled]), tr[data-address]')].filter(e=>{
     const r=e.getBoundingClientRect();
     return r.width>0&&r.height>0&&r.bottom>0&&r.right>0&&r.top<vh&&r.left<vw&&e.id!=='voice-btn';
   });

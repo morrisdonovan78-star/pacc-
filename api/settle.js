@@ -397,17 +397,17 @@ module.exports = async function handler(req, res) {
             const tx = buildTx(esc, blockhash, transfers);
             const result = await sendAndConfirm(tx);
             sig = result.sig; txConfirmed = result.confirmed;
-            (async()=>{ try{ await kvDel('krl:'+playerAddress); }catch(_){} })();
-            (async()=>{
-              try{
-                const pk='ph:'+game+':'+playerAddress;
-                const newEarned=await kvHincrby(pk,'earned',playerCut);
-                await kvHincrby(pk,'wins',1);
-                await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
-                await kvHincrby('ph:'+game+':global','totalEarned',playerCut);
-                await pushEarningsPoint(game,playerAddress,newEarned);
-              }catch(_){}
-            })();
+            // Awaited (not fire-and-forget) — Vercel can freeze the function the instant the
+            // response is sent, so an un-awaited background write may never finish.
+            try{ await kvDel('krl:'+playerAddress); }catch(_){}
+            try{
+              const pk='ph:'+game+':'+playerAddress;
+              const newEarned=await kvHincrby(pk,'earned',playerCut);
+              await kvHincrby(pk,'wins',1);
+              await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
+              await kvHincrby('ph:'+game+':global','totalEarned',playerCut);
+              await pushEarningsPoint(game,playerAddress,newEarned);
+            }catch(_){}
             break;
           } catch (e) {
             const isOnChainFail = e.message.includes('TX rejected') || e.message.includes('insufficient') || e.message.includes('0x1') || e.message.includes('-32002') || e.message.includes('Send failed');
@@ -505,20 +505,19 @@ module.exports = async function handler(req, res) {
           const tx = buildTx(esc, killHash, transfers);
           const result2 = await sendAndConfirm(tx);
           sig = result2.sig; txConfirmed2 = result2.confirmed;
-          (async()=>{
-            try{
-              const pk='ph:'+game+':'+playerAddress;
-              await kvHincrby(pk,'kills',1);
-              const newEarned=await kvHincrby(pk,'earned',killerCut||0);
-              await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
-              await pushEarningsPoint(game,playerAddress,newEarned);
-              // Track death for victim — must happen regardless of wager since victim's
-              // wager was already deleted above, so their settle/lose won't count it.
-              if(vaBody && vaBody!==playerAddress) {
-                await kvHincrby('ph:'+game+':'+vaBody,'deaths',1);
-              }
-            }catch(_){}
-          })();
+          // Awaited (not fire-and-forget) — see cashout block above for why.
+          try{
+            const pk='ph:'+game+':'+playerAddress;
+            await kvHincrby(pk,'kills',1);
+            const newEarned=await kvHincrby(pk,'earned',killerCut||0);
+            await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
+            await pushEarningsPoint(game,playerAddress,newEarned);
+            // Track death for victim — must happen regardless of wager since victim's
+            // wager was already deleted above, so their settle/lose won't count it.
+            if(vaBody && vaBody!==playerAddress) {
+              await kvHincrby('ph:'+game+':'+vaBody,'deaths',1);
+            }
+          }catch(_){}
           break;
         } catch (e) {
           const isOnChainFail = e.message.includes('TX rejected') || e.message.includes('insufficient') || e.message.includes('0x1') || e.message.includes('-32002') || e.message.includes('Send failed');
@@ -558,13 +557,12 @@ module.exports = async function handler(req, res) {
         const tx = buildTx(esc, loseHash, [{ to: b58Decode(CREATOR_WALLET), lamports: finalAmt }]);
         const { sig: loseSig, confirmed: loseConfirmed } = await sendAndConfirm(tx);
         await kvDel('pw:' + playerAddress);
-        (async()=>{ try{ await kvDel('krl:'+playerAddress); await kvDel('kc:'+playerAddress); }catch(_){} })();
-        (async()=>{
-          try{
-            await kvHincrby('ph:'+game+':'+playerAddress,'losses',1);
-            await kvHincrby('ph:'+game+':'+playerAddress,'deaths',1);
-          }catch(_){}
-        })();
+        // Awaited (not fire-and-forget) — see cashout block above for why.
+        try{ await kvDel('krl:'+playerAddress); await kvDel('kc:'+playerAddress); }catch(_){}
+        try{
+          await kvHincrby('ph:'+game+':'+playerAddress,'losses',1);
+          await kvHincrby('ph:'+game+':'+playerAddress,'deaths',1);
+        }catch(_){}
         clearTimeout(guard); done = true;
         return res.status(200).json({ sig: loseSig, amount: finalAmt, confirmed: loseConfirmed });
       } finally {
