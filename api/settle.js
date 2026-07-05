@@ -402,10 +402,17 @@ module.exports = async function handler(req, res) {
             try{ await kvDel('krl:'+playerAddress); }catch(_){}
             try{
               const pk='ph:'+game+':'+playerAddress;
-              const newEarned=await kvHincrby(pk,'earned',playerCut);
+              // Leaderboard "earned" is the gross cashout total (wager + winnings) the player
+              // actually saw on their in-game $ display when they hit cashout — NOT playerCut,
+              // which is that amount minus the 10% platform fee. Using playerCut made cashing
+              // out for (say) $2 in a $1 lobby show as $1.80 earned, which looked wrong since
+              // the fee is a platform cut, not something the player should see subtracted from
+              // their own earnings figure. The actual wallet transfer below is UNCHANGED — this
+              // only affects the stat/leaderboard number, never the real payout split.
+              const newEarned=await kvHincrby(pk,'earned',payout);
               await kvHincrby(pk,'wins',1);
               await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
-              await kvHincrby('ph:'+game+':global','totalEarned',playerCut);
+              await kvHincrby('ph:'+game+':global','totalEarned',payout);
               await pushEarningsPoint(game,playerAddress,newEarned);
             }catch(_){}
             break;
@@ -509,7 +516,8 @@ module.exports = async function handler(req, res) {
           try{
             const pk='ph:'+game+':'+playerAddress;
             await kvHincrby(pk,'kills',1);
-            const newEarned=await kvHincrby(pk,'earned',killerCut||0);
+            // Gross reward (pre-fee), same reasoning as the cashout path above.
+            const newEarned=await kvHincrby(pk,'earned',total||0);
             await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
             await pushEarningsPoint(game,playerAddress,newEarned);
             // Track death for victim — must happen regardless of wager since victim's
