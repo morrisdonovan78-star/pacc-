@@ -89,29 +89,6 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // ── TEMP one-time migration — remove after running once ─────────────────────
-  // nameIndex (added alongside player search) only gets populated going forward from
-  // setname. Backfills every name already visible in either game's leaderboard sorted
-  // set so existing players are searchable immediately, not just after their next rename.
-  if (req.method === 'GET' && req.query && req.query.do === 'backfill-names-once' &&
-      req.query.token === 'lLmQmyLjbm8MHMLRiS88zq-3ln15JdnD') {
-    try {
-      let indexed = 0;
-      for (const g of ['ss', 'pac']) {
-        const raw = await kvZrevrange('lb:' + g + ':earned', 0, -1) || [];
-        for (let i = 0; i < raw.length; i += 2) {
-          const addr = raw[i];
-          const name = await kvHget('ph:' + addr, 'name');
-          if (name) { await kvZadd('nameIndex', 0, name); indexed++; }
-        }
-      }
-      return res.status(200).json({ ok: true, indexed });
-    } catch (err) {
-      console.error('[leaderboard/backfill]', err);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
-  }
-
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   const game = gameOf(req.query && req.query.game);
