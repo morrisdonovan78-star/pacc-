@@ -1271,6 +1271,21 @@ function tick(room, io) {
 
 // ── Server setup ──────────────────────────────────────────────────────────────
 const app = express();
+// Single source of truth for CORS on the plain HTTP routes below (/health, /counts, etc).
+// socket.io has its own separate `cors` option a few lines down for the /socket.io/* path —
+// that's fine, they never overlap on the same request. What must NEVER happen is nginx (in
+// front of this process) ALSO adding its own Access-Control-Allow-Origin on top of either of
+// these: two ACAO headers on one response is invalid per the CORS spec ("only one value
+// allowed") and browsers hard-reject it — exactly the bug reported 2026-07-05. nginx's
+// add_header lines were removed for this reason; this Express middleware is the only place
+// HTTP-route CORS headers are set now.
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', CORS_ORIGIN);
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 app.get('/health', (_, res) => res.json({ ok: true, rooms: rooms.size }));
 app.get('/counts', (_, res) => {
   const LOBBY_IDS = ['free-lobby', 'ss-free-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-25'];
