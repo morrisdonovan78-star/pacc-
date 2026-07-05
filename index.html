@@ -2174,6 +2174,8 @@ async function joinLobby(usd){
 // ═══════════════════════════════════════════════════════════
 const T=34,C=48,R=36,TICK_MS=33; let canvas,ctx,gLoop,rafHandle,frm=0,G={};
 let _camX=0,_camY=0,_camZoom=1; // camera: position in game-pixels, zoom multiplier
+let _zoomMin=0.25; // lower (more zoomed out) while spectating — see launchGame(spectateMode)
+let _specDrag=null; // click-drag pan while spectating: {x,y,px,py} start point + camera pos at drag start
 const _isMobile=('ontouchstart' in window)||navigator.maxTouchPoints>0;
 const _FNT_LBL='bold 11px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",monospace';
 const _FNT_SOL='bold 8px monospace';
@@ -2506,6 +2508,7 @@ function leaveSpectate(){
   stopHostLoop();
   clearInterval(_guestInputLoop); _guestInputLoop=null;
   isSpectating=false;
+  _specDrag=null;
   _cashoutInProgress=false; ST.cashoutLamports=0;
   // Clean up chat UI
   closeChat();
@@ -2544,6 +2547,7 @@ function exitWatchMode(){
   if(rafHandle){ cancelAnimationFrame(rafHandle); rafHandle=null; }
   clearInterval(_guestInputLoop); _guestInputLoop=null;
   isSpectating=false;
+  _specDrag=null;
   const hud=document.getElementById('watch-hud'); if(hud) hud.style.display='none';
   pkDisconnect();
   go('scr-home');
@@ -3007,6 +3011,10 @@ function launchGame(spectateMode){
   ctx=canvas.getContext('2d');
   canvas.width=window.innerWidth;
   canvas.height=window.innerHeight;
+  // Spectators can zoom out much further than a real player ever needs to (no snake/pacman of
+  // their own to keep readably large on screen) — lets a Discord viewer see the whole board.
+  _zoomMin=spectateMode?0.08:0.25;
+  _specDrag=null; // guard against a drag started in a previous spectate session leaking in
   _camZoom=Math.max(window.innerWidth/(C*T), window.innerHeight/(R*T));
   _camX=(C*T)/2; _camY=(R*T)/2;
   { const _mp=G&&G.players&&G.players.get(myPid); if(_mp){ _camX=(_mp.x+0.5)*T; _camY=(_mp.y+0.5)*T; } }
@@ -3105,6 +3113,7 @@ function launchGame(spectateMode){
   _zoomSliderEl=document.getElementById('zoom-slider');
   if(_zoomSliderEl){
     _zoomSliderEl.style.display='block';
+    _zoomSliderEl.min=String(_zoomMin);
     _zoomSliderEl.value=String(_camZoom);
     _zoomSliderEl.addEventListener('input',()=>{ _camZoom=parseFloat(_zoomSliderEl.value); });
   }
@@ -3128,6 +3137,17 @@ function launchGame(spectateMode){
     else p1d(0,dy>0?1:-1);                           // swipe up/down
   },{passive:false});
   canvas.addEventListener('touchcancel',()=>{ _swActive=false; });
+  // Click-and-drag camera pan + scroll-to-zoom, spectate-only (mirrors the Slither Snakes
+  // watch viewer). Real players never trigger this — isSpectating is checked at drag-start
+  // and inside the wheel handler, so normal gameplay is completely unaffected.
+  document.removeEventListener('mousedown',_specDragStart);
+  document.removeEventListener('mousemove',_specDragMove);
+  document.removeEventListener('mouseup',_specDragEnd);
+  document.removeEventListener('wheel',onGameWheel);
+  document.addEventListener('mousedown',_specDragStart);
+  document.addEventListener('mousemove',_specDragMove);
+  document.addEventListener('mouseup',_specDragEnd);
+  document.addEventListener('wheel',onGameWheel,{passive:false});
   frm=0;
   isSpectating=!!spectateMode;
   _cashoutInProgress=false; ST.cashoutLamports=ST.cashoutLamports||Math.floor((ST.wagerSol||0)*solanaWeb3.LAMPORTS_PER_SOL);
@@ -3572,7 +3592,7 @@ function pollGamepad(){
   // Right stick X → zoom (right=in, left=out), scaled by deflection
   const rx=gp.axes[2]||0;
   if(Math.abs(rx)>0.3)
-    _camZoom=Math.max(0.25,Math.min(4,_camZoom*(rx>0?1+0.008*rx:1/(1+0.008*Math.abs(rx)))));
+    _camZoom=Math.max(_zoomMin,Math.min(4,_camZoom*(rx>0?1+0.008*rx:1/(1+0.008*Math.abs(rx)))));
   // Detect controller input — switch HUD if user was on keyboard
   let _anyBtn=false;
   for(let i=0;i<gp.buttons.length;i++) if(gp.buttons[i]&&gp.buttons[i].pressed){_anyBtn=true;break;}
@@ -3592,6 +3612,24 @@ function pollGamepad(){
   }
   // Save state for next frame
   for(let i=0;i<gp.buttons.length;i++) _gpPrev[i]=down(i);
+}
+// ── Spectator camera: click-drag pan + scroll-to-zoom (watch-mode only) ────────
+function _specDragStart(e){
+  if(!isSpectating||e.button!==0) return;
+  if(e.target.closest&&e.target.closest('button,input,a')) return; // don't hijack HUD clicks
+  _specDrag={x:e.clientX,y:e.clientY,px:_camX,py:_camY};
+}
+function _specDragMove(e){
+  if(!_specDrag||!_camZoom) return;
+  _camX=_specDrag.px-(e.clientX-_specDrag.x)/_camZoom;
+  _camY=_specDrag.py-(e.clientY-_specDrag.y)/_camZoom;
+}
+function _specDragEnd(){ _specDrag=null; }
+function onGameWheel(e){
+  if(!isSpectating) return; // real players zoom via Z/X keys, the slider, or the right stick
+  e.preventDefault();
+  const factor=e.deltaY<0?1.08:1/1.08;
+  _camZoom=Math.max(_zoomMin,Math.min(4,_camZoom*factor));
 }
 function onKey(e){
   // Track keyboard input — switch HUD away from controller if keyboard used
@@ -3621,7 +3659,7 @@ function onKey(e){
     case'c': case'C': usePow('pepper');  e.preventDefault(); break;
     // Zoom
     case'z': case'Z':{ _camZoom=Math.min(4,_camZoom*1.12); e.preventDefault(); break; }
-    case'x': case'X':{ _camZoom=Math.max(0.25,_camZoom*0.89); e.preventDefault(); break; }
+    case'x': case'X':{ _camZoom=Math.max(_zoomMin,_camZoom*0.89); e.preventDefault(); break; }
     // Voice mute/unmute
     case'm': case'M': if(!isSpectating){ voiceToggle(); e.preventDefault(); } break;
     // Game sound mute/unmute
