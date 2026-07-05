@@ -4379,21 +4379,36 @@ function drawFood(){
 // body by arc length every frame, so tiny frame-to-frame shifts in where the head anchor sits
 // (interpolation/reconciliation) ripple into small position changes further down the body —
 // visible as a faint shake even though the underlying path/collision data is fine. This just
-// blends each body point 50% toward its freshly-resampled position instead of snapping to it
+// blends each body point toward its freshly-resampled position instead of snapping to it
 // outright. Purely cosmetic: it never touches snake.path, collision, or network code, and the
 // head (index 0) is always left exact so camera-lock on your own snake stays pixel-perfect.
+//
+// numSections changes by ±1 fairly often (growth from food, boost length drain) — every such
+// tick, bPts.length changes too. That used to blow away the ENTIRE smoothing cache and snap
+// back to raw/unsmoothed for one frame, which happens often enough to read as a rhythmic
+// hitch rather than a one-off. Now only the newly added/removed tail point(s) reset; the rest
+// of the body keeps its smoothed history across a length change.
+const BODY_SMOOTH_F=0.35; // lower = smoother/more lag, higher = snappier/less smoothing
 function _smoothBodyPoints(snake,bPts){
   const prev=snake._smoothPts;
-  if(!prev||prev.length!==bPts.length){
+  const n=bPts.length;
+  if(!prev){
     snake._smoothPts=bPts.map(p=>({x:p.x,y:p.y}));
     return snake._smoothPts;
   }
-  for(let i=1;i<bPts.length;i++){
-    prev[i].x+=(bPts[i].x-prev[i].x)*0.5;
-    prev[i].y+=(bPts[i].y-prev[i].y)*0.5;
+  const overlap=Math.min(prev.length,n);
+  const out=new Array(n);
+  out[0]={x:bPts[0].x,y:bPts[0].y}; // head always exact
+  for(let i=1;i<n;i++){
+    if(i<overlap){
+      const pv=prev[i];
+      out[i]={x:pv.x+(bPts[i].x-pv.x)*BODY_SMOOTH_F,y:pv.y+(bPts[i].y-pv.y)*BODY_SMOOTH_F};
+    }else{
+      out[i]={x:bPts[i].x,y:bPts[i].y}; // newly-added tail point — no history to blend from yet
+    }
   }
-  prev[0].x=bPts[0].x; prev[0].y=bPts[0].y;
-  return prev;
+  snake._smoothPts=out;
+  return out;
 }
 function drawSnake(snake){
   if(!snake.path||snake.path.length<2)return;
