@@ -3299,8 +3299,8 @@ function eliminatePlayer(id, killerId){
   G.players.delete(id);
   updateScoreboard();
   if(isHost) pkSend({t:'elim',id,killerId,victimSol});  // tell all guests (includes killer id + victim's sol)
-  // Local player was killed → offer pay-to-rejoin instead of immediately ending game
-  if(id===myPid){ _spectateKillerPid=killerId||null; openRejoinOverlay(); }
+  // Local player was killed → record the death+loss (paid lobbies only), then offer pay-to-rejoin
+  if(id===myPid){ _spectateKillerPid=killerId||null; recordLoss(); openRejoinOverlay(); }
   // If I'm the killer, instantly claim the victim's wager from escrow
   if(killerId===myPid && ST.lobbyUsd>0) claimKillReward(victimSol, id);
 }
@@ -5565,6 +5565,21 @@ async function settle(result){
   }catch(e){
     lg('res-log','Settlement error: '+e.message,'lerr');
   }
+}
+
+// Record a death + loss on the leaderboard when eliminated in a PAID lobby. Stat-only (no money —
+// the wager forfeit is handled server-side by elim-lock on the kill). This is the SINGLE source of
+// truth for the player's own deaths+losses, matching Slither Snakes: nothing else records them
+// (endGame is unused and declineRejoin never settled), so without this, losses stayed at 0 and — now
+// that the killer-side victim-death bump was removed to avoid double counting — deaths too.
+async function recordLoss(){
+  if(!ST.address||!pkRoomId||!ST.lobbyUsd)return; // paid lobbies only
+  if(!_keypair)return;
+  try{
+    const {sig,ts}=signSettleMsg('stat-loss',ST.address,0);
+    await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':sig,'x-settle-ts':String(ts)},
+      body:JSON.stringify({action:'stat-loss',playerAddress:ST.address,wagerLamports:0,lobbyId:pkRoomId})});
+  }catch(e){ console.warn('[recordLoss]',e); }
 }
 
 function playAgain(){
