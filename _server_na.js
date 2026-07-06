@@ -219,6 +219,12 @@ const SS_MIN_SIZE = 40;
 
 // Server-authoritative physics constants (must match client exactly)
 const SS_ARENA_R       = 3000;
+// Dynamic border: each death-to-the-border briefly shrinks the arena, then it eases back out.
+const SS_BORDER_SHRINK_STEP  = 0.05;   // shrink 5% per border death
+const SS_BORDER_SHRINK_MAX   = 0.10;   // never shrink more than 10% total
+const SS_BORDER_SHRINK_HOLD  = 5000;   // hold the shrink for 5s (refreshed by each new border death)
+const SS_BORDER_SHRINK_IN    = SS_ARENA_R * 0.0022; // inward speed/tick (~4%/s) — not instant, but fast enough to catch a careless edge-looter
+const SS_BORDER_SHRINK_OUT   = SS_ARENA_R * 0.0009; // outward ease-back/tick (~1.6%/s) — gentle return
 const SS_MAX_TURN      = 0.274;   // rad/tick — client MAX_TURN
 const SS_FOOD_TARGET   = 95;     // client FOOD_TARGET
 const SS_FOOD_GROW     = 2;       // client FOOD_GROW
@@ -368,7 +374,7 @@ function ssSpawnKillFood(sg, sn) {
   const ns = sn.ns || SS_MIN_NS;
   const orbs = Math.max(2, Math.min(30, Math.round(ns / 4)));
   const wPerOrb = (sn.usd || 0) / orbs;
-  const EDGE = SS_ARENA_R - 30;
+  const EDGE = (sg.arenaR || SS_ARENA_R) - 30; // clamp to the CURRENT (possibly shrunk) border
   const bodyLen = Math.max(1, Math.min(path.length, (sn.ns || SS_MIN_NS) * SS_SEG_STEP));
   const step = bodyLen / orbs;
   for (let c = 0; c < orbs; c++) {
@@ -474,6 +480,7 @@ function getSsGame(lid) {
   if (!ssGames.has(lid)) ssGames.set(lid, {
     snakes: new Map(), tickInterval: null, tick: 0,
     food: [], _foodDirty: true, _lastFoodSend: 0, _history: [],
+    arenaR: SS_ARENA_R, shrinkPct: 0, shrinkResetAt: 0, // dynamic border state
     tuning: { hbs: SS_HBS, hhbs: SS_HHBS, faceDeg: 75, rule: 'smallest_wins' }
   });
   return ssGames.get(lid);
@@ -584,7 +591,15 @@ function ssStepMovement(sn, sg, lid, io, now) {
   // Advance head
   sn.x += Math.cos(sn.angle) * speed * SS_DT;
   sn.y += Math.sin(sn.angle) * speed * SS_DT;
-  if (sn.x * sn.x + sn.y * sn.y >= SS_ARENA_R * SS_ARENA_R) { ssKill(sn, null, lid, io); return; }
+  {
+    const aR = sg.arenaR || SS_ARENA_R;
+    if (sn.x * sn.x + sn.y * sn.y >= aR * aR) {
+      // Death to the border → close the arena in a bit more (capped), and (re)start the hold clock.
+      sg.shrinkPct = Math.min(SS_BORDER_SHRINK_MAX, (sg.shrinkPct || 0) + SS_BORDER_SHRINK_STEP);
+      sg.shrinkResetAt = now + SS_BORDER_SHRINK_HOLD;
+      ssKill(sn, null, lid, io); return;
+    }
+  }
 
   // Distance-sampled path: _pathAcc += chord distance; advance _lastPath along the chord
   const dxp = sn.x - sn._lastPathX, dyp = sn.y - sn._lastPathY, d = Math.sqrt(dxp*dxp + dyp*dyp);
@@ -653,6 +668,25 @@ function ssTick(lid, io) {
   sg.tick = (sg.tick || 0) + 1;
   const now = Date.now();
   if (!sg.food || !sg.food.length) ssReconcileFood(sg);
+
+  // ── Dynamic border: ease the arena radius toward its target and keep food inside it ──
+  if (sg.arenaR == null) sg.arenaR = SS_ARENA_R;
+  if ((sg.shrinkPct || 0) > 0 && now > (sg.shrinkResetAt || 0)) sg.shrinkPct = 0; // hold expired → ease back out
+  {
+    const targetR = SS_ARENA_R * (1 - (sg.shrinkPct || 0));
+    if (sg.arenaR > targetR)      sg.arenaR = Math.max(targetR, sg.arenaR - SS_BORDER_SHRINK_IN);  // closing in — fast
+    else if (sg.arenaR < targetR) sg.arenaR = Math.min(targetR, sg.arenaR + SS_BORDER_SHRINK_OUT); // opening back — gentle
+    // Gold/SOL kill food and pebbles must never sit outside the map — push anything the shrinking
+    // border has passed back inside its edge (so the closing ring visibly sweeps the money inward).
+    const edge = sg.arenaR - 20;
+    if (sg.food && sg.food.length && edge > 0) {
+      const e2 = edge * edge;
+      for (const f of sg.food) {
+        const d2 = f.x * f.x + f.y * f.y;
+        if (d2 > e2) { const s = edge / Math.sqrt(d2); f.x *= s; f.y *= s; sg._foodDirty = true; }
+      }
+    }
+  }
 
   // ── Drive bot inputs (before movement) ───────────────────────────────────
   sg.snakes.forEach(sn => {
@@ -813,7 +847,7 @@ function ssBroadcastState(sg, lid, io) {
     }
     snakePkts.push(pk);
   });
-  const pkt = { snakes: snakePkts, t: Date.now(), tick: sg.tick || 0 };
+  const pkt = { snakes: snakePkts, t: Date.now(), tick: sg.tick || 0, ar: Math.round(sg.arenaR || SS_ARENA_R) };
   const now = Date.now();
   if (sg._foodDirty || !sg._lastFoodSend || now - sg._lastFoodSend > 250) {
     pkt.food = sg.food.map(f => [
@@ -844,7 +878,7 @@ function ssBroadcastStateTo(socket, sg) {
     });
   });
   const pkt = {
-    snakes: snakePkts, t: Date.now(), tick: sg.tick || 0,
+    snakes: snakePkts, t: Date.now(), tick: sg.tick || 0, ar: Math.round(sg.arenaR || SS_ARENA_R),
     food: sg.food.map(f => [
       Math.round(f.x), Math.round(f.y),
       f.ci || 0, Math.round((f.size || 6) * 10) / 10,

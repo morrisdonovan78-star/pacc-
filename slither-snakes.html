@@ -712,7 +712,11 @@ body.mctl #voice-speakers{left:150px;}
 'use strict';
 
 // ══ CONSTANTS ════════════════════════════════════════════════
-const ARENA_R      = 3000;  // world radius
+const ARENA_R      = 3000;  // world radius (full/normal)
+// Live effective border radius — the server shrinks this on border-deaths and eases it back;
+// broadcast in each ss-state as `ar`. Used for drawing the ring AND for own-snake death prediction
+// so the client stays in step with the authoritative border. Defaults to the full radius.
+let _arenaR = ARENA_R;
 const SNAKE_SPD    = 288 / 30;  // moneyslither BASE_SPEED  288 px/s ÷ 30 TPS = 9.6 px/tick
 const BOOST_SPD    = 630 / 30;  // moneyslither BOOST_SPEED 630 px/s ÷ 30 TPS = 21 px/tick
 const TICK_MS      = 33;    // 30 TPS
@@ -2430,6 +2434,7 @@ async function pkConnect(roomId,gameToken,spectate){
     // Server-authoritative state: head pos + angle per tick, no body segs
     _sio.on('ss-state',d=>{
       if(!SG||SG.over)return;
+      if(typeof d.ar==='number'&&d.ar>0)_arenaR=d.ar; // live (shrinking/expanding) border radius
       // Sync food (sent every ~250ms or when changed)
       if(d.food){
         SG.food=_mapServerFood(d.food);
@@ -3663,6 +3668,7 @@ window.addEventListener('pagehide', function(){
 
 function launchSnakeGame(){
   go('scr-game');
+  _arenaR=ARENA_R; // reset the live border each game; ss-state will drive it after
   const sbar=document.getElementById('spectate-bar');if(sbar)sbar.style.display='none';
   canvas=document.getElementById('gc');
   ctx=canvas.getContext('2d');
@@ -4684,17 +4690,26 @@ function drawArena(){
   }
   ctx.stroke();
   ctx.restore();
-  // Danger zone — red ring near edge
-  const dangerR=ARENA_R*0.92;
-  ctx.beginPath();ctx.arc(0,0,ARENA_R,0,Math.PI*2);
+  // The deadly border is drawn at the LIVE radius (_arenaR), so when the server shrinks it the
+  // whole ring visibly closes in. When it's closed in, shade the now-lethal band between the live
+  // border and the old full edge so it's obvious that area just became instant death.
+  const bR=_arenaR;
+  if(bR<ARENA_R-1){
+    ctx.beginPath();
+    ctx.arc(0,0,ARENA_R,0,Math.PI*2);
+    ctx.arc(0,0,bR,0,Math.PI*2,true); // subtract the live-arena hole
+    ctx.fillStyle='rgba(255,40,40,0.11)';ctx.fill('evenodd');
+  }
+  // Danger zone — thick red band on the live border
+  ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
   ctx.strokeStyle='rgba(255,50,50,0.12)';ctx.lineWidth=ARENA_R*0.16;ctx.stroke();
   // Border glow
   for(let i=4;i>=0;i--){
-    ctx.beginPath();ctx.arc(0,0,ARENA_R,0,Math.PI*2);
+    ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
     ctx.strokeStyle=`rgba(0,255,255,${0.06+i*0.03})`;
     ctx.lineWidth=20+i*14;ctx.stroke();
   }
-  ctx.beginPath();ctx.arc(0,0,ARENA_R,0,Math.PI*2);
+  ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
   ctx.strokeStyle='#00FFFF';ctx.lineWidth=5;
   ctx.shadowColor='#00FFFF';ctx.shadowBlur=30;ctx.stroke();ctx.shadowBlur=0;
   ctx.restore();
