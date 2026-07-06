@@ -3695,38 +3695,60 @@ function _pmKeyAction(rawKey){
 function _pmBindKey(act){ if(_pmBinds[act]!==undefined) return _pmBinds[act]; const d=PM_BIND_DEFS.find(x=>x.act===act); return d?d.keys[0]:''; }
 
 // ── Rolling clip buffer ────────────────────────────────────────────────────────
-let _clipRec=null,_clipChunks=[],_clipStream=null,_clipMime='';
+// Records in rolling ~20s finalized SEGMENTS (not sliced chunks) so each clip is a valid file
+// with a real duration. Prefers MP4/H.264 (Discord reads its duration + plays it inline); WebM
+// from MediaRecorder omits the duration element and shows as ~1s, so it's only a fallback.
+const CLIP_SEG_MS=20000;
+let _clipRec=null,_clipChunks=[],_clipStream=null,_clipMime='',_clipPrev=null,_clipSegTimer=null,_clipSegStart=0,_clipPendingSave=false;
 function _clipEnabled(){ return PM_IS_PC && localStorage.getItem('pm_clip_on')==='1'; } // opt-in, default OFF
-function _clipStart(){
-  if(!_clipEnabled() || _clipRec || !canvas || typeof MediaRecorder==='undefined') return;
+function _clipBeginSession(){
+  _clipChunks=[]; _clipSegStart=Date.now();
   try{
-    _clipStream=canvas.captureStream(30);
-    const types=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
-    _clipMime=(MediaRecorder.isTypeSupported?types.find(t=>MediaRecorder.isTypeSupported(t)):'')||'';
     _clipRec=new MediaRecorder(_clipStream, _clipMime?{mimeType:_clipMime,videoBitsPerSecond:3500000}:undefined);
-    _clipChunks=[];
-    _clipRec.ondataavailable=e=>{
-      if(e.data && e.data.size) _clipChunks.push({t:Date.now(),b:e.data});
-      if(_clipChunks.length>2){ const cutoff=Date.now()-22000, head=_clipChunks[0]; _clipChunks=[head,..._clipChunks.slice(1).filter(c=>c.t>=cutoff)]; }
+    _clipRec.ondataavailable=e=>{ if(e.data&&e.data.size)_clipChunks.push(e.data); };
+    _clipRec.onstop=()=>{
+      const blob=_clipChunks.length?new Blob(_clipChunks,{type:_clipMime||'video/webm'}):null;
+      if(blob)_clipPrev=blob;
+      if(_clipPendingSave){ _clipPendingSave=false; if(blob)_clipUpload(blob); }
+      if(_clipStream)_clipBeginSession();
     };
     _clipRec.start(1000);
-  }catch(err){ console.warn('[clip] start failed',err); _clipRec=null; }
+  }catch(err){ console.warn('[clip] session start failed',err); _clipRec=null; }
+}
+function _clipStart(){
+  if(!_clipEnabled() || _clipStream || !canvas || typeof MediaRecorder==='undefined') return;
+  try{
+    _clipStream=canvas.captureStream(30);
+    const types=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+    _clipMime=(MediaRecorder.isTypeSupported?types.find(t=>MediaRecorder.isTypeSupported(t)):'')||'';
+    _clipPrev=null;
+    _clipBeginSession();
+    _clipSegTimer=setInterval(()=>{ try{ if(_clipRec && _clipRec.state==='recording')_clipRec.stop(); }catch(_){} }, CLIP_SEG_MS);
+  }catch(err){ console.warn('[clip] start failed',err); _clipStream=null; }
 }
 function _clipStop(){
-  try{ if(_clipRec && _clipRec.state!=='inactive') _clipRec.stop(); }catch(_){}
-  _clipRec=null; _clipChunks=[];
-  if(_clipStream){ try{_clipStream.getTracks().forEach(t=>t.stop());}catch(_){}; _clipStream=null; }
+  if(_clipSegTimer){ clearInterval(_clipSegTimer); _clipSegTimer=null; }
+  const s=_clipStream; _clipStream=null; _clipPendingSave=false;
+  try{ if(_clipRec && _clipRec.state!=='inactive')_clipRec.stop(); }catch(_){}
+  _clipRec=null; _clipChunks=[]; _clipPrev=null;
+  if(s){ try{s.getTracks().forEach(t=>t.stop());}catch(_){} }
 }
 function _clipSave(){
   if(!PM_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
   if(!_clipEnabled()){ addToast('Clips are off — turn on in ⚙ Settings','#FFD700'); return; }
-  if(!_clipRec || _clipChunks.length===0){ addToast('Clip not ready yet — give it a few seconds','#FFD700'); return; }
-  const cutoff=Date.now()-20000, head=_clipChunks[0];
-  const parts=[head.b, ..._clipChunks.slice(1).filter(c=>c.t>=cutoff).map(c=>c.b)];
-  _clipUpload(new Blob(parts,{type:_clipMime||'video/webm'}));
+  if(!_clipStream){ addToast('Clip not ready yet — give it a few seconds','#FFD700'); return; }
+  const elapsed=Date.now()-_clipSegStart;
+  if(elapsed<7000 && _clipPrev){ _clipUpload(_clipPrev); return; }
+  _clipPendingSave=true;
+  try{
+    if(_clipRec && _clipRec.state==='recording'){ _clipRec.stop(); }
+    else if(_clipPrev){ _clipPendingSave=false; _clipUpload(_clipPrev); }
+    else { _clipPendingSave=false; addToast('Clip not ready yet — give it a few seconds','#FFD700'); }
+  }catch(_){ _clipPendingSave=false; if(_clipPrev)_clipUpload(_clipPrev); }
 }
 function _clipUpload(blob){
-  const fname='pacarena-'+Date.now()+'.webm';
+  const ext=(_clipMime && _clipMime.indexOf('mp4')!==-1)?'mp4':'webm';
+  const fname='pacarena-'+Date.now()+'.'+ext;
   if(!PM_CLIP_WEBHOOK){
     const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=fname; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(url),5000); addToast('🎬 Clip saved to your device','#39FF14'); return;

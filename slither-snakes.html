@@ -306,11 +306,13 @@ body.mctl #voice-speakers{left:150px;}
       <button id="srv-eu" class="btn btn-c btn-sm" onclick="setGameServer('EU')" style="flex:1;">🇩🇪 EU</button>
     </div>
     <button class="btn btn-g" onclick="go('scr-lobby');populateLobby();" style="margin-bottom:10px;font-size:11px;letter-spacing:2px;">▶ PLAY NOW</button>
-    <button id="practice-btn" class="btn btn-c btn-sm" onclick="launchPractice()" style="display:none;margin-bottom:10px;">⚙ PRACTICE (PRIVATE)</button>
-    <button class="btn btn-c btn-sm" onclick="showWithdraw()" style="margin-bottom:10px;">💸 WITHDRAW SOL</button>
-    <button class="btn btn-y btn-sm" onclick="openLeaderboard()" style="margin-bottom:10px;">🏆 LEADERBOARD</button>
-    <button class="btn btn-c btn-sm" onclick="openFriends()" style="margin-bottom:10px;">👥 FRIENDS</button>
-    <button class="btn btn-c btn-sm" onclick="_openSettings()" style="margin-bottom:10px;">⚙ SETTINGS</button>
+    <!-- Secondary actions: uniform 2×2 grid so they're all the same size and sit next to each other -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+      <button class="btn btn-c btn-sm" onclick="showWithdraw()" style="margin:0;width:100%;">💸 WITHDRAW</button>
+      <button class="btn btn-c btn-sm" onclick="openLeaderboard()" style="margin:0;width:100%;">🏆 LEADERBOARD</button>
+      <button class="btn btn-c btn-sm" onclick="openFriends()" style="margin:0;width:100%;">👥 FRIENDS</button>
+      <button class="btn btn-c btn-sm" onclick="_openSettings()" style="margin:0;width:100%;">⚙ SETTINGS</button>
+    </div>
     <button class="btn btn-r btn-sm" onclick="doLogout()" style="margin:0 auto;width:auto;">LOGOUT</button>
   </div>
 </div>
@@ -817,23 +819,30 @@ let _bgSnakes=[], _bgLoot=[], _bgLastT=0, _bgSpawnCooldown=0;
 const BG_MAX_SNAKES=4;
 const BG_NAMES=['DEGEN','SLYTHER','PYTHON','VIPER','COBRA','ANACONDA','MAMBA','BOA'];
 
-function _bgMakeSnake(x,y,sections,color){
-  const angle=Math.random()*Math.PI*2, speed=1.6;
+function _bgMakeSnake(x,y,sections,color,angle){
+  if(angle==null)angle=Math.random()*Math.PI*2;
+  const speed=1.6;
   const path=[];
   for(let i=0;i<40;i++)path.push({x:x-Math.cos(angle)*i*speed,y:y-Math.sin(angle)*i*speed});
   return{
     id:'bg'+Math.random().toString(36).slice(2), path, numSections:sections, color, angle,
     alive:true, boost:false, name:BG_NAMES[Math.floor(Math.random()*BG_NAMES.length)],
-    usd:+(Math.random()*4+0.5).toFixed(2), state:'roam', stateT:1000+Math.random()*2000,
+    // Never below $1.00 — that's the minimum game wager, so a background snake showing less looks wrong.
+    usd:Math.max(1,+(Math.random()*4+1).toFixed(2)), state:'roam', stateT:1000+Math.random()*2000,
     targetId:null, _wander:0,
   };
 }
 function _bgSpawnSnake(W,H){
-  const pad=100;
-  const x=pad+Math.random()*(W-pad*2), y=pad+Math.random()*(H-pad*2);
   const sections=14+Math.floor(Math.random()*26);
   const color=SNAKE_COLORS[Math.floor(Math.random()*SNAKE_COLORS.length)];
-  _bgSnakes.push(_bgMakeSnake(x,y,sections,color));
+  // Enter from just OFF-SCREEN past a random edge, heading inward — so snakes slide onto the
+  // screen naturally (and later slide off the far side) instead of popping into existence.
+  const m=90; const edge=Math.floor(Math.random()*4); let x,y,angle;
+  if(edge===0){ x=-m; y=Math.random()*H; angle=(Math.random()-0.5)*0.7; }               // left → right
+  else if(edge===1){ x=W+m; y=Math.random()*H; angle=Math.PI+(Math.random()-0.5)*0.7; } // right → left
+  else if(edge===2){ x=Math.random()*W; y=-m; angle=Math.PI/2+(Math.random()-0.5)*0.7; }// top → down
+  else { x=Math.random()*W; y=H+m; angle=-Math.PI/2+(Math.random()-0.5)*0.7; }          // bottom → up
+  _bgSnakes.push(_bgMakeSnake(x,y,sections,color,angle));
 }
 function _bgSpawnLoot(x,y,count){
   const now=performance.now();
@@ -880,16 +889,33 @@ function _bgUpdate(dt,W,H){
       s._wander=Math.max(-1,Math.min(1,s._wander));
       desiredAngle=s.angle+s._wander*dt/16;
     }
+    // Avoid other snakes' bodies so they don't slide through each other — steer away from any
+    // nearby body point ahead. If avoidance fails and a head still hits a body, the head's owner
+    // dies (see combat below), so they never actually overlap without a death.
+    let avX=0, avY=0;
+    for(const o of _bgSnakes){
+      if(o===s||!o.alive)continue;
+      for(let i=0;i<o.path.length;i+=4){
+        const dx=h.x-o.path[i].x, dy=h.y-o.path[i].y, d2=dx*dx+dy*dy;
+        if(d2<12100 && d2>0.01){ const inv=1/Math.sqrt(d2); avX+=dx*inv; avY+=dy*inv; } // within 110px
+      }
+    }
+    if(avX||avY){
+      const avA=Math.atan2(avY,avX); let ad=avA-desiredAngle;
+      while(ad>Math.PI)ad-=Math.PI*2; while(ad<-Math.PI)ad+=Math.PI*2;
+      desiredAngle+=ad*0.6; // bias strongly toward the escape direction
+    }
     let da=desiredAngle-s.angle;
     while(da>Math.PI)da-=Math.PI*2; while(da<-Math.PI)da+=Math.PI*2;
-    s.angle+=Math.max(-0.05,Math.min(0.05,da*0.08));
+    s.angle+=Math.max(-0.07,Math.min(0.07,da*0.1));
 
     s.boost=(s.state==='boost')||(s.state==='hunt'&&Math.random()<0.02);
     const spd=(s.boost?baseSpeed*2:baseSpeed)*dt/16.6;
     let nx=h.x+Math.cos(s.angle)*spd, ny=h.y+Math.sin(s.angle)*spd;
-    const pad=60; // soft-bounce off viewport edges instead of wandering offscreen
-    if(nx<pad){nx=pad;s.angle=0;} if(nx>W-pad){nx=W-pad;s.angle=Math.PI;}
-    if(ny<pad){ny=pad;s.angle=Math.PI/2;} if(ny>H-pad){ny=H-pad;s.angle=-Math.PI/2;}
+    // No bouncing off edges — let them travel fully off-screen; once the head is well past an edge
+    // the snake is retired (marked _exited, no death/loot) and the spawner slides a fresh one in.
+    const off=220;
+    if(nx<-off||nx>W+off||ny<-off||ny>H+off){ s.alive=false; s._exited=true; }
     s.path.unshift({x:nx,y:ny});
     const maxLen=Math.ceil(s.numSections*3+40);
     if(s.path.length>maxLen)s.path.length=maxLen;
@@ -902,17 +928,19 @@ function _bgUpdate(dt,W,H){
   const now=performance.now();
   for(let i=_bgLoot.length-1;i>=0;i--){ if(now-_bgLoot[i].t0>9000)_bgLoot.splice(i,1); }
 
-  // Combat — a snake's head touching a bigger rival's body loses (proximity-only, decorative;
-  // not the real combat math, just enough to look plausible in the background)
+  // Combat — like real slither: a snake's HEAD hitting another snake's BODY kills the head's owner
+  // (regardless of size). Together with the avoidance steering above, this means they never pass
+  // through / overlap each other without someone dying. (Skip the rival's first few body points so
+  // a glancing head-to-head doesn't read as a body hit for both at once.)
   for(const a of _bgSnakes){
     if(!a.alive)continue;
     const ar=sectionRadius(a), ah=a.path[0];
     for(const b of _bgSnakes){
       if(a===b||!b.alive)continue;
       const br=sectionRadius(b);
-      for(let i=0;i<b.path.length;i+=3){
-        if(Math.hypot(b.path[i].x-ah.x,b.path[i].y-ah.y)<(ar+br)*0.85){
-          if(a.numSections>b.numSections*1.05)_bgKill(b,a);
+      for(let i=6;i<b.path.length;i+=3){
+        if(Math.hypot(b.path[i].x-ah.x,b.path[i].y-ah.y)<(ar+br)*0.7){
+          _bgKill(a,b); // a ran its head into b's body → a dies, b is credited the kill
           break;
         }
       }
@@ -921,7 +949,7 @@ function _bgUpdate(dt,W,H){
 
   for(let i=_bgSnakes.length-1;i>=0;i--){
     const s=_bgSnakes[i];
-    if(!s.alive&&now-s._deathT>1200)_bgSnakes.splice(i,1);
+    if(!s.alive&&(s._exited||now-s._deathT>1200))_bgSnakes.splice(i,1); // exited snakes leave with no fade
   }
 }
 
@@ -958,6 +986,7 @@ function _bgRenderFrame(){
   ctx=bctx; canvas=c; _camZoom=1;
   for(const s of _bgSnakes){
     if(s.alive){ drawSnake(s); continue; }
+    if(s._exited)continue; // slid off-screen — nothing to draw, no death fade
     const age=now-s._deathT;
     if(age<1200){
       bctx.save();
@@ -965,7 +994,7 @@ function _bgRenderFrame(){
       drawSnake(s);
       if(s._cashout){
         bctx.font='bold 16px "Exo 2",sans-serif'; bctx.textAlign='center';
-        bctx.fillStyle='#39FF14'; bctx.fillText('CASHED OUT +$'+(s.usd||1).toFixed(2),s.path[0].x,s.path[0].y-30-age*0.05);
+        bctx.fillStyle='#39FF14'; bctx.fillText('CASHED OUT +$'+Math.max(1,s.usd||1).toFixed(2),s.path[0].x,s.path[0].y-30-age*0.05);
       }
       bctx.restore();
     }
@@ -1044,13 +1073,10 @@ let _ssRtt=null; // rolling RTT (ms) from ss-ping/ss-pong, for death-replay netw
 // below a 96px hard-snap deadzone → own head drifted freely (measured 31.7px median / 82.8px max
 // vs server). Continuous soft correction bounds that drift with no visible pop. VISUAL ONLY —
 // own.path[0] is not used for collision; the server stays the sole collision authority.
-// DEFAULT 0.2 = LIVE FOR EVERY PLAYER (standardized reconciliation smoothing). Normal clients never
-// set window._OWN_CORRECT, so the reconciliation below falls back to this 0.2 and applies the
-// continuous soft correction for all — one global default, no per-player logic or conditional
-// overrides. Shift+O (owner-only) toggles window._OWN_CORRECT 0↔0.2 on that owner's own client only,
-// for local A/B; it does not affect any other player. No other system depends on this being 0
-// (the only consumers are the reconciliation gain and the Shift+O toggle). VISUAL ONLY —
-// own.path[0] is not used for collision; the server stays the sole collision authority.
+// DEFAULT 0.2 = LIVE FOR EVERY PLAYER (standardized reconciliation smoothing). This is now LOCKED:
+// the old Shift+O owner A/B toggle was removed, nothing sets window._OWN_CORRECT at runtime anymore,
+// so the reconciliation below always uses this constant and it can never change mid-session. VISUAL
+// ONLY — own.path[0] is not used for collision; the server stays the sole collision authority.
 let _OWN_CORRECT=0.2;
 let _localDead=false;
 let _cashedOut=false; // set on cashout so incoming ss-state can't keep reviving our own (now-removed) snake on our screen
@@ -1665,6 +1691,21 @@ async function settle(){
     if(r.ok) addToast('✓ Winnings secured!','#39FF14');
     else addToast('Cashout failed: '+(d.error||r.status),'#FF4444');
   }catch(e){console.warn('[settle]',e);}
+}
+
+// Record a death + loss on the leaderboard when eliminated in a PAID lobby. Stat-only (no money);
+// this is what was missing — nothing ever recorded a loss, so losses sat at 0 and K/D looked wrong.
+// Signed like every settle call so only the wallet owner can record their own loss.
+async function recordLoss(){
+  if(!ST.address||!pkRoomId||ST.lobbyUsd===0)return; // paid lobbies only
+  if(!_keypair)return;
+  try{
+    const ts=Math.floor(Date.now()/1000);
+    const _smsg=new TextEncoder().encode('pac-arena:stat-loss:'+ST.address+':0:'+ts);
+    const _ssig=btoa(String.fromCharCode(...nacl.sign.detached(_smsg,_keypair.secretKey)));
+    await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':_ssig,'x-settle-ts':String(ts)},
+      body:JSON.stringify({playerAddress:ST.address,wagerLamports:0,lobbyId:pkRoomId,action:'stat-loss'})});
+  }catch(e){console.warn('[recordLoss]',e);}
 }
 
 // ── Wallet creation / import ─────────────────────────────────
@@ -3486,46 +3527,69 @@ function _ssBindKey(act){
 }
 
 // ── Rolling clip buffer ────────────────────────────────────────────────────────
-let _clipRec=null, _clipChunks=[], _clipStream=null, _clipMime='';
+// A single MediaRecorder produces a valid WebM only for ONE continuous, finalized session — you
+// cannot slice out "the last 20s" of chunks and get a playable file (the header/duration break,
+// which is exactly why earlier clips came out as a broken ~1-second video). So instead we record
+// in rolling ~20s SEGMENTS: every 20s we stop the recorder (finalizing a clean, correctly-timed
+// WebM) and immediately start a fresh one. We keep the most-recently-finalized segment (_clipPrev)
+// plus the in-progress one; saving finalizes and uses the current segment when it's long enough,
+// otherwise falls back to the last full segment — always a valid, real-duration clip.
+const CLIP_SEG_MS=20000;
+let _clipRec=null,_clipChunks=[],_clipStream=null,_clipMime='',_clipPrev=null,_clipSegTimer=null,_clipSegStart=0,_clipPendingSave=false;
 function _clipEnabled(){ return SS_IS_PC && localStorage.getItem('ss_clip_on')==='1'; } // opt-in, default OFF
-function _clipStart(){
-  if(!_clipEnabled() || _clipRec || !canvas || typeof MediaRecorder==='undefined') return;
+function _clipBeginSession(){
+  _clipChunks=[]; _clipSegStart=Date.now();
   try{
-    _clipStream = canvas.captureStream(30);
-    const types=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
-    _clipMime = (MediaRecorder.isTypeSupported ? types.find(t=>MediaRecorder.isTypeSupported(t)) : '') || '';
-    // ~3.5 Mbps → a full 20s clip lands around 8–9 MB regardless of the player's screen size,
-    // safely under Discord's 25 MB webhook cap while still looking clean for a gameplay clip.
-    _clipRec = new MediaRecorder(_clipStream, _clipMime ? {mimeType:_clipMime, videoBitsPerSecond:3500000} : undefined);
-    _clipChunks=[];
-    _clipRec.ondataavailable=e=>{
-      if(e.data && e.data.size) _clipChunks.push({t:Date.now(), b:e.data});
-      // Keep the first chunk forever (it holds the WebM header) + only the last ~22s of the rest,
-      // so memory stays bounded during a long match but "the last 20s" is always available.
-      if(_clipChunks.length>2){
-        const cutoff=Date.now()-22000, head=_clipChunks[0];
-        _clipChunks=[head, ..._clipChunks.slice(1).filter(c=>c.t>=cutoff)];
-      }
+    _clipRec=new MediaRecorder(_clipStream, _clipMime?{mimeType:_clipMime,videoBitsPerSecond:3500000}:undefined);
+    _clipRec.ondataavailable=e=>{ if(e.data&&e.data.size)_clipChunks.push(e.data); };
+    _clipRec.onstop=()=>{
+      const blob=_clipChunks.length?new Blob(_clipChunks,{type:_clipMime||'video/webm'}):null; // finalized → real duration
+      if(blob)_clipPrev=blob;
+      if(_clipPendingSave){ _clipPendingSave=false; if(blob)_clipUpload(blob); }
+      if(_clipStream)_clipBeginSession(); // keep rolling (unless we've torn down)
     };
-    _clipRec.start(1000); // 1s timeslices
-  }catch(err){ console.warn('[clip] start failed', err); _clipRec=null; }
+    _clipRec.start(1000);
+  }catch(err){ console.warn('[clip] session start failed',err); _clipRec=null; }
+}
+function _clipStart(){
+  if(!_clipEnabled() || _clipStream || !canvas || typeof MediaRecorder==='undefined') return;
+  try{
+    _clipStream=canvas.captureStream(30);
+    // Prefer MP4/H.264 — it stores a proper duration + plays inline in Discord. WebM from
+    // MediaRecorder omits the duration element (shows as ~1s everywhere), so it's only a fallback.
+    const types=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+    _clipMime=(MediaRecorder.isTypeSupported?types.find(t=>MediaRecorder.isTypeSupported(t)):'')||'';
+    _clipPrev=null;
+    _clipBeginSession();
+    _clipSegTimer=setInterval(()=>{ try{ if(_clipRec && _clipRec.state==='recording')_clipRec.stop(); }catch(_){} }, CLIP_SEG_MS);
+  }catch(err){ console.warn('[clip] start failed',err); _clipStream=null; }
 }
 function _clipStop(){
-  try{ if(_clipRec && _clipRec.state!=='inactive') _clipRec.stop(); }catch(_){}
-  _clipRec=null; _clipChunks=[];
-  if(_clipStream){ try{_clipStream.getTracks().forEach(t=>t.stop());}catch(_){}; _clipStream=null; }
+  if(_clipSegTimer){ clearInterval(_clipSegTimer); _clipSegTimer=null; }
+  const s=_clipStream; _clipStream=null; // null FIRST so onstop won't restart a new session
+  _clipPendingSave=false;
+  try{ if(_clipRec && _clipRec.state!=='inactive')_clipRec.stop(); }catch(_){}
+  _clipRec=null; _clipChunks=[]; _clipPrev=null;
+  if(s){ try{s.getTracks().forEach(t=>t.stop());}catch(_){} }
 }
 function _clipSave(){
   if(!SS_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
   if(!_clipEnabled()){ addToast('Clips are off — turn on in ⚙ Settings','#FFD700'); return; }
-  if(!_clipRec || _clipChunks.length===0){ addToast('Clip not ready yet — give it a few seconds','#FFD700'); return; }
-  const cutoff=Date.now()-20000, head=_clipChunks[0];
-  const parts=[head.b, ..._clipChunks.slice(1).filter(c=>c.t>=cutoff).map(c=>c.b)];
-  const blob=new Blob(parts, {type:_clipMime||'video/webm'});
-  _clipUpload(blob);
+  if(!_clipStream){ addToast('Clip not ready yet — give it a few seconds','#FFD700'); return; }
+  const elapsed=Date.now()-_clipSegStart;
+  // Current segment too short to be worth it → use the last full finalized segment instead.
+  if(elapsed<7000 && _clipPrev){ _clipUpload(_clipPrev); return; }
+  // Finalize the current segment (proper duration) and upload it from onstop.
+  _clipPendingSave=true;
+  try{
+    if(_clipRec && _clipRec.state==='recording'){ _clipRec.stop(); }
+    else if(_clipPrev){ _clipPendingSave=false; _clipUpload(_clipPrev); }
+    else { _clipPendingSave=false; addToast('Clip not ready yet — give it a few seconds','#FFD700'); }
+  }catch(_){ _clipPendingSave=false; if(_clipPrev)_clipUpload(_clipPrev); }
 }
 function _clipUpload(blob){
-  const fname='pacarena-'+Date.now()+'.webm';
+  const ext=(_clipMime && _clipMime.indexOf('mp4')!==-1) ? 'mp4' : 'webm';
+  const fname='pacarena-'+Date.now()+'.'+ext;
   if(!SS_CLIP_WEBHOOK){
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a'); a.href=url; a.download=fname; document.body.appendChild(a); a.click(); a.remove();
@@ -3983,7 +4047,8 @@ async function endSnakeGame(reason,killerId){
   if(elim){
     isSpectating=true;
     clearInterval(_guestInputLoop);_guestInputLoop=null;
-    _gpadLastBtn=[];_gpadNavTs=0;_padBoost=false;
+    _gpadSnapshot();_gpadNavTs=0;_padBoost=false; // held A (boosting into death) must NOT auto-confirm a menu
+    recordLoss(); // paid lobbies: log the death + loss on the leaderboard (no-op in free lobbies)
     addToast('💀 ELIMINATED — spectating…','#FF4444');
     const _sb=document.getElementById('spectate-bar');
     if(_sb)_sb.style.display='flex';
@@ -4059,7 +4124,7 @@ async function endSnakeGame(reason,killerId){
     if(btnRej)btnRej.style.display='none';
   }
 
-  _gpadLastBtn=[]; _gpadNavTs=0;
+  _gpadSnapshot(); _gpadNavTs=0; // held buttons (e.g. A) recorded as down so they don't auto-confirm
   const _vb=document.getElementById('voice-btn');if(_vb)_vb.style.display='none';
   const _bb2=document.getElementById('bot-bar');if(_bb2)_bb2.style.display='none';
   go('scr-result');
@@ -4136,6 +4201,16 @@ function goHome(){
 }
 
 // ── Gamepad support ──────────────────────────────────────────
+// Snapshot the CURRENT button states into _gpadLastBtn. Use this (instead of clearing to []) when
+// entering a menu after death/cashout: a button that's still physically held (e.g. A while boosting
+// into a wall) is then recorded as already-down, so it does NOT read as a fresh press and fire a
+// spurious menu "confirm" that would instantly click whatever's focused (which was sending players
+// straight home the instant they died mid-boost). Released buttons still register their next press.
+function _gpadSnapshot(){
+  const pads=navigator.getGamepads?navigator.getGamepads():[];
+  for(const p of pads){ if(p&&p.connected){ _gpadLastBtn=Array.from(p.buttons).map(b=>!!(b&&b.pressed)); return; } }
+  _gpadLastBtn=[];
+}
 function pollGamepad(){
   if(!navigator.getGamepads)return;
   const pads=navigator.getGamepads();
@@ -4239,16 +4314,10 @@ function gpadFocus(dir){
 ;(function _gpadMenuLoop(){requestAnimationFrame(_gpadMenuLoop);pollGamepad();})();
 
 // Global T key — opens tuning panel from anywhere (lobby, result screen, in-game)
+// (The Shift+O own-head-correction A/B toggle was removed — own-correct is now permanently locked
+// at its shipped value and can never be changed at runtime; see _OWN_CORRECT above.)
 document.addEventListener('keydown',function(e){
   if((e.key==='t'||e.key==='T')&&!e.repeat&&localStorage.getItem('ss_owner')==='1')_toggleTuning();
-  // Shift+O — owner-only toggle: baseline (0) ↔ single test gain, for the local-head reconciliation
-  // feel test. Binary, no cycling. VISUAL ONLY (own.path[0] not used for collision).
-  if((e.key==='o'||e.key==='O')&&e.shiftKey&&!e.repeat&&localStorage.getItem('ss_owner')==='1'){
-    const TEST=0.2; // single chosen test value
-    const cur=(typeof window._OWN_CORRECT==='number')?window._OWN_CORRECT:_OWN_CORRECT;
-    window._OWN_CORRECT=(cur>0)?0:TEST;
-    addToast('own-head correct: '+window._OWN_CORRECT+(window._OWN_CORRECT===0?'  (baseline)':'  (test)'), window._OWN_CORRECT===0?'#888':'#4CFF9E', 1800);
-  }
 });
 
 // Local-player prediction — MoneySlither-exact 60 Hz sub-steps (boost ramp + chord speed),
@@ -4501,8 +4570,12 @@ function rafDraw(ts){
   // Divisors 928/522 ≈ 1920/2.07 / 1080/2.07 — gives ~2.07× base vs damnbruh's 1/1920 formula,
   // so 288 px/s world speed looks as fast on screen as MoneySlither does.
   const _zbase=Math.min(canvas.width/928,canvas.height/522);
-  _zoomOffset=Math.max(0.18-_zbase,Math.min(2.0-_zbase,_zoomOffset));
-  _camZoom=Math.max(0.18,Math.min(2.0,_zbase+_zoomOffset));
+  // Spectators (dead / cashed out / watching) can pull the camera much further out than a live
+  // player needs to — no snake of their own to keep readable — so they can watch snakes fight
+  // across the whole arena. Live players keep the normal 0.18 floor.
+  const _zmin=isSpectating?0.05:0.18;
+  _zoomOffset=Math.max(_zmin-_zbase,Math.min(2.0-_zbase,_zoomOffset));
+  _camZoom=Math.max(_zmin,Math.min(2.0,_zbase+_zoomOffset));
 
   const W=canvas.width,H=canvas.height;
   ctx.fillStyle='#060612';ctx.fillRect(0,0,W,H);

@@ -330,6 +330,24 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ balance: bal.value, escrowPubkey: esc.pubkeyB58, solBalance: bal.value / 1e9 });
     }
 
+    // ── stat-loss: record a death + loss on the leaderboard (NO money moves) ─────
+    // The client calls this whenever a paid player is eliminated. It only touches the stat
+    // counters — there is zero fund transfer here — so it is safe to record on every death. This
+    // is the SINGLE source of truth for a player's own deaths+losses (the kill handler below no
+    // longer also bumps the victim's deaths, which is why 'losses' used to sit at 0 and K/D looked
+    // wrong: nothing was ever writing them). Signature-gated like every other non-balance action,
+    // so only the wallet owner can record their own loss (and inflating your own losses only ever
+    // hurts your own K/D — there's no incentive to abuse it).
+    if (action === 'stat-loss') {
+      if (!playerAddress) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'playerAddress required' }); }
+      try {
+        await kvHincrby('ph:' + game + ':' + playerAddress, 'losses', 1);
+        await kvHincrby('ph:' + game + ':' + playerAddress, 'deaths', 1);
+      } catch (_) {}
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true });
+    }
+
     // ── cashout / win ─────────────────────────────────────────────────────────
     if (action === 'cashout' || action === 'win') {
       if (!playerAddress) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'playerAddress required' }); }
@@ -520,11 +538,9 @@ module.exports = async function handler(req, res) {
             const newEarned=await kvHincrby(pk,'earned',total||0);
             await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
             await pushEarningsPoint(game,playerAddress,newEarned);
-            // Track death for victim — must happen regardless of wager since victim's
-            // wager was already deleted above, so their settle/lose won't count it.
-            if(vaBody && vaBody!==playerAddress) {
-              await kvHincrby('ph:'+game+':'+vaBody,'deaths',1);
-            }
+            // (Victim's death is now recorded by the victim's own 'stat-loss' call — the single
+            // source of truth — so we deliberately DON'T bump it here anymore, to avoid counting
+            // the same death twice.)
           }catch(_){}
           break;
         } catch (e) {

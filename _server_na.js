@@ -540,25 +540,21 @@ function ssPlayerLeft(lid, pid, io) {
 }
 
 // Immediate forfeit-on-leave for SS: the player actually left the page (refresh / closed the tab /
-// navigated away, or explicitly emitted 'ss-quit'), so their wager converts to food RIGHT NOW —
-// identical to the grace-expiry path, just without the wait, so their body doesn't sit there
-// frozen. Deliberately NOT used for a mere backgrounded tab or a brief network blip: those don't
-// cleanly leave (the socket stays open, or drops with a ping-timeout that keeps the reconnect
-// grace). Idempotent — safe to call from both the 'ss-quit' emit and the transport-close disconnect.
+// navigated away, or explicitly emitted 'ss-quit'), so they die RIGHT WHERE THEY WERE and their
+// wager drops as collectable money-food — the EXACT same death path as any kill (ssKill spreads
+// sn.usd as food + broadcasts 'elim'), so it behaves identically to dying in a fight. We do NOT
+// tear the game down or delete the snake here: the dead entry lingers exactly like any kill (not
+// broadcast, not collidable, pruned normally) so the food actually broadcasts to the other players
+// before anything gets cleaned up. Reconnect is blocked separately by the single-use-token gate
+// (the caller marks room.players[pid].alive = false). Idempotent — ssKill no-ops if already dead.
 function ssForfeitNow(lid, pid, io) {
   const sg = ssGames.get(lid);
   if (!sg) return;
   const sn = sg.snakes.get(pid);
   if (sn && sn.alive) {
-    if (!sg.food) sg.food = [];
-    ssSpawnKillFood(sg, sn);
-    sg._foodDirty = true;
-    sn.alive = false; sn._killedAt = Date.now(); sn.segs = []; sn.path = [];
-    io.to(lid).emit('leave', { id: pid });
-    console.log(`[${lid}] ${pid} left the page — wager dropped as food (immediate forfeit)`);
+    console.log(`[${lid}] ${pid} left the page — forfeit death, wager drops as food`);
+    ssKill(sn, null, lid, io);
   }
-  sg.snakes.delete(pid);
-  if (sg.snakes.size === 0) { clearInterval(sg.tickInterval); sg.tickInterval = null; ssGames.delete(lid); }
 }
 
 // ── MoneySlither stepMovement port — ONE 60 Hz sub-step (verbatim from client.js) ──
@@ -1702,15 +1698,16 @@ io.on('connection', socket => {
     // event arrived), dp.socketId no longer matches this socket. Acting on it here would
     // freeze/delete the CURRENT live session out from under the player. No-op instead.
     if (dp && dp.socketId !== socket.id) return;
-    // Refresh / close tab / navigate away shows up as a clean 'transport close' — the player
-    // genuinely left, so kill their snake NOW (wager drops as food where they were) instead of
-    // freezing it for the grace window, and mark them dead so a reconnect is blocked by the
-    // single-use-token gate. We still fall through to the normal room.players cleanup below (which
-    // keeps the dead tombstone through the grace window, then removes it). A backgrounded tab never
-    // reaches here (its socket stays open — handled by the SS_GHOST_MS freeze); a dead/blipped
-    // network arrives as 'ping timeout'/'transport error' and keeps the reconnect grace instead.
-    // (This is the server-side backup for the client's 'ss-quit' emit, for when it didn't flush.)
-    if (lobbyId.startsWith('ss-') && reason === 'transport close') {
+    // Refresh / close tab / navigate away closes the socket → the player genuinely LEFT, so kill
+    // their snake NOW (dies where they were, wager drops as food) instead of freezing it, and mark
+    // them dead so the single-use-token gate blocks any reconnect. We forfeit on EVERY SS disconnect
+    // reason EXCEPT 'ping timeout' — a backgrounded/tab-switched player never disconnects at all
+    // (their socket stays open → handled by the SS_GHOST_MS freeze), so the only thing that reaches
+    // here is an actual connection close (refresh/close = 'transport close'/'transport error', which
+    // must forfeit) or a suspended/dead-but-not-closed link ('ping timeout', which keeps the grace
+    // so a genuine blip / phone-suspend can still reconnect). This is the server-side guarantee
+    // behind the client's 'ss-quit' emit, for whenever that packet doesn't flush before unload.
+    if (lobbyId.startsWith('ss-') && reason !== 'ping timeout') {
       ssForfeitNow(lobbyId, pid, io);
       if (dp) dp.alive = false;
     }
