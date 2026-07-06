@@ -3695,25 +3695,28 @@ function _pmKeyAction(rawKey){
 function _pmBindKey(act){ if(_pmBinds[act]!==undefined) return _pmBinds[act]; const d=PM_BIND_DEFS.find(x=>x.act===act); return d?d.keys[0]:''; }
 
 // ── Rolling clip buffer ────────────────────────────────────────────────────────
-// Records in rolling ~20s finalized SEGMENTS (not sliced chunks) so each clip is a valid file
-// with a real duration. Prefers MP4/H.264 (Discord reads its duration + plays it inline); WebM
-// from MediaRecorder omits the duration element and shows as ~1s, so it's only a fallback.
+// A valid MediaRecorder clip must be ONE complete, finalized recording (you can't slice the last N
+// seconds out of a live stream), and its length == how long it ran. So for a CONSISTENT ~20s clip
+// on demand we run TWO overlapping 20s recorders staggered by 10s: each finishes its 20s, publishes
+// a finished ~20s file (_clipReady), and restarts — so a freshly-finished 20s segment is always on
+// hand (every ~10s). Every saved clip is ~20s (not variable), ending within ~10s of the keypress.
+// MP4/H.264 preferred (Discord reads its duration + plays inline); WebM is a ~1s-duration fallback.
 const CLIP_SEG_MS=20000;
-let _clipRec=null,_clipChunks=[],_clipStream=null,_clipMime='',_clipPrev=null,_clipSegTimer=null,_clipSegStart=0,_clipPendingSave=false;
+let _clipStream=null,_clipMime='',_clipReady=null,_clipLaneRec=[null,null],_clipLaneTimer=[null,null],_clipLaneStartTimer=null;
 function _clipEnabled(){ return PM_IS_PC && localStorage.getItem('pm_clip_on')==='1'; } // opt-in, default OFF
-function _clipBeginSession(){
-  _clipChunks=[]; _clipSegStart=Date.now();
-  try{
-    _clipRec=new MediaRecorder(_clipStream, _clipMime?{mimeType:_clipMime,videoBitsPerSecond:3500000}:undefined);
-    _clipRec.ondataavailable=e=>{ if(e.data&&e.data.size)_clipChunks.push(e.data); };
-    _clipRec.onstop=()=>{
-      const blob=_clipChunks.length?new Blob(_clipChunks,{type:_clipMime||'video/webm'}):null;
-      if(blob)_clipPrev=blob;
-      if(_clipPendingSave){ _clipPendingSave=false; if(blob)_clipUpload(blob); }
-      if(_clipStream)_clipBeginSession();
-    };
-    _clipRec.start(1000);
-  }catch(err){ console.warn('[clip] session start failed',err); _clipRec=null; }
+function _clipLaneCycle(lane){
+  if(!_clipStream)return;
+  let chunks=[]; let rec;
+  try{ rec=new MediaRecorder(_clipStream,_clipMime?{mimeType:_clipMime,videoBitsPerSecond:3000000}:undefined); }
+  catch(err){ console.warn('[clip] lane start failed',err); return; }
+  _clipLaneRec[lane]=rec;
+  rec.ondataavailable=e=>{ if(e.data&&e.data.size)chunks.push(e.data); };
+  rec.onstop=()=>{
+    if(chunks.length){ try{ _clipReady=new Blob(chunks,{type:_clipMime||'video/mp4'}); }catch(_){} }
+    if(_clipStream)_clipLaneCycle(lane);
+  };
+  rec.start();
+  _clipLaneTimer[lane]=setTimeout(()=>{ try{ if(rec.state==='recording')rec.stop(); }catch(_){} }, CLIP_SEG_MS);
 }
 function _clipStart(){
   if(!_clipEnabled() || _clipStream || !canvas || typeof MediaRecorder==='undefined') return;
@@ -3721,30 +3724,25 @@ function _clipStart(){
     _clipStream=canvas.captureStream(30);
     const types=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
     _clipMime=(MediaRecorder.isTypeSupported?types.find(t=>MediaRecorder.isTypeSupported(t)):'')||'';
-    _clipPrev=null;
-    _clipBeginSession();
-    _clipSegTimer=setInterval(()=>{ try{ if(_clipRec && _clipRec.state==='recording')_clipRec.stop(); }catch(_){} }, CLIP_SEG_MS);
+    _clipReady=null;
+    _clipLaneCycle(0);
+    _clipLaneStartTimer=setTimeout(()=>{ if(_clipStream)_clipLaneCycle(1); }, CLIP_SEG_MS/2);
   }catch(err){ console.warn('[clip] start failed',err); _clipStream=null; }
 }
 function _clipStop(){
-  if(_clipSegTimer){ clearInterval(_clipSegTimer); _clipSegTimer=null; }
-  const s=_clipStream; _clipStream=null; _clipPendingSave=false;
-  try{ if(_clipRec && _clipRec.state!=='inactive')_clipRec.stop(); }catch(_){}
-  _clipRec=null; _clipChunks=[]; _clipPrev=null;
+  if(_clipLaneStartTimer){ clearTimeout(_clipLaneStartTimer); _clipLaneStartTimer=null; }
+  _clipLaneTimer.forEach((t,i)=>{ if(t){ clearTimeout(t); _clipLaneTimer[i]=null; } });
+  const s=_clipStream; _clipStream=null;
+  _clipLaneRec.forEach((r,i)=>{ if(r){ try{ r.onstop=null; if(r.state!=='inactive')r.stop(); }catch(_){}; _clipLaneRec[i]=null; } });
+  _clipReady=null;
   if(s){ try{s.getTracks().forEach(t=>t.stop());}catch(_){} }
 }
 function _clipSave(){
   if(!PM_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
   if(!_clipEnabled()){ addToast('Clips are off — turn on in ⚙ Settings','#FFD700'); return; }
   if(!_clipStream){ addToast('Clip not ready yet — give it a few seconds','#FFD700'); return; }
-  const elapsed=Date.now()-_clipSegStart;
-  if(elapsed<7000 && _clipPrev){ _clipUpload(_clipPrev); return; }
-  _clipPendingSave=true;
-  try{
-    if(_clipRec && _clipRec.state==='recording'){ _clipRec.stop(); }
-    else if(_clipPrev){ _clipPendingSave=false; _clipUpload(_clipPrev); }
-    else { _clipPendingSave=false; addToast('Clip not ready yet — give it a few seconds','#FFD700'); }
-  }catch(_){ _clipPendingSave=false; if(_clipPrev)_clipUpload(_clipPrev); }
+  if(_clipReady){ _clipUpload(_clipReady); }
+  else{ addToast('Clip warming up — give it ~20s of play first','#FFD700'); }
 }
 function _clipUpload(blob){
   const ext=(_clipMime && _clipMime.indexOf('mp4')!==-1)?'mp4':'webm';
@@ -6042,12 +6040,16 @@ async function instantCashout(){
     const _pb=document.getElementById('pow-btns'); if(_pb) _pb.style.display='none';
     const _cw=document.getElementById('cash-btn-wrap'); if(_cw) _cw.style.display='none';
     ST.hasEscrow=false;
-    const _solAmt=(d.playerCut/solanaWeb3.LAMPORTS_PER_SOL).toFixed(4);
+    // Net amount landing in the player's wallet = cashed-out value minus the 10% fee (which goes to
+    // the creator wallet). playerCut is exactly that net figure, straight from escrow.
+    const _netSol=d.playerCut/solanaWeb3.LAMPORTS_PER_SOL;
+    const _solAmt=_netSol.toFixed(4);
+    const _usdAmt=(ST.solPrice>0)?('$'+(_netSol*ST.solPrice).toFixed(2)+' '):'';
     playCoinSfx();
     if(d.confirmed){
-      addToast('💰 +'+_solAmt+' SOL CASHED OUT!','#39FF14');
+      addToast('💰 YOU RECEIVED '+_usdAmt+'('+_solAmt+' SOL) — 10% fee applied','#39FF14',4500);
     }else{
-      addToast('💸 +'+_solAmt+' SOL sent — confirming…','#39FF14');
+      addToast('💸 '+_usdAmt+'('+_solAmt+' SOL) sent — confirming…','#39FF14',4500);
       setTimeout(()=>refreshBal().catch(()=>{}),5000);
     }
     refreshBal().catch(()=>{});

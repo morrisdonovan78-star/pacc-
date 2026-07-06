@@ -586,7 +586,6 @@ body.mctl #voice-speakers{left:150px;}
   <canvas id="gc"></canvas>
   <div id="game-hud">
     <div class="gi"><span class="gl">LENGTH</span><span class="gv hg" id="hud-len">0</span></div>
-    <div class="gi"><span class="gl">SCORE</span><span class="gv hy" id="hud-score">0</span></div>
     <div class="gi"><span class="gl">POT</span><span class="gv hc" id="hud-pot">FREE</span></div>
     <div class="gi"><span class="gl">PING</span><span class="gv" id="hud-ping" style="color:var(--g)">--</span></div>
     <div class="gi"><span class="gl">FPS</span><span class="gv" id="hud-fps" style="color:var(--g)">--</span></div>
@@ -689,6 +688,8 @@ body.mctl #voice-speakers{left:150px;}
     <div class="r-ico" id="rico">🏆</div>
     <div class="r-head" id="rhead">GAME OVER</div>
     <div class="r-sub" id="rsub">Well played!</div>
+    <!-- Net amount returned to the player's wallet on cashout (after the 10% fee). Shown only on cashout. -->
+    <div id="rs-payout" style="display:none;font-family:'Press Start 2P',monospace;font-size:13px;color:#39FF14;line-height:1.7;margin:2px 0 12px;"></div>
     <div class="rstats">
       <div class="rstat"><div class="rsl">SCORE</div><div class="rsv hy" id="rs-score">0</div></div>
       <div class="rstat"><div class="rsl">LENGTH</div><div class="rsv hg" id="rs-len">0</div></div>
@@ -1690,7 +1691,8 @@ async function settle(){
     const d=await r.json().catch(()=>({}));
     if(r.ok) addToast('✓ Winnings secured!','#39FF14');
     else addToast('Cashout failed: '+(d.error||r.status),'#FF4444');
-  }catch(e){console.warn('[settle]',e);}
+    return r.ok ? d : null; // { playerCut, creatorCut, ... } — playerCut = net lamports to the player
+  }catch(e){console.warn('[settle]',e); return null;}
 }
 
 // Record a death + loss on the leaderboard when eliminated in a PAID lobby. Stat-only (no money);
@@ -3527,65 +3529,57 @@ function _ssBindKey(act){
 }
 
 // ── Rolling clip buffer ────────────────────────────────────────────────────────
-// A single MediaRecorder produces a valid WebM only for ONE continuous, finalized session — you
-// cannot slice out "the last 20s" of chunks and get a playable file (the header/duration break,
-// which is exactly why earlier clips came out as a broken ~1-second video). So instead we record
-// in rolling ~20s SEGMENTS: every 20s we stop the recorder (finalizing a clean, correctly-timed
-// WebM) and immediately start a fresh one. We keep the most-recently-finalized segment (_clipPrev)
-// plus the in-progress one; saving finalizes and uses the current segment when it's long enough,
-// otherwise falls back to the last full segment — always a valid, real-duration clip.
+// A valid MediaRecorder clip must be ONE complete, finalized recording — you cannot slice the last
+// N seconds out of a live stream (the header/duration break, which is why early clips came out as a
+// broken ~1s video). And a finalized recording's length == how long it ran. So to hand back a
+// CONSISTENT ~20-second clip on demand, we run TWO overlapping 20s recorders staggered by 10s: each
+// finishes its 20s, publishes a finished ~20s file (_clipReady), and immediately restarts. Because
+// they're offset, a freshly-finished 20s segment is always on hand (refreshed every ~10s) — so every
+// saved clip is ~20s, not the old variable 7-20s. The saved 20s window ends within ~10s of the
+// keypress. (Two encoders while enabled; fine on a PC, and the feature is still opt-in + PC-only.)
 const CLIP_SEG_MS=20000;
-let _clipRec=null,_clipChunks=[],_clipStream=null,_clipMime='',_clipPrev=null,_clipSegTimer=null,_clipSegStart=0,_clipPendingSave=false;
+let _clipStream=null,_clipMime='',_clipReady=null,_clipLaneRec=[null,null],_clipLaneTimer=[null,null],_clipLaneStartTimer=null;
 function _clipEnabled(){ return SS_IS_PC && localStorage.getItem('ss_clip_on')==='1'; } // opt-in, default OFF
-function _clipBeginSession(){
-  _clipChunks=[]; _clipSegStart=Date.now();
-  try{
-    _clipRec=new MediaRecorder(_clipStream, _clipMime?{mimeType:_clipMime,videoBitsPerSecond:3500000}:undefined);
-    _clipRec.ondataavailable=e=>{ if(e.data&&e.data.size)_clipChunks.push(e.data); };
-    _clipRec.onstop=()=>{
-      const blob=_clipChunks.length?new Blob(_clipChunks,{type:_clipMime||'video/webm'}):null; // finalized → real duration
-      if(blob)_clipPrev=blob;
-      if(_clipPendingSave){ _clipPendingSave=false; if(blob)_clipUpload(blob); }
-      if(_clipStream)_clipBeginSession(); // keep rolling (unless we've torn down)
-    };
-    _clipRec.start(1000);
-  }catch(err){ console.warn('[clip] session start failed',err); _clipRec=null; }
+function _clipLaneCycle(lane){
+  if(!_clipStream)return;
+  let chunks=[]; let rec;
+  try{ rec=new MediaRecorder(_clipStream,_clipMime?{mimeType:_clipMime,videoBitsPerSecond:3000000}:undefined); }
+  catch(err){ console.warn('[clip] lane start failed',err); return; }
+  _clipLaneRec[lane]=rec;
+  rec.ondataavailable=e=>{ if(e.data&&e.data.size)chunks.push(e.data); };
+  rec.onstop=()=>{
+    if(chunks.length){ try{ _clipReady=new Blob(chunks,{type:_clipMime||'video/mp4'}); }catch(_){} } // freshest finished ~20s
+    if(_clipStream)_clipLaneCycle(lane); // immediately begin this lane's next 20s segment
+  };
+  rec.start();
+  _clipLaneTimer[lane]=setTimeout(()=>{ try{ if(rec.state==='recording')rec.stop(); }catch(_){} }, CLIP_SEG_MS);
 }
 function _clipStart(){
   if(!_clipEnabled() || _clipStream || !canvas || typeof MediaRecorder==='undefined') return;
   try{
     _clipStream=canvas.captureStream(30);
-    // Prefer MP4/H.264 — it stores a proper duration + plays inline in Discord. WebM from
-    // MediaRecorder omits the duration element (shows as ~1s everywhere), so it's only a fallback.
+    // Prefer MP4/H.264 — stores a real duration + plays inline in Discord (WebM omits duration → ~1s).
     const types=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
     _clipMime=(MediaRecorder.isTypeSupported?types.find(t=>MediaRecorder.isTypeSupported(t)):'')||'';
-    _clipPrev=null;
-    _clipBeginSession();
-    _clipSegTimer=setInterval(()=>{ try{ if(_clipRec && _clipRec.state==='recording')_clipRec.stop(); }catch(_){} }, CLIP_SEG_MS);
+    _clipReady=null;
+    _clipLaneCycle(0); // lane 0 starts now
+    _clipLaneStartTimer=setTimeout(()=>{ if(_clipStream)_clipLaneCycle(1); }, CLIP_SEG_MS/2); // lane 1 offset 10s
   }catch(err){ console.warn('[clip] start failed',err); _clipStream=null; }
 }
 function _clipStop(){
-  if(_clipSegTimer){ clearInterval(_clipSegTimer); _clipSegTimer=null; }
-  const s=_clipStream; _clipStream=null; // null FIRST so onstop won't restart a new session
-  _clipPendingSave=false;
-  try{ if(_clipRec && _clipRec.state!=='inactive')_clipRec.stop(); }catch(_){}
-  _clipRec=null; _clipChunks=[]; _clipPrev=null;
+  if(_clipLaneStartTimer){ clearTimeout(_clipLaneStartTimer); _clipLaneStartTimer=null; }
+  _clipLaneTimer.forEach((t,i)=>{ if(t){ clearTimeout(t); _clipLaneTimer[i]=null; } });
+  const s=_clipStream; _clipStream=null; // null FIRST so onstop won't restart a lane
+  _clipLaneRec.forEach((r,i)=>{ if(r){ try{ r.onstop=null; if(r.state!=='inactive')r.stop(); }catch(_){}; _clipLaneRec[i]=null; } });
+  _clipReady=null;
   if(s){ try{s.getTracks().forEach(t=>t.stop());}catch(_){} }
 }
 function _clipSave(){
   if(!SS_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
   if(!_clipEnabled()){ addToast('Clips are off — turn on in ⚙ Settings','#FFD700'); return; }
   if(!_clipStream){ addToast('Clip not ready yet — give it a few seconds','#FFD700'); return; }
-  const elapsed=Date.now()-_clipSegStart;
-  // Current segment too short to be worth it → use the last full finalized segment instead.
-  if(elapsed<7000 && _clipPrev){ _clipUpload(_clipPrev); return; }
-  // Finalize the current segment (proper duration) and upload it from onstop.
-  _clipPendingSave=true;
-  try{
-    if(_clipRec && _clipRec.state==='recording'){ _clipRec.stop(); }
-    else if(_clipPrev){ _clipPendingSave=false; _clipUpload(_clipPrev); }
-    else { _clipPendingSave=false; addToast('Clip not ready yet — give it a few seconds','#FFD700'); }
-  }catch(_){ _clipPendingSave=false; if(_clipPrev)_clipUpload(_clipPrev); }
+  if(_clipReady){ _clipUpload(_clipReady); }
+  else{ addToast('Clip warming up — give it ~20s of play first','#FFD700'); }
 }
 function _clipUpload(blob){
   const ext=(_clipMime && _clipMime.indexOf('mp4')!==-1) ? 'mp4' : 'webm';
@@ -4127,9 +4121,26 @@ async function endSnakeGame(reason,killerId){
   _gpadSnapshot(); _gpadNavTs=0; // held buttons (e.g. A) recorded as down so they don't auto-confirm
   const _vb=document.getElementById('voice-btn');if(_vb)_vb.style.display='none';
   const _bb2=document.getElementById('bot-bar');if(_bb2)_bb2.style.display='none';
+  const _payoutEl=document.getElementById('rs-payout');
+  if(_payoutEl)_payoutEl.style.display='none';
   go('scr-result');
   setTimeout(()=>gpadFocus(0),80); // ensure first result-screen button gets controller focus
-  if(cashed&&ST.lobbyUsd>0)await settle(); // only Cash Out triggers payout (90% player / 10% creator)
+  if(cashed&&ST.lobbyUsd>0){
+    if(_payoutEl){_payoutEl.style.display='block';_payoutEl.textContent='💰 Sending to wallet…';}
+    const _sd=await settle(); // only Cash Out triggers payout (90% player / 10% creator)
+    // Show the NET amount actually landing in the player's wallet — the cashed-out value minus the
+    // 10% fee (which goes to the creator wallet). playerCut is that net figure, straight from escrow.
+    if(_payoutEl){
+      if(_sd&&_sd.playerCut!=null){
+        const _netSol=_sd.playerCut/solanaWeb3.LAMPORTS_PER_SOL;
+        const _netUsd=(ST.solPrice>0)?_netSol*ST.solPrice:(_myUsd*0.9);
+        _payoutEl.textContent='💰 YOU RECEIVED $'+_netUsd.toFixed(2)+'  ('+_netSol.toFixed(4)+' SOL)';
+        const _subEl=document.getElementById('rsub'); if(_subEl)_subEl.textContent='Sent to your wallet — 10% fee applied';
+      }else{
+        _payoutEl.textContent='💰 Payout sent to your wallet';
+      }
+    }
+  }
   await refreshBal();
   if(!keepAlive){if(isHost&&SG&&pkRoomId)saveKillFood();pkDisconnect();}
 }
