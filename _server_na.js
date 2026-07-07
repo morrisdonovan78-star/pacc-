@@ -688,6 +688,20 @@ function ssTick(lid, io) {
     }
   }
 
+  // ── Prune corpses: dead snakes past the 2s respawn window that aren't coming back ─────────────
+  // ssKill leaves the dead snake in the map (so it can respawn if the player sends input within 2s).
+  // But a forfeited/left player never respawns, so without this they'd accumulate forever — every
+  // tick's forEach/broadcast would iterate more and more corpses, slowly inflating per-tick cost
+  // (creeping lag/ping over a long-running lobby). Remove any snake dead for >3s; a player who
+  // rejoins later just gets a fresh entry via ssHandleInput. Also un-sticks a body that lingered.
+  sg.snakes.forEach((sn, pid) => {
+    if (!sn.alive && sn._killedAt && now - sn._killedAt > 3000) {
+      sg.snakes.delete(pid);
+      io.to(lid).emit('leave', { id: pid }); // belt-and-suspenders: make sure clients drop the body
+    }
+  });
+  if (sg.snakes.size === 0) { clearInterval(sg.tickInterval); sg.tickInterval = null; ssGames.delete(lid); return; }
+
   // ── Drive bot inputs (before movement) ───────────────────────────────────
   sg.snakes.forEach(sn => {
     if (!sn.bot || !sn.alive || !sn._botScript) return;
@@ -952,7 +966,7 @@ function ssCheckCollisions(sg, lid, io) {
 
   // ── Head-to-head: MoneySlither pipeline. Both snakes must face each other within faceDeg.
   // Gate fails → pair falls through to H2B only (no TYPE-2 fallback).
-  // Gate passes → bigger snake wins; equal size → random.
+  // Gate passes → winner decided by T.rule (smallest_wins default; see below).
   const _faceCos = Math.cos((T.faceDeg ?? 75) * Math.PI / 180);
   for (let i = 0; i < alive.length; i++) {
     const p = alive[i]; if (died.has(p.pid)) continue;
@@ -979,10 +993,26 @@ function ssCheckCollisions(sg, lid, io) {
         qDot = Math.cos(qFace) * (-dx / dh) + Math.sin(qFace) * (-dy / dh);
       }
       if (pDot < _faceCos || qDot < _faceCos) continue;                 // gate fails → H2B
-      let winner, loser, reason;   // MoneySlither smallest_wins: bigger SIZE wins; equal → random
-      if      (p.size > q.size) { winner = p; loser = q; reason = 'T1-bigger'; }
-      else if (q.size > p.size) { winner = q; loser = p; reason = 'T1-bigger'; }
-      else                      { winner = Math.random() < 0.5 ? p : q; loser = winner === p ? q : p; reason = 'T1-tie'; }
+      // Apply the lobby's H2H winner RULE (owner-tunable in the combat panel). This was the bug:
+      // the winner used to be hardcoded to the bigger snake, so the rule did nothing and a straight
+      // face-off always killed the smaller one. Now: smallest_wins (default, MoneySlither) = the
+      // SMALLER snake survives; biggest_wins = bigger survives; random = coin flip; both_die = both.
+      // Equal sizes always coin-flip.
+      const _rule = T.rule || 'smallest_wins';
+      if (_rule === 'both_die') {
+        _h2hKilled = true; died.add(p.pid); died.add(q.pid);
+        const _bd = { stage:'H2H', reason:'both_die', tick:sg.tick, t:Date.now() };
+        ssKill(p, q, lid, io, _bd); ssKill(q, p, lid, io, _bd);
+        console.log('[KILL_TRACE] ' + JSON.stringify({ type:'H2H', reason:'both_die', p:p.pid, q:q.pid }));
+        continue;
+      }
+      let winner, loser, reason;
+      let _pWins;
+      if      (p.size === q.size)        _pWins = Math.random() < 0.5;
+      else if (_rule === 'biggest_wins') _pWins = p.size > q.size;
+      else if (_rule === 'random')       _pWins = Math.random() < 0.5;
+      else /* smallest_wins */           _pWins = p.size < q.size;
+      winner = _pWins ? p : q; loser = _pWins ? q : p; reason = _rule + (p.size === q.size ? '-tie' : '');
       const _h2h = { type:'H2H', tk:sg.tick, t:Date.now(), lid, evalOrder:_evalOrder,
         p:{ pid:p.pid, x:px, y:py, ang:+p.angle.toFixed(3), face:p.faceAngle!=null?+p.faceAngle.toFixed(3):null, pDot:+pDot.toFixed(4) },
         q:{ pid:q.pid, x:qx, y:qy, ang:+q.angle.toFixed(3), face:q.faceAngle!=null?+q.faceAngle.toFixed(3):null, qDot:+qDot.toFixed(4) },

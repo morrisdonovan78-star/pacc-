@@ -3533,58 +3533,76 @@ function _ssBindKey(act){
   const d=SS_BIND_DEFS.find(x=>x.act===act); return d?d.keys[0]:'';
 }
 
-// ── Rolling clip buffer ────────────────────────────────────────────────────────
-// A valid MediaRecorder clip must be ONE complete, finalized recording — you cannot slice the last
-// N seconds out of a live stream (the header/duration break, which is why early clips came out as a
-// broken ~1s video). And a finalized recording's length == how long it ran. So to hand back a
-// CONSISTENT ~20-second clip on demand, we run TWO overlapping 20s recorders staggered by 10s: each
-// finishes its 20s, publishes a finished ~20s file (_clipReady), and immediately restarts. Because
-// they're offset, a freshly-finished 20s segment is always on hand (refreshed every ~10s) — so every
-// saved clip is ~20s, not the old variable 7-20s. The saved 20s window ends within ~10s of the
-// keypress. (Two encoders while enabled; fine on a PC, and the feature is still opt-in + PC-only.)
-const CLIP_SEG_MS=20000;
-let _clipStream=null,_clipMime='',_clipReady=null,_clipLaneRec=[null,null],_clipLaneTimer=[null,null],_clipLaneStartTimer=null;
+// ── Rolling clip buffer (lightweight) ────────────────────────────────────────────
+// ONE encoder recording a FIXED 1280x720 downscale of the game — not the full window. Encoding the
+// raw window (often 1440p/4K) with TWO recorders was the heavy part that tanked FPS/ping for players
+// with clips on; a single 720p encoder is a fraction of that cost, and the fixed size keeps files
+// small (no Discord 413 from a giant 4K file). We copy the game canvas into a 720p offscreen at
+// ~24fps and record THAT. On save we finalize the CURRENT segment so the clip ENDS at your keypress
+// (the ~20s leading up to it) instead of a stale window. Opt-in + PC-only; zero cost when off.
+const CLIP_SEG_MS=20000, CLIP_W=1280, CLIP_H=720, CLIP_FPS=24;
+let _clipStream=null,_clipMime='',_clipRec=null,_clipChunks=[],_clipSegStart=0,_clipPrev=null,_clipPendingSave=false,
+    _clipCanvas=null,_clipCtx=null,_clipRaf=0,_clipLastDraw=0,_clipRestartTimer=null;
 function _clipEnabled(){ return SS_IS_PC && localStorage.getItem('ss_clip_on')==='1'; } // opt-in, default OFF
-function _clipLaneCycle(lane){
-  if(!_clipStream)return;
-  let chunks=[]; let rec;
-  try{ rec=new MediaRecorder(_clipStream,_clipMime?{mimeType:_clipMime,videoBitsPerSecond:3000000}:undefined); }
-  catch(err){ console.warn('[clip] lane start failed',err); return; }
-  _clipLaneRec[lane]=rec;
-  rec.ondataavailable=e=>{ if(e.data&&e.data.size)chunks.push(e.data); };
-  rec.onstop=()=>{
-    if(chunks.length){ try{ _clipReady=new Blob(chunks,{type:_clipMime||'video/mp4'}); }catch(_){} } // freshest finished ~20s
-    if(_clipStream)_clipLaneCycle(lane); // immediately begin this lane's next 20s segment
-  };
-  rec.start();
-  _clipLaneTimer[lane]=setTimeout(()=>{ try{ if(rec.state==='recording')rec.stop(); }catch(_){} }, CLIP_SEG_MS);
+function _clipDrawLoop(ts){
+  if(!_clipStream){ _clipRaf=0; return; }
+  _clipRaf=requestAnimationFrame(_clipDrawLoop);
+  if(ts-_clipLastDraw < 1000/CLIP_FPS) return; // throttle the downscale copy to CLIP_FPS
+  _clipLastDraw=ts;
+  try{ if(canvas && canvas.width) _clipCtx.drawImage(canvas,0,0,CLIP_W,CLIP_H); }catch(_){}
+}
+function _clipBeginSegment(){
+  _clipChunks=[]; _clipSegStart=Date.now();
+  try{
+    _clipRec=new MediaRecorder(_clipStream,_clipMime?{mimeType:_clipMime,videoBitsPerSecond:2500000}:undefined);
+    _clipRec.ondataavailable=e=>{ if(e.data&&e.data.size)_clipChunks.push(e.data); };
+    _clipRec.onstop=()=>{
+      const blob=_clipChunks.length?new Blob(_clipChunks,{type:_clipMime||'video/mp4'}):null;
+      if(blob)_clipPrev=blob;
+      if(_clipPendingSave){ _clipPendingSave=false; if(blob)_clipUpload(blob); }
+      if(_clipStream)_clipBeginSegment(); // roll straight into the next segment
+    };
+    _clipRec.start();
+  }catch(err){ console.warn('[clip] segment start failed',err); _clipRec=null; }
 }
 function _clipStart(){
   if(!_clipEnabled() || _clipStream || !canvas || typeof MediaRecorder==='undefined') return;
   try{
-    _clipStream=canvas.captureStream(30);
-    // Prefer MP4/H.264 — stores a real duration + plays inline in Discord (WebM omits duration → ~1s).
+    _clipCanvas=document.createElement('canvas'); _clipCanvas.width=CLIP_W; _clipCanvas.height=CLIP_H;
+    _clipCtx=_clipCanvas.getContext('2d');
+    _clipCtx.fillStyle='#000'; _clipCtx.fillRect(0,0,CLIP_W,CLIP_H); // seed one frame so the stream has content
+    _clipStream=_clipCanvas.captureStream(CLIP_FPS);
     const types=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
     _clipMime=(MediaRecorder.isTypeSupported?types.find(t=>MediaRecorder.isTypeSupported(t)):'')||'';
-    _clipReady=null;
-    _clipLaneCycle(0); // lane 0 starts now
-    _clipLaneStartTimer=setTimeout(()=>{ if(_clipStream)_clipLaneCycle(1); }, CLIP_SEG_MS/2); // lane 1 offset 10s
-  }catch(err){ console.warn('[clip] start failed',err); _clipStream=null; }
+    _clipPrev=null; _clipLastDraw=0;
+    _clipRaf=requestAnimationFrame(_clipDrawLoop);
+    _clipBeginSegment();
+    // restart the segment every 20s so the "current" segment used on save is never longer than ~20s
+    _clipRestartTimer=setInterval(()=>{ try{ if(_clipRec && _clipRec.state==='recording')_clipRec.stop(); }catch(_){} }, CLIP_SEG_MS);
+  }catch(err){ console.warn('[clip] start failed',err); _clipStop(); }
 }
 function _clipStop(){
-  if(_clipLaneStartTimer){ clearTimeout(_clipLaneStartTimer); _clipLaneStartTimer=null; }
-  _clipLaneTimer.forEach((t,i)=>{ if(t){ clearTimeout(t); _clipLaneTimer[i]=null; } });
-  const s=_clipStream; _clipStream=null; // null FIRST so onstop won't restart a lane
-  _clipLaneRec.forEach((r,i)=>{ if(r){ try{ r.onstop=null; if(r.state!=='inactive')r.stop(); }catch(_){}; _clipLaneRec[i]=null; } });
-  _clipReady=null;
+  if(_clipRestartTimer){ clearInterval(_clipRestartTimer); _clipRestartTimer=null; }
+  if(_clipRaf){ cancelAnimationFrame(_clipRaf); _clipRaf=0; }
+  const s=_clipStream; _clipStream=null; _clipPendingSave=false; // null first so onstop won't restart
+  try{ if(_clipRec){ _clipRec.onstop=null; if(_clipRec.state!=='inactive')_clipRec.stop(); } }catch(_){}
+  _clipRec=null; _clipChunks=[]; _clipPrev=null; _clipCanvas=null; _clipCtx=null;
   if(s){ try{s.getTracks().forEach(t=>t.stop());}catch(_){} }
 }
 function _clipSave(){
   if(!SS_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
   if(!_clipEnabled()){ addToast('Clips are off — turn on in ⚙ Settings','#FFD700'); return; }
   if(!_clipStream){ addToast('Clip not ready yet — give it a few seconds','#FFD700'); return; }
-  if(_clipReady){ _clipUpload(_clipReady); }
-  else{ addToast('Clip warming up — give it ~20s of play first','#FFD700'); }
+  const elapsed=Date.now()-_clipSegStart;
+  // Finalize the CURRENT segment so the clip ends at the keypress. If it only just restarted (<4s in),
+  // fall back to the previous full segment so the clip isn't tiny.
+  if(elapsed<4000 && _clipPrev){ _clipUpload(_clipPrev); return; }
+  _clipPendingSave=true;
+  try{
+    if(_clipRec && _clipRec.state==='recording'){ _clipRec.stop(); }
+    else if(_clipPrev){ _clipPendingSave=false; _clipUpload(_clipPrev); }
+    else{ _clipPendingSave=false; addToast('Clip warming up — give it a few seconds','#FFD700'); }
+  }catch(_){ _clipPendingSave=false; if(_clipPrev)_clipUpload(_clipPrev); }
 }
 function _clipUpload(blob){
   const ext=(_clipMime && _clipMime.indexOf('mp4')!==-1) ? 'mp4' : 'webm';
