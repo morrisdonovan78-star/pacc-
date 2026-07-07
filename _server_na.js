@@ -1256,44 +1256,46 @@ function ssCheckCollisionsNose(sg, lid, io) {
   const now = Date.now();
   const alive = [...sg.snakes.values()].filter(s => s.alive && !s.disconnected && s.path && s.path.length > 1);
   const died = new Set();
-  const immune = s => s._immuneUntil && now < s._immuneUntil; // fresh-spawn protection: neither dies nor kills
+  // Spawn immunity is a DEATH-SHIELD ONLY. Collision is ALWAYS detected — every snake's body, nose and
+  // head stay fully solid, so nobody ever passes through anyone. Immunity only IGNORES a would-be death
+  // when the DYING snake is still spawn-protected. There is NO `immune()` inside any detection loop; it
+  // is enforced solely in kill(). This is the separation of detection vs death-resolution.
+  const immune = s => s._immuneUntil && now < s._immuneUntil;
+  const kill = (victim, killer, diag) => {
+    if (died.has(victim.pid)) return;
+    if (immune(victim)) return; // detected, but spawn-protected → suppress the death only (body stays solid)
+    died.add(victim.pid);
+    console.log(`[${lid}] ${diag.stage} ${victim.pid.slice(0,8)} → dies${killer ? ' (by ' + killer.pid.slice(0,8) + ')' : ''}`);
+    ssKill(victim, killer, lid, io, diag);
+  };
   const noses = new Map(); for (const s of alive) noses.set(s.pid, ssNoseTip(s, noseFwd));
 
   // ── STEP 1 — CIRCLE HEAD-GRAZE (checked FIRST; only vs a VALID_CIRCLE_ACTIVE defender) ──
   for (const d of alive) {
-    if (died.has(d.pid) || immune(d) || !d.circleActive) continue;
-    // (a) a clean grazer wins → the circling defender dies, the attacker survives.
+    if (died.has(d.pid) || !d.circleActive) continue; // circle-STATE gate only — never an immunity gate
+    // (a) a clean grazer → the circling defender dies (unless spawn-immune), attacker survives.
     let grazer = null;
     for (const a of alive) {
-      if (a === d || died.has(a.pid) || immune(a)) continue;
+      if (a === d || died.has(a.pid)) continue;
       const na = noses.get(a.pid);
       const gap = Math.hypot(na.x - d.x, na.y - d.y) - d.thick; // attacker nose vs defender head SURFACE
       if (gap <= grazePx && gap >= -grazePx) { grazer = a; break; } // inside the tiny shell → clean graze
     }
-    if (grazer) {
-      died.add(d.pid);
-      console.log(`[${lid}] CIRCLE-GRAZE ${d.pid.slice(0,8)} (circle-active) grazed by ${grazer.pid.slice(0,8)} → dies`);
-      ssKill(d, grazer, lid, io, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now });
-      continue;
-    }
-    // (b) no clean graze → anyone who punched THROUGH the head (over-committed) dies on the spot.
+    if (grazer) { kill(d, grazer, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now }); if (died.has(d.pid)) continue; }
+    // (b) no clean graze → anyone who punched THROUGH the head (over-committed) dies (unless immune).
     for (const a of alive) {
-      if (a === d || died.has(a.pid) || immune(a)) continue;
+      if (a === d || died.has(a.pid)) continue;
       const na = noses.get(a.pid);
       const gap = Math.hypot(na.x - d.x, na.y - d.y) - d.thick;
-      if (gap < -grazePx) {
-        died.add(a.pid);
-        console.log(`[${lid}] CIRCLE-OVERCOMMIT ${a.pid.slice(0,8)} dove into ${d.pid.slice(0,8)} head → dies`);
-        ssKill(a, d, lid, io, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now });
-      }
+      if (gap < -grazePx) kill(a, d, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now });
     }
   }
 
   // ── STEP 2 — N2N (nose-to-nose): normal head-on, UNCHANGED. Tiny nose points + facing gate → bigger wins.
   for (let i = 0; i < alive.length; i++) {
-    const p = alive[i]; if (died.has(p.pid) || immune(p)) continue;
+    const p = alive[i]; if (died.has(p.pid)) continue;
     for (let j = i + 1; j < alive.length; j++) {
-      const q = alive[j]; if (died.has(q.pid) || immune(q)) continue;
+      const q = alive[j]; if (died.has(q.pid)) continue;
       const np = noses.get(p.pid), nq = noses.get(q.pid);
       const ndx = nq.x - np.x, ndy = nq.y - np.y, nd2 = ndx * ndx + ndy * ndy;
       const nr = (p.thick + q.thick) * n2nR;
@@ -1308,31 +1310,25 @@ function ssCheckCollisionsNose(sg, lid, io) {
       else if (rule === 'random')        pWins = Math.random() < 0.5;
       else /* biggest_wins */            pWins = p.size > q.size;
       const winner = pWins ? p : q, loser = pWins ? q : p;
-      died.add(loser.pid);
-      console.log(`[${lid}] N2N ${loser.pid.slice(0,8)} dies to ${winner.pid.slice(0,8)} (${rule})`);
-      ssKill(loser, winner, lid, io, { stage: 'N2N', reason: rule, tick: sg.tick, t: now });
+      kill(loser, winner, { stage: 'N2N', reason: rule, tick: sg.tick, t: now });
     }
   }
 
   // ── STEP 3 — NOSE-TO-BODY: normal Slither, UNCHANGED. Your nose into another snake's BODY (past its
-  // neck) → YOU die. A grazed circler is already in `died`, so its body is skipped → no traded kills.
+  // neck) → YOU die. Every body is checked (no immunity skip) so bodies are always solid; kill() alone
+  // decides whether the toucher actually dies. Circle state does not affect this pass at all.
   for (const a of alive) {
-    if (died.has(a.pid) || immune(a)) continue;
+    if (died.has(a.pid)) continue;
     const na = noses.get(a.pid);
     for (const b of alive) {
-      if (a === b || died.has(b.pid) || immune(b)) continue;
+      if (a === b || died.has(b.pid)) continue;
       const bR = b.thick * bodyScale, bR2 = bR * bR, path = b.path;
       const neck = Math.max(2, Math.round(b.thick / SS_POINT_DIST)); // skip ~one head-radius of neck
       let hit = false;
       for (let k = neck; k + 1 < path.length; k++) {
         if (ssPtSegD2(na.x, na.y, path[k].x, path[k].y, path[k + 1].x, path[k + 1].y) <= bR2) { hit = true; break; }
       }
-      if (hit) {
-        died.add(a.pid);
-        console.log(`[${lid}] NOSE-BODY ${a.pid.slice(0,8)} → dies (hit ${b.pid.slice(0,8)})`);
-        ssKill(a, b, lid, io, { stage: 'NOSE-BODY', tick: sg.tick, t: now });
-        break;
-      }
+      if (hit) { kill(a, b, { stage: 'NOSE-BODY', tick: sg.tick, t: now }); break; }
     }
   }
 }
