@@ -532,6 +532,7 @@ body.mctl #voice-speakers{left:150px;}
     <div style="display:flex;align-items:center;gap:8px;"><div class="ndot"></div><span class="nav-addr" id="lob-addr">--</span></div>
     <div class="nav-bal" id="lob-bal">-- SOL</div>
     <button class="copy-btn" onclick="openLeaderboard()">🏆 LEADERBOARD</button>
+    <button id="test-lobby-btn" class="copy-btn" onclick="joinTestLobby()" style="display:none;border-color:#FF00FF;color:#FF66FF;">🧪 TEST LOBBY</button>
     <button class="copy-btn" onclick="go('scr-home')">← HOME</button>
   </div>
   <div class="lgrid">
@@ -642,6 +643,7 @@ body.mctl #voice-speakers{left:150px;}
   <canvas id="tun-preview" width="244" height="96" style="width:100%;border-radius:6px;background:#050510;border:1px solid #1a1a3a;margin-bottom:4px;display:block;"></canvas>
   <div id="tun-stats"></div>
 
+  <div id="tun-normal">
   <div style="margin-bottom:11px;">
     <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">Hitbox Scale</span><span id="tun-hbs-val" style="color:#FFD700;min-width:42px;text-align:right;">1.07×</span></div>
     <input type="range" id="tun-hbs" min="0.50" max="2.00" step="0.01" value="1.07" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
@@ -659,9 +661,30 @@ body.mctl #voice-speakers{left:150px;}
     <input type="range" id="tun-face" min="0" max="120" step="1" value="75" oninput="_onTuning()" style="width:100%;accent-color:#00FFFF;">
     <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>head-on only</span><span>wide arc</span></div>
   </div>
+  </div>
+
+  <!-- Test lobby ONLY: nose/body hitbox params -->
+  <div id="tun-nose" style="display:none;">
+    <div style="color:#FF66FF;font-size:9px;margin-bottom:6px;letter-spacing:1px;">🧪 NOSE / BODY HITBOX (test lobby)</div>
+    <div style="margin-bottom:11px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">Nose size</span><span id="tun-nose-val" style="color:#FF66FF;min-width:42px;text-align:right;">1.00×</span></div>
+      <input type="range" id="tun-noseScale" min="0.30" max="2.00" step="0.02" value="1.00" oninput="_onTuning()" style="width:100%;accent-color:#FF66FF;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>tiny</span><span>big</span></div>
+    </div>
+    <div style="margin-bottom:11px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">Body graze size</span><span id="tun-body-val" style="color:#39FF14;min-width:42px;text-align:right;">0.62×</span></div>
+      <input type="range" id="tun-bodyScale" min="0.30" max="1.50" step="0.02" value="0.62" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>skill (tight)</span><span>easy (loose)</span></div>
+    </div>
+    <div style="margin-bottom:11px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">Head-on gate</span><span id="tun-faceT-val" style="color:#00FFFF;min-width:42px;text-align:right;">45°</span></div>
+      <input type="range" id="tun-faceDegT" min="0" max="120" step="1" value="45" oninput="_onTuning()" style="width:100%;accent-color:#00FFFF;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>strict head-on</span><span>wide</span></div>
+    </div>
+  </div>
 
   <div style="margin-bottom:13px;">
-    <div style="margin-bottom:4px;color:#aaa;">H2H Winner</div>
+    <div style="margin-bottom:4px;color:#aaa;">H2H / Nose Winner</div>
     <select id="tun-rule" onchange="_onTuning()" style="width:100%;background:#0a0a20;border:1px solid #333;color:#fff;font-family:Orbitron,sans-serif;font-size:10px;padding:5px;border-radius:4px;">
       <option value="smallest_wins">Smallest wins</option>
       <option value="biggest_wins">Biggest wins</option>
@@ -1088,6 +1111,8 @@ let _cashedOut=false; // set on cashout so incoming ss-state can't keep reviving
 let _autoCircle=false; // toggle: snake auto-circles until toggled off (E key / L3 button)
 let _lastRoomId=null;
 let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
+// Separate tuning for the isolated hitbox test lobby (nose/body model). Never sent to any other lobby.
+let _tuningTest={noseScale:0.6,bodyScale:0.60,faceDeg:45,rule:'biggest_wins'};
 try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv&&localStorage.getItem('ss_owner')==='1')Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
 let _showTuning=false;
 let _botCount=0,_isPractice=false;
@@ -2051,6 +2076,7 @@ function setupOtp(){
 
 // ══ LOBBY ═══════════════════════════════════════════════════
 function populateLobby(){
+  { const _tb=document.getElementById('test-lobby-btn'); if(_tb)_tb.style.display=localStorage.getItem('ss_owner')==='1'?'inline-flex':'none'; }
   fetchPrice().then(()=>{
     const s1=usdToSol(1),s5=usdToSol(5);
     const el=id=>document.getElementById(id);
@@ -2077,6 +2103,28 @@ function fetchLobbyCounts(){
   },5000);
 }
 function stopLobbyCountPoll(){clearInterval(_lobbyCountTimer);_lobbyCountTimer=null;}
+
+// Owner-only isolated hitbox sandbox. Free (no wager) and it runs the experimental nose/body
+// collision on the server — nothing here affects any other lobby.
+async function joinTestLobby(){
+  if(!ST.address){alert('Log in first');return;}
+  if(localStorage.getItem('ss_owner')!=='1'){addToast('Test lobby is owner-only','#FF4444');return;}
+  const _nin=document.getElementById('name-input');
+  if(_nin&&_nin.value.trim()){const _nv=_nin.value.trim().toUpperCase().slice(0,12);localStorage.setItem('ss_name_'+(ST.address||''),_nv);}
+  if(_joiningLobby&&!_sio&&(Date.now()-_joinStartedAt>120000))_joiningLobby=false;
+  if(_joiningLobby)return;
+  if(rafHandle){cancelAnimationFrame(rafHandle);rafHandle=null;}
+  _joiningLobby=true;_joinStartedAt=Date.now();
+  _localDead=false;_cashedOut=false;isSpectating=false;SG=null;
+  ST.lobbyUsd=0;ST.wagerSol=0;_lobbyIsPaid=false;ST.hasEscrow=false;
+  document.getElementById('mm-log').innerHTML='';
+  stopLobbyCountPoll();
+  go('scr-mm');
+  document.getElementById('mm-sub').textContent='Joining HITBOX TEST lobby…';
+  lg('mm-log','Connecting to the isolated hitbox test lobby…','lhi');
+  pkConnect('ss-test-lobby');
+}
+function _isTestLobby(){ return pkRoomId==='ss-test-lobby'; }
 
 async function joinLobby(usd){
   if(!ST.address){alert('Log in first');return;}
@@ -3735,8 +3783,13 @@ function launchSnakeGame(){
   // Reload owner's saved tuning on every game start (covers rejoin without page reload).
   // Push to server regardless of isHost — in ss-* lobbies the owner isn't always amFirst.
   if(localStorage.getItem('ss_owner')==='1'){
-    try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv)Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
-    if(_sio)_sio.emit('ss-tune',_tuning);
+    if(_isTestLobby()){
+      try{const _sv=localStorage.getItem('ss_tuning_test');if(_sv)Object.assign(_tuningTest,JSON.parse(_sv));}catch(_){}
+      if(_sio)_sio.emit('ss-tune',_tuningTest); // separate nose/body tuning — test lobby only
+    }else{
+      try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv)Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
+      if(_sio)_sio.emit('ss-tune',_tuning);
+    }
   }
   rafHandle=requestAnimationFrame(rafDraw);
   if(_hostWatch)clearInterval(_hostWatch);
@@ -3765,9 +3818,21 @@ function _toggleTuning(){
   _showTuning=!_showTuning;
   const p=document.getElementById('tuning-panel');
   if(p)p.style.display=_showTuning?'block':'none';
-  if(_showTuning){_syncTuningUI();_drawTuningPreview();if(_sio)_sio.emit('ss-tune',_tuning);}
+  if(_showTuning){_syncTuningUI();_drawTuningPreview();if(_sio)_sio.emit('ss-tune',_isTestLobby()?_tuningTest:_tuning);}
 }
 function _onTuning(){
+  if(_isTestLobby()){
+    _tuningTest.noseScale=+document.getElementById('tun-noseScale').value;
+    _tuningTest.bodyScale=+document.getElementById('tun-bodyScale').value;
+    _tuningTest.faceDeg  =+document.getElementById('tun-faceDegT').value;
+    _tuningTest.rule     = document.getElementById('tun-rule').value;
+    document.getElementById('tun-nose-val').textContent=_tuningTest.noseScale.toFixed(2)+'×';
+    document.getElementById('tun-body-val').textContent=_tuningTest.bodyScale.toFixed(2)+'×';
+    document.getElementById('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
+    try{localStorage.setItem('ss_tuning_test',JSON.stringify(_tuningTest));}catch(_){}
+    if(_sio)_sio.emit('ss-tune',_tuningTest);
+    return;
+  }
   _tuning.hbs    =+document.getElementById('tun-hbs').value;
   _tuning.hhbs   =+document.getElementById('tun-hhbs').value;
   _tuning.faceDeg=+document.getElementById('tun-face').value;
@@ -3782,6 +3847,16 @@ function _onTuning(){
 function _syncTuningUI(){
   const e=id=>document.getElementById(id);
   if(!e('tun-hbs'))return;
+  const _test=_isTestLobby();
+  if(e('tun-normal'))e('tun-normal').style.display=_test?'none':'block';
+  if(e('tun-nose'))  e('tun-nose').style.display  =_test?'block':'none';
+  if(_test){
+    e('tun-noseScale').value=_tuningTest.noseScale; e('tun-nose-val').textContent=_tuningTest.noseScale.toFixed(2)+'×';
+    e('tun-bodyScale').value=_tuningTest.bodyScale; e('tun-body-val').textContent=_tuningTest.bodyScale.toFixed(2)+'×';
+    e('tun-faceDegT').value =_tuningTest.faceDeg;   e('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
+    e('tun-rule').value=_tuningTest.rule||'biggest_wins';
+    return;
+  }
   e('tun-hbs').value=_tuning.hbs;       e('tun-hbs-val').textContent  =_tuning.hbs.toFixed(2)+'×';
   e('tun-hhbs').value=_tuning.hhbs;     e('tun-hhbs-val').textContent =_tuning.hhbs.toFixed(2)+'×';
   e('tun-face').value=_tuning.faceDeg;  e('tun-face-val').textContent =_tuning.faceDeg+'°';
@@ -4851,6 +4926,21 @@ function drawSnake(snake){
   const h=bPts[0]; if(!h)return;
   _drawHeadCircle(snake,r);
 
+  // Hitbox test lobby: draw the "nose line" across the head — the boundary the experimental model
+  // uses between the nose (collision point) and the body. Same spot/look on every snake here.
+  // Guarded by SG so it never leaks onto the home-screen attract snakes (which have no SG).
+  if(SG && _isTestLobby()){
+    const _ang=snake.angle||0, _px=-Math.sin(_ang), _py=Math.cos(_ang);
+    const _fwd=r*0.78;                         // sit RIGHT in front of the eyes, at the nose tip
+    const _nx=h.x+Math.cos(_ang)*_fwd, _ny=h.y+Math.sin(_ang)*_fwd;
+    const _L=r*0.8;                            // spans just the nose, not the whole head
+    ctx.save();
+    ctx.strokeStyle='rgba(0,255,255,0.95)'; ctx.lineWidth=Math.max(2,r*0.14); ctx.lineCap='round';
+    ctx.shadowColor='#00FFFF'; ctx.shadowBlur=8;
+    ctx.beginPath(); ctx.moveTo(_nx-_px*_L,_ny-_py*_L); ctx.lineTo(_nx+_px*_L,_ny+_py*_L); ctx.stroke();
+    ctx.restore();
+  }
+
   // Cash-out ring — pulsing gold circle around the head so EVERYONE can see who's cashing out.
   // Own snake uses the local hold timer (instant feedback); others use the broadcast `cashing` flag.
   if(snake.cashing || (snake.id===myPid && _cashoutTimer)){
@@ -4920,7 +5010,10 @@ function _drawHeadCircle(snake,r){
   // rate of head radius past spawn size (position offsets still follow full head size so
   // eyes stay correctly placed on a bigger head — only their size growth is dampened).
   const _rEye=EYE_BASE_R+(r-EYE_BASE_R)*0.5;
-  const eR=_rEye*0.38, eFwd=r*0.34, eSide=r*0.42;
+  // Test lobby: big eyes pushed to the very FRONT of the face (touching the front edge) and closer
+  // together — matches the reference look for the nose hitbox. Normal lobbies keep the stock eyes.
+  const _tEye=(typeof _isTestLobby==='function'&&SG&&_isTestLobby());
+  const eR=_tEye?r*0.42:_rEye*0.38, eFwd=_tEye?r*0.52:r*0.34, eSide=_tEye?r*0.37:r*0.42;
   // White sclera
   ctx.fillStyle='#fff';
   ctx.beginPath();ctx.arc(eFwd,-eSide,eR,0,Math.PI*2);ctx.fill();

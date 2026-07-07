@@ -185,7 +185,10 @@ function placePowerups(maze) {
 }
 
 // ── Lobby defs (match client) ─────────────────────────────────────────────────
-const LOBBY_IDS = new Set(['free-lobby', 'ss-free-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
+const LOBBY_IDS = new Set(['free-lobby', 'ss-free-lobby', 'ss-test-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
+// Owner-only isolated sandbox for trying experimental hitboxes. FREE (no wager) and it uses a
+// SEPARATE nose/body collision model + its own tuning — nothing here touches any other lobby.
+const SS_TEST_LOBBY = 'ss-test-lobby';
 
 // ── Rooms ─────────────────────────────────────────────────────────────────────
 const rooms = new Map();
@@ -481,7 +484,13 @@ function getSsGame(lid) {
     snakes: new Map(), tickInterval: null, tick: 0,
     food: [], _foodDirty: true, _lastFoodSend: 0, _history: [],
     arenaR: SS_ARENA_R, shrinkPct: 0, shrinkResetAt: 0, // dynamic border state
-    tuning: { hbs: SS_HBS, hhbs: SS_HHBS, faceDeg: 75, rule: 'smallest_wins' }
+    testHitbox: lid === SS_TEST_LOBBY, // isolated sandbox uses the experimental nose/body model
+    tuning: (lid === SS_TEST_LOBBY)
+      // Separate tuning for the test lobby's nose/body model. noseScale = nose-to-nose radius
+      // (×thick per snake); bodyScale = body hitbox radius (×thick) — SMALLER = tighter = more skill;
+      // bodySkip = head-adjacent body points treated as the nose zone (not lethal body).
+      ? { noseScale: 0.6, bodyScale: 0.60, faceDeg: 45, rule: 'biggest_wins' }
+      : { hbs: SS_HBS, hhbs: SS_HHBS, faceDeg: 75, rule: 'smallest_wins' }
   });
   return ssGames.get(lid);
 }
@@ -751,7 +760,8 @@ function ssTick(lid, io) {
   sg.snakes.forEach(sn => { if (sn.alive) { sn._phx = sn.x; sn._phy = sn.y; } });
   for (let _sub = 0; _sub < SS_SUBSTEPS; _sub++) {
     sg.snakes.forEach(sn => { if (sn.alive && !sn.disconnected) ssStepMovement(sn, sg, lid, io, now); });
-    ssCheckCollisions(sg, lid, io);
+    if (sg.testHitbox) ssCheckCollisionsNose(sg, lid, io); // isolated sandbox — experimental model
+    else ssCheckCollisions(sg, lid, io);
     // Mid-tick broadcast: send each sub-step's position instead of only the final one, so
     // clients receive state at 60Hz (matching the 60Hz sim) instead of 30Hz. Halves the
     // interpolation buffer's inherent render lag for remote snakes. Last sub-step is still
@@ -1164,6 +1174,73 @@ function ssCheckCollisions(sg, lid, io) {
   }
 }
 
+// ── EXPERIMENTAL "headfirst tag" nose/body collision — ss-test-lobby ONLY ────────────────────────
+// The nose is a TINY point at the very front tip of the head: nose = head + heading*thick*SS_NOSE_FWD.
+//  Pass 1 NOSE-TO-NOSE: two nose tips within (thickA+thickB)*noseScale AND both snakes actually facing
+//    each other (a real head-on, within faceDeg) → BIGGER wins (rule-tunable). The facing gate is what
+//    makes it strict: only a genuine head-on counts as nose-vs-nose.
+//  Pass 2 NOSE-TO-BODY: your nose tip touches ANY other part of a snake (its head-side or its body,
+//    swept-segment, radius thick*bodyScale) → YOU die, no matter your size. So grazing a snake's side
+//    is lethal to the grazer, a circler whose nose loops into your placed body dies, and a near-miss
+//    (nose just short of the body) is safe — a precise, skill-based graze. Verified in simulation.
+const SS_NOSE_FWD = 0.9; // how far forward the nose tip sits (×thick)
+function ssNoseTip(s) { return { x: s.x + Math.cos(s.angle) * s.thick * SS_NOSE_FWD, y: s.y + Math.sin(s.angle) * s.thick * SS_NOSE_FWD }; }
+function ssCheckCollisionsNose(sg, lid, io) {
+  const T = sg.tuning || {};
+  const noseScale = T.noseScale != null ? T.noseScale : 0.6;
+  const bodyScale = T.bodyScale != null ? T.bodyScale : 0.60;
+  const faceCos   = Math.cos(((T.faceDeg != null ? T.faceDeg : 45)) * Math.PI / 180);
+  const rule = T.rule || 'biggest_wins';
+  const alive = [...sg.snakes.values()].filter(s => s.alive && !s.disconnected && s.path && s.path.length > 1);
+  const died = new Set();
+  const noses = new Map(); for (const s of alive) noses.set(s.pid, ssNoseTip(s));
+
+  // Pass 1 — nose-to-nose (tips close AND both facing each other) → winner by rule
+  for (let i = 0; i < alive.length; i++) {
+    const p = alive[i]; if (died.has(p.pid)) continue;
+    for (let j = i + 1; j < alive.length; j++) {
+      const q = alive[j]; if (died.has(q.pid)) continue;
+      const np = noses.get(p.pid), nq = noses.get(q.pid);
+      const ndx = nq.x - np.x, ndy = nq.y - np.y, nd2 = ndx * ndx + ndy * ndy;
+      const nr = (p.thick + q.thick) * noseScale;
+      if (nd2 > nr * nr) continue;
+      const dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const pFace = (Math.cos(p.angle) * dx + Math.sin(p.angle) * dy) / d;
+      const qFace = (Math.cos(q.angle) * -dx + Math.sin(q.angle) * -dy) / d;
+      if (pFace < faceCos || qFace < faceCos) continue; // not a true head-on → let Pass 2 handle it
+      let pWins;
+      if      (p.size === q.size)        pWins = Math.random() < 0.5;
+      else if (rule === 'smallest_wins') pWins = p.size < q.size;
+      else if (rule === 'random')        pWins = Math.random() < 0.5;
+      else /* biggest_wins */            pWins = p.size > q.size;
+      const winner = pWins ? p : q, loser = pWins ? q : p;
+      died.add(loser.pid);
+      console.log(`[${lid}] NOSE-NOSE ${loser.pid.slice(0,8)} dies to ${winner.pid.slice(0,8)} (${rule})`);
+      ssKill(loser, winner, lid, io, { stage: 'NOSE-NOSE', reason: rule, tick: sg.tick, t: Date.now() });
+    }
+  }
+
+  // Pass 2 — nose-to-body (your nose tip touches any OTHER part of a snake) → you die
+  for (const a of alive) {
+    if (died.has(a.pid)) continue;
+    const na = noses.get(a.pid);
+    for (const b of alive) {
+      if (a === b || died.has(b.pid)) continue;
+      const bR = b.thick * bodyScale, bR2 = bR * bR, path = b.path;
+      let hit = ((na.x - b.x) ** 2 + (na.y - b.y) ** 2) <= bR2; // head-side (head centre) is lethal too
+      if (!hit) for (let k = 1; k + 1 < path.length; k++) {
+        if (ssPtSegD2(na.x, na.y, path[k].x, path[k].y, path[k + 1].x, path[k + 1].y) <= bR2) { hit = true; break; }
+      }
+      if (hit) {
+        died.add(a.pid);
+        console.log(`[${lid}] NOSE-BODY ${a.pid.slice(0,8)} grazed ${b.pid.slice(0,8)} → dies`);
+        ssKill(a, b, lid, io, { stage: 'NOSE-BODY', tick: sg.tick, t: Date.now() });
+        break;
+      }
+    }
+  }
+}
+
 function ssKill(victim, killer, lid, io, diag) {
   if (!victim.alive) return;
   victim.alive = false;
@@ -1446,7 +1523,7 @@ io.on('connection', socket => {
 
   // Validate lobby
   if (!lobbyId) { socket.disconnect(); return; }
-  const isPaid = lobbyId !== 'free-lobby' && lobbyId !== 'ss-free-lobby';
+  const isPaid = lobbyId !== 'free-lobby' && lobbyId !== 'ss-free-lobby' && lobbyId !== SS_TEST_LOBBY;
 
   const room = getOrCreateRoom(lobbyId);
   const existing = room.players.get(pid);
@@ -1747,6 +1824,15 @@ io.on('connection', socket => {
   socket.on('ss-tune', (d) => {
     if (!lobbyId.startsWith('ss-') || !d) return;
     const sg = getSsGame(lobbyId); // auto-create so pre-game ss-tune from owner is not dropped
+    if (sg.testHitbox) {
+      // Test lobby uses the separate nose/body params — isolated from every other lobby's tuning.
+      if (typeof d.noseScale === 'number') sg.tuning.noseScale = Math.max(0.2, Math.min(2.0, d.noseScale));
+      if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.2, Math.min(1.5, d.bodyScale));
+      if (typeof d.faceDeg   === 'number') sg.tuning.faceDeg   = Math.max(0, Math.min(120, d.faceDeg));
+      if (['smallest_wins','biggest_wins','random'].includes(d.rule)) sg.tuning.rule = d.rule;
+      console.log(`[${lobbyId}] ss-tune(TEST): noseScale=${sg.tuning.noseScale} bodyScale=${sg.tuning.bodyScale} faceDeg=${sg.tuning.faceDeg} rule=${sg.tuning.rule}`);
+      return;
+    }
     if (typeof d.hbs === 'number') sg.tuning.hbs = Math.max(0.5, Math.min(3.0, d.hbs));
     if (typeof d.hhbs === 'number') sg.tuning.hhbs = Math.max(1.0, Math.min(3.0, d.hhbs));
     if (typeof d.faceDeg === 'number') sg.tuning.faceDeg = Math.max(0, Math.min(120, d.faceDeg));
