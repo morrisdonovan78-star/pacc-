@@ -2526,7 +2526,7 @@ async function pkConnect(roomId,gameToken,spectate){
         if(sd.id===myPid&&_cashedOut){s.alive=false;if(s.path&&s.path.length)s.path=[];return;}
         // Don't reanimate a recently-killed snake (stale packet from before kill)
         if(!s.alive&&_snakeDeathTs.has(sd.id)&&Date.now()-(_snakeDeathTs.get(sd.id)||0)<2000){_ssBuf.delete(sd.id);return;}
-        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;s.cashing=!!sd.cash;
+        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;s.cashing=!!sd.cash;s.spinning=!!sd.sp;
         s.numSections=sd.ns||s.numSections;s.color=sd.color||s.color;s.name=sd.name||s.name;
         // ── Option A body-sync: adopt the server's authoritative body via its periodic KEYFRAME
         // (rk = full trail, flat head-first [x0,y0,...]; sent on spawn + every ~5s). Stash it here;
@@ -3456,7 +3456,7 @@ function applyRemoteState(d){
         else{s.alive=false;return;}
       }
       s._tAngle=sd.angle; s._lastSeen=Date.now(); s.botCircle=!!sd.circle; // lerp toward server angle; timestamp for timeout
-      s.alive=true; s.score=sd.score||0; s.boost=sd.boost||false; s.usd=sd.usd||0; s.cashing=!!sd.cash;
+      s.alive=true; s.score=sd.score||0; s.boost=sd.boost||false; s.usd=sd.usd||0; s.cashing=!!sd.cash; s.spinning=!!sd.sp;
       s.numSections=sd.ns||(sd.segs&&sd.segs.length)||s.numSections;
       s.color=sd.color||s.color; s.name=sd.name||s.name;
       if(sd.segs&&sd.segs.length>1){
@@ -4963,8 +4963,43 @@ function drawSnake(snake){
     }
   }
 
+  // Test-lobby H-overlay — shows the EXPERIMENTAL headfirst-tag hitboxes (not the H2H rings).
+  // Radii use msThick (mirrors the server's `thick`) so they match server collision. The head-graze
+  // ring only lights up on a snake that is actually CIRCLING (sd.sp) — i.e. whose head is grazeable.
+  if(_showHitboxes && SG && _isTestLobby()){
+    const th=msThick(snake), T=_tuningTest, ang=snake.angle||0;
+    const noseFwd=1.0;                                  // server default (nose point sits ~1×thick fwd)
+    const nx=h.x+Math.cos(ang)*th*noseFwd, ny=h.y+Math.sin(ang)*th*noseFwd;
+    ctx.save();
+    // body-graze radius (over-commit: a nose diving this close to the body dies) — faint green ring
+    ctx.strokeStyle='rgba(57,255,20,0.35)';ctx.lineWidth=1.5/_camZoom;
+    ctx.beginPath();ctx.arc(h.x,h.y,th*(T.bodyScale||0.9),0,Math.PI*2);ctx.stroke();
+    // head-graze zone (the circle kill) — around the head; bright gold + fill when circling, else faint dashed
+    const hgR=(th+th)*(T.headGraze||0.55);
+    if(snake.spinning){
+      ctx.fillStyle='rgba(255,215,0,0.12)';ctx.beginPath();ctx.arc(h.x,h.y,hgR,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='rgba(255,215,0,1.0)';ctx.lineWidth=2.5/_camZoom;ctx.setLineDash([]);
+      ctx.beginPath();ctx.arc(h.x,h.y,hgR,0,Math.PI*2);ctx.stroke();
+      ctx.fillStyle='rgba(255,215,0,0.9)';ctx.font=(11/_camZoom)+'px Orbitron,sans-serif';ctx.textAlign='center';
+      ctx.fillText('CIRCLING',h.x,h.y-hgR-6/_camZoom);
+    }else{
+      ctx.strokeStyle='rgba(255,215,0,0.28)';ctx.lineWidth=1.2/_camZoom;ctx.setLineDash([4/_camZoom,4/_camZoom]);
+      ctx.beginPath();ctx.arc(h.x,h.y,hgR,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+    }
+    // head-on gate lines (nose-vs-nose facing window) — cyan dashed
+    const faceRad=(T.faceDeg||45)*Math.PI/180, gl=th*2.2;
+    ctx.strokeStyle='rgba(0,220,255,0.85)';ctx.lineWidth=1.5/_camZoom;ctx.setLineDash([5/_camZoom,4/_camZoom]);
+    ctx.beginPath();
+    ctx.moveTo(h.x,h.y);ctx.lineTo(h.x+Math.cos(ang-faceRad)*gl,h.y+Math.sin(ang-faceRad)*gl);
+    ctx.moveTo(h.x,h.y);ctx.lineTo(h.x+Math.cos(ang+faceRad)*gl,h.y+Math.sin(ang+faceRad)*gl);
+    ctx.stroke();ctx.setLineDash([]);
+    // nose point (tiny collision point in front of the eyes) — cyan dot, radius = nose-nose half
+    ctx.fillStyle='rgba(0,255,255,0.95)';ctx.shadowColor='#00FFFF';ctx.shadowBlur=6;
+    ctx.beginPath();ctx.arc(nx,ny,Math.max(1.5,th*(T.noseScale||0.35)),0,Math.PI*2);ctx.fill();
+    ctx.restore();
+  }
   // Head hitbox + H2H zone — H-key only (no always-on ring to avoid confusing visuals)
-  if(_showHitboxes){
+  else if(_showHitboxes){
     const bR=msThick(snake)*SS_HB*_tuning.hbs;
     const hR=bR*_tuning.hhbs;
     const h2hR=hR*2*_tuning.hbs; // MoneySlither H2H zone: (headR+headR)*combatHBS — shown as radius around one head
