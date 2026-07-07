@@ -3778,8 +3778,8 @@ function launchSnakeGame(){
 
   document.addEventListener('mousemove',onMouseMove);
   window.addEventListener('wheel',onWheel,{passive:false});
-  document.addEventListener('mousedown',e=>{if(e.button===0){_mouseBoost=true; if(isSpectating)_specDrag={x:e.clientX,y:e.clientY,px:_specPanX,py:_specPanY};}});
-  document.addEventListener('mouseup',e=>{if(e.button===0){_mouseBoost=false; _specDrag=null;}});
+  document.addEventListener('mousedown',onGameMouseDown);
+  document.addEventListener('mouseup',onGameMouseUp);
   canvas.addEventListener('contextmenu',e=>e.preventDefault());
   canvas.addEventListener('touchmove',onTouchMove,{passive:false});
   canvas.addEventListener('touchstart',e=>{e.preventDefault();_mouseBoost=true;onTouchMove(e);},{passive:false});
@@ -4054,6 +4054,10 @@ function clearBotSnakes(){
 
 function onResize(){if(canvas){canvas.width=window.innerWidth;canvas.height=window.innerHeight;}}
 function onMouseMove(e){_mouseX=e.clientX;_mouseY=e.clientY; if(_specDrag&&_camZoom){_specPanX=_specDrag.px-(e.clientX-_specDrag.x)/_camZoom;_specPanY=_specDrag.py-(e.clientY-_specDrag.y)/_camZoom;}}
+// NAMED so they can be removed on cleanup — previously anonymous arrows re-added on every rejoin and
+// never removed, stacking duplicate handlers each session (a listener leak). Behavior unchanged.
+function onGameMouseDown(e){if(e.button===0){_mouseBoost=true; if(isSpectating)_specDrag={x:e.clientX,y:e.clientY,px:_specPanX,py:_specPanY};}}
+function onGameMouseUp(e){if(e.button===0){_mouseBoost=false; _specDrag=null;}}
 // Scroll wheel / trackpad zoom — up = zoom in, down = zoom out. Per-event step is capped so
 // high-resolution trackpads don't jump. rafDraw re-clamps _zoomOffset to the visible range.
 function onWheel(e){
@@ -4208,6 +4212,8 @@ async function endSnakeGame(reason,killerId){
     clearInterval(_guestInputLoop);_guestInputLoop=null;
     if(rafHandle){cancelAnimationFrame(rafHandle);rafHandle=null;}
     document.removeEventListener('mousemove',onMouseMove);
+    document.removeEventListener('mousedown',onGameMouseDown);
+    document.removeEventListener('mouseup',onGameMouseUp);
     window.removeEventListener('wheel',onWheel);
     window.removeEventListener('resize',onResize);
   }
@@ -4329,6 +4335,8 @@ function goHome(){
   if(document.activeElement&&document.activeElement!==document.body)document.activeElement.blur();
   if(rafHandle){cancelAnimationFrame(rafHandle);rafHandle=null;}
   document.removeEventListener('mousemove',onMouseMove);
+  document.removeEventListener('mousedown',onGameMouseDown);
+  document.removeEventListener('mouseup',onGameMouseUp);
   window.removeEventListener('wheel',onWheel);
   window.removeEventListener('resize',onResize);
   if(isHost)saveKillFood(); // preserve uncollected SOL pellets for the next person to join
@@ -4888,8 +4896,32 @@ function drawFood(){
 
 function drawSnake(snake){
   if(!snake.path||snake.path.length<2)return;
+  // ── Viewport cull (pure render optimization — NOT gameplay) ───────────────────────────────────
+  // The interpolation/path/prediction loop in rafDraw already ran for EVERY snake before drawing,
+  // and collision is server-authoritative, so skipping the PAINT of a fully-off-screen snake changes
+  // nothing the player can see or feel. drawFood already culls this way; drawSnake did not, so every
+  // client was rasterizing snakes across the whole 3000px arena that were nowhere near the viewport.
+  // Stage 1 — cheap pre-cull: a snake extends at most its drawn body-length from its head, so if the
+  // head is beyond viewport+that reach the snake can't be on-screen at all (conservative → never
+  // culls a visible snake). Saves even building the body points for distant snakes.
+  {
+    const r0=sectionRadius(snake), reach=snake.numSections*r0*SEGMENT_SPACING+r0+16;
+    const vHW=canvas.width/(2*_camZoom)+reach, vHH=canvas.height/(2*_camZoom)+reach;
+    const hd=snake._exHead||snake.path[0];
+    if(Math.abs(hd.x-_camX)>vHW||Math.abs(hd.y-_camY)>vHH)return;
+  }
   const bPts=getBodyPoints(snake);
   if(bPts.length<2)return;
+  // Stage 2 — precise cull: build body points (cheap vs rasterization) then skip the 3 fill passes +
+  // head if NO drawn point lands in the viewport (covers a long snake whose head is near but whose
+  // whole body coils off-screen). On-screen snakes early-exit on their first visible point.
+  {
+    const r1=sectionRadius(snake), vHW=canvas.width/(2*_camZoom)+r1+8, vHH=canvas.height/(2*_camZoom)+r1+8;
+    const hx=snake._exHead?snake._exHead.x:bPts[0].x, hy=snake._exHead?snake._exHead.y:bPts[0].y;
+    let vis=(Math.abs(hx-_camX)<=vHW&&Math.abs(hy-_camY)<=vHH);
+    if(!vis)for(let i=1;i<bPts.length;i++){const p=bPts[i];if(p&&Math.abs(p.x-_camX)<=vHW&&Math.abs(p.y-_camY)<=vHH){vis=true;break;}}
+    if(!vis)return;
+  }
   // Rendered head only: draw the head end at the extrapolated position (remote snakes).
   // Replaces the transient array slot with s._exHead — does NOT mutate snake.path[0].
   if(snake._exHead)bPts[0]=snake._exHead;
