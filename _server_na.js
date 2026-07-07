@@ -1849,8 +1849,21 @@ io.on('connection', socket => {
     let botN = 0; sg.snakes.forEach(s => { if (s.bot) botN++; });
     if (botN >= 6) { socket.emit('err', 'Bot limit reached (6)'); return; }
     const mode = (d && d.mode === 'fight') ? 'fight' : 'circle';
-    const a = Math.random() * Math.PI * 2, r = SS_ARENA_R * (0.2 + Math.random() * 0.35);
-    const bx = Math.cos(a) * r, by = Math.sin(a) * r, ns = mode === 'fight' ? 30 : 36;
+    let a = Math.random() * Math.PI * 2, r = SS_ARENA_R * (0.2 + Math.random() * 0.35);
+    let bx = Math.cos(a) * r, by = Math.sin(a) * r;
+    // Test lobby: spawn the bot right in front of the requester so it's immediately visible/testable
+    // (a random far-arena spawn is why "it says spawned but nothing pops up" in a solo test lobby).
+    if (lobbyId === SS_TEST_LOBBY) {
+      const me = sg.snakes.get(pid);
+      if (me) {
+        const off = 340, ang = (me.angle || 0);
+        bx = me.x + Math.cos(ang) * off; by = me.y + Math.sin(ang) * off;
+        const R2 = (sg.arenaR || SS_ARENA_R) - 120; // keep inside the border
+        if (bx * bx + by * by > R2 * R2) { bx = me.x - Math.cos(ang) * off; by = me.y - Math.sin(ang) * off; }
+        a = ang + Math.PI; // face back toward the player
+      }
+    }
+    const ns = mode === 'fight' ? 30 : 36;
     const id = 'bot-' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
     const script = mode === 'fight'
       ? (t, sn) => ({ angle: Math.atan2(-sn.y, -sn.x), boost: (t % 150) < 45 }) // drift toward center, occasional boost
