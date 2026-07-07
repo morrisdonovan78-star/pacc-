@@ -247,6 +247,11 @@ const SS_BASE_SPEED    = 288;      // px/s
 const SS_BOOST_SPEED   = 630;      // px/s
 const SS_BOOST_ACCEL   = 4.5;      // boostAmount ramp /s
 const SS_TURN_PER_SEC  = 8.1;      // rad/s
+// Spin detection (ss-test-lobby head-graze hitbox only) — a snake counts as "circling" whether it
+// holds auto-circle OR hand-circles a tight loop. _spin = decaying sum of signed per-substep turn;
+// sustained same-direction turning drives it past the threshold; straight/wobbly motion decays to ~0.
+const SS_SPIN_DECAY    = 0.93;
+const SS_SPIN_THRESH   = 0.9;      // rad — a deliberate circle (moderate+), not a single dodge/turn
 const SS_BOOST_BURN    = 0.18984375;    // size burn fraction /s while boosting
 const SS_START_SIZE    = 100;      // size for a fresh snake (→ ns 26)
 function ssSegForSize(size){ const sz=Math.max(SS_MIN_SIZE, Number(size)||SS_MIN_SIZE); let seg = 8 + (sz-40)*(26-8)/(100-40); if(sz>100) seg = 26 + (sz-100)*0.08; return Math.max(8, Math.round(seg)); }
@@ -489,7 +494,7 @@ function getSsGame(lid) {
       // Separate tuning for the test lobby's nose/body model. noseScale = nose-to-nose radius
       // (×thick per snake); bodyScale = body hitbox radius (×thick) — SMALLER = tighter = more skill;
       // bodySkip = head-adjacent body points treated as the nose zone (not lethal body).
-      ? { noseScale: 0.6, bodyScale: 0.60, faceDeg: 45, rule: 'biggest_wins' }
+      ? { noseFwd: 1.0, noseScale: 0.35, bodyScale: 0.90, headGraze: 0.55, faceDeg: 45, rule: 'biggest_wins' }
       : { hbs: SS_HBS, hhbs: SS_HHBS, faceDeg: 75, rule: 'smallest_wins' }
   });
   return ssGames.get(lid);
@@ -592,6 +597,14 @@ function ssStepMovement(sn, sg, lid, io, now) {
   }
   while (sn.angle >  Math.PI) sn.angle -= 2 * Math.PI;
   while (sn.angle < -Math.PI) sn.angle += 2 * Math.PI;
+
+  // Spin detection (test-lobby head-graze hitbox). Catches auto-circle AND hand-circling.
+  {
+    const dA = ssAngleDiff(sn.angle, sn._prevAngle != null ? sn._prevAngle : sn.angle);
+    sn._spin = (sn._spin || 0) * SS_SPIN_DECAY + dA;
+    sn._prevAngle = sn.angle;
+    sn.spinning = !!sn.circling || Math.abs(sn._spin) > SS_SPIN_THRESH;
+  }
 
   // Boost ramp: speed = BASE + (BOOST-BASE)*boostAmount
   if (sn.boost && sn.size > SS_MIN_SIZE) sn.boostAmount = Math.min(1, (sn.boostAmount || 0) + SS_BOOST_ACCEL * SS_DT);
@@ -1174,35 +1187,38 @@ function ssCheckCollisions(sg, lid, io) {
   }
 }
 
-// ── EXPERIMENTAL "headfirst tag" nose/body collision — ss-test-lobby ONLY ────────────────────────
-// The nose is a TINY point at the very front tip of the head: nose = head + heading*thick*SS_NOSE_FWD.
-//  Pass 1 NOSE-TO-NOSE: two nose tips within (thickA+thickB)*noseScale AND both snakes actually facing
-//    each other (a real head-on, within faceDeg) → BIGGER wins (rule-tunable). The facing gate is what
-//    makes it strict: only a genuine head-on counts as nose-vs-nose.
-//  Pass 2 NOSE-TO-BODY: your nose tip touches ANY other part of a snake (its head-side or its body,
-//    swept-segment, radius thick*bodyScale) → YOU die, no matter your size. So grazing a snake's side
-//    is lethal to the grazer, a circler whose nose loops into your placed body dies, and a near-miss
-//    (nose just short of the body) is safe — a precise, skill-based graze. Verified in simulation.
-const SS_NOSE_FWD = 0.9; // how far forward the nose tip sits (×thick)
-function ssNoseTip(s) { return { x: s.x + Math.cos(s.angle) * s.thick * SS_NOSE_FWD, y: s.y + Math.sin(s.angle) * s.thick * SS_NOSE_FWD }; }
+// ── EXPERIMENTAL "headfirst tag" collision — ss-test-lobby ONLY ───────────────────────────────────
+// THREE independent hitboxes (the head-graze is separate; it never widens the nose for normal fights):
+//  Pass 1 NOSE-TO-NOSE: two tiny nose points (head + heading*thick*noseFwd) within (thickA+thickB)*noseR
+//    AND both actually facing each other (a real head-on within faceDeg) → BIGGER wins (rule-tunable).
+//  Pass 2 NOSE-TO-BODY: your nose point dives into another snake's BODY (past a ~one-head neck buffer,
+//    radius thick*bodyScale) → YOU die. This is the "over-commit and you die" case. Near-miss is safe.
+//  Pass 3 HEAD-GRAZE (only vs a CIRCLING target): if a snake is circling (auto OR hand-circled — see
+//    sn.spinning) and ANY other snake grazes its HEAD (within (thickA+thickB)*headGraze of the circler's
+//    head point) → the CIRCLER dies, killed by the grazer. A non-circling snake's head is NOT vulnerable
+//    here, so this never affects normal fighting. Skill: over-commit → Pass 2 kills the grazer first;
+//    under-commit → no contact; a clean graze of the circling head → the circler dies.
+function ssNoseTip(s, fwd) { return { x: s.x + Math.cos(s.angle) * s.thick * fwd, y: s.y + Math.sin(s.angle) * s.thick * fwd }; }
 function ssCheckCollisionsNose(sg, lid, io) {
   const T = sg.tuning || {};
-  const noseScale = T.noseScale != null ? T.noseScale : 0.6;
-  const bodyScale = T.bodyScale != null ? T.bodyScale : 0.60;
+  const noseFwd = T.noseFwd  != null ? T.noseFwd  : 1.0;
+  const noseR   = T.noseScale!= null ? T.noseScale: 0.35;
+  const bodyScale = T.bodyScale != null ? T.bodyScale : 0.90;
+  const headGraze = T.headGraze != null ? T.headGraze : 0.55;
   const faceCos   = Math.cos(((T.faceDeg != null ? T.faceDeg : 45)) * Math.PI / 180);
   const rule = T.rule || 'biggest_wins';
   const alive = [...sg.snakes.values()].filter(s => s.alive && !s.disconnected && s.path && s.path.length > 1);
   const died = new Set();
-  const noses = new Map(); for (const s of alive) noses.set(s.pid, ssNoseTip(s));
+  const noses = new Map(); for (const s of alive) noses.set(s.pid, ssNoseTip(s, noseFwd));
 
-  // Pass 1 — nose-to-nose (tips close AND both facing each other) → winner by rule
+  // Pass 1 — nose-to-nose: tips within (rA+rB) AND both actually facing each other (true head-on) → winner by rule
   for (let i = 0; i < alive.length; i++) {
     const p = alive[i]; if (died.has(p.pid)) continue;
     for (let j = i + 1; j < alive.length; j++) {
       const q = alive[j]; if (died.has(q.pid)) continue;
       const np = noses.get(p.pid), nq = noses.get(q.pid);
       const ndx = nq.x - np.x, ndy = nq.y - np.y, nd2 = ndx * ndx + ndy * ndy;
-      const nr = (p.thick + q.thick) * noseScale;
+      const nr = (p.thick + q.thick) * noseR;
       if (nd2 > nr * nr) continue;
       const dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
       const pFace = (Math.cos(p.angle) * dx + Math.sin(p.angle) * dy) / d;
@@ -1220,15 +1236,19 @@ function ssCheckCollisionsNose(sg, lid, io) {
     }
   }
 
-  // Pass 2 — nose-to-body (your nose tip touches any OTHER part of a snake) → you die
+  // Pass 2 — nose-to-body: your nose POINT touches another snake's BODY (past its neck) → YOU die.
+  // This is what makes a circler die when its own nose loops into an attacker's placed body, and an
+  // over-committing grazer die when its nose dives into the circle. The head/neck is skipped so you
+  // can't die from the side of someone's head — only from real body contact.
   for (const a of alive) {
     if (died.has(a.pid)) continue;
     const na = noses.get(a.pid);
     for (const b of alive) {
       if (a === b || died.has(b.pid)) continue;
       const bR = b.thick * bodyScale, bR2 = bR * bR, path = b.path;
-      let hit = ((na.x - b.x) ** 2 + (na.y - b.y) ** 2) <= bR2; // head-side (head centre) is lethal too
-      if (!hit) for (let k = 1; k + 1 < path.length; k++) {
+      const neck = Math.max(2, Math.round(b.thick / SS_POINT_DIST)); // skip ~one head-radius of neck
+      let hit = false;
+      for (let k = neck; k + 1 < path.length; k++) {
         if (ssPtSegD2(na.x, na.y, path[k].x, path[k].y, path[k + 1].x, path[k + 1].y) <= bR2) { hit = true; break; }
       }
       if (hit) {
@@ -1237,6 +1257,30 @@ function ssCheckCollisionsNose(sg, lid, io) {
         ssKill(a, b, lid, io, { stage: 'NOSE-BODY', tick: sg.tick, t: Date.now() });
         break;
       }
+    }
+  }
+
+  // Pass 3 — head-graze (ONLY when the target is circling). If a snake c is circling and another snake
+  // g grazes c's HEAD, the circler c dies. Head zone = a small circle of radius (c.thick+g.thick)*headGraze
+  // around c's head point; g may graze with its nose OR any body segment. Over-committers already died in
+  // Pass 2; a non-circling snake's head is never in play, so normal fights are untouched.
+  for (const c of alive) {
+    if (died.has(c.pid) || !c.spinning) continue; // only a CIRCLING snake's head is vulnerable
+    let killer = null;
+    for (const g of alive) {
+      if (g === c || died.has(g.pid)) continue;
+      const gz = (c.thick + g.thick) * headGraze, gz2 = gz * gz;
+      const ng = noses.get(g.pid);
+      let touch = ((ng.x - c.x) ** 2 + (ng.y - c.y) ** 2) <= gz2; // grazer's nose brushes the head
+      if (!touch) { const gp = g.path; for (let k = 0; k + 1 < gp.length; k++) {
+        if (ssPtSegD2(c.x, c.y, gp[k].x, gp[k].y, gp[k + 1].x, gp[k + 1].y) <= gz2) { touch = true; break; }
+      } }
+      if (touch) { killer = g; break; }
+    }
+    if (killer) {
+      died.add(c.pid);
+      console.log(`[${lid}] HEAD-GRAZE circler ${c.pid.slice(0,8)} grazed by ${killer.pid.slice(0,8)} → dies`);
+      ssKill(c, killer, lid, io, { stage: 'HEAD-GRAZE', tick: sg.tick, t: Date.now() });
     }
   }
 }
@@ -1798,7 +1842,7 @@ io.on('connection', socket => {
   // capped so it can't be spammed. Lets the owner spice up / test the free lobby with circling or
   // fighting bots. (Gated to owner on the client; server allows it anywhere in the free lobby.)
   socket.on('ss-spawn-bot', (d) => {
-    if (lobbyId !== 'ss-free-lobby' && lobbyId !== 'free-lobby') return;
+    if (lobbyId !== 'ss-free-lobby' && lobbyId !== 'free-lobby' && lobbyId !== SS_TEST_LOBBY) return;
     const sg = ssGames.get(lobbyId);
     if (!sg) return;
     let botN = 0; sg.snakes.forEach(s => { if (s.bot) botN++; });
@@ -1826,11 +1870,13 @@ io.on('connection', socket => {
     const sg = getSsGame(lobbyId); // auto-create so pre-game ss-tune from owner is not dropped
     if (sg.testHitbox) {
       // Test lobby uses the separate nose/body params — isolated from every other lobby's tuning.
-      if (typeof d.noseScale === 'number') sg.tuning.noseScale = Math.max(0.2, Math.min(2.0, d.noseScale));
-      if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.2, Math.min(1.5, d.bodyScale));
+      if (typeof d.noseFwd   === 'number') sg.tuning.noseFwd   = Math.max(0.3, Math.min(2.0, d.noseFwd));
+      if (typeof d.noseScale === 'number') sg.tuning.noseScale = Math.max(0.1, Math.min(1.0, d.noseScale));
+      if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.3, Math.min(1.5, d.bodyScale));
+      if (typeof d.headGraze === 'number') sg.tuning.headGraze = Math.max(0.2, Math.min(1.5, d.headGraze));
       if (typeof d.faceDeg   === 'number') sg.tuning.faceDeg   = Math.max(0, Math.min(120, d.faceDeg));
       if (['smallest_wins','biggest_wins','random'].includes(d.rule)) sg.tuning.rule = d.rule;
-      console.log(`[${lobbyId}] ss-tune(TEST): noseScale=${sg.tuning.noseScale} bodyScale=${sg.tuning.bodyScale} faceDeg=${sg.tuning.faceDeg} rule=${sg.tuning.rule}`);
+      console.log(`[${lobbyId}] ss-tune(TEST): noseFwd=${sg.tuning.noseFwd} noseR=${sg.tuning.noseScale} bodyScale=${sg.tuning.bodyScale} headGraze=${sg.tuning.headGraze} faceDeg=${sg.tuning.faceDeg} rule=${sg.tuning.rule}`);
       return;
     }
     if (typeof d.hbs === 'number') sg.tuning.hbs = Math.max(0.5, Math.min(3.0, d.hbs));
