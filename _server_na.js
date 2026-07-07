@@ -524,6 +524,7 @@ function ssHandleInput(lid, pid, d, io) {
     if (typeof d.angle === 'number') sn.targetAngle = d.angle;
   }
   sn.boost = !!d.boost && sn.ns > SS_BOOST_MIN;
+  sn.cashing = !!d.cash; // holding cash-out → broadcast so everyone sees the cash-out ring
   if (d.color) sn.color = d.color;
   if (d.name)  sn.name  = d.name;
   // Store client's reported facing angle for H2H gate (client angle is lag-free vs server's 1-2 tick lag)
@@ -848,7 +849,7 @@ function ssBroadcastState(sg, lid, io) {
     const pk = {
       id: sn.pid, x: Math.round(sn.x), y: Math.round(sn.y),
       angle: sn.angle, ns: sn.ns, boost: sn.boost, circle: !!sn.circling,
-      score: sn.score || 0, usd: sn.usd || 0,
+      score: sn.score || 0, usd: sn.usd || 0, cash: sn.cashing ? 1 : 0,
       color: sn.color, name: sn.name
     };
     // Option A body stream (only when flag ON and trail exists): keyframe `rk` (staggered/periodic
@@ -888,7 +889,7 @@ function ssBroadcastStateTo(socket, sg) {
     snakePkts.push({
       id: sn.pid, x: Math.round(sn.x), y: Math.round(sn.y),
       angle: sn.angle, ns: sn.ns, boost: sn.boost, circle: !!sn.circling,
-      score: sn.score || 0, usd: sn.usd || 0, color: sn.color, name: sn.name
+      score: sn.score || 0, usd: sn.usd || 0, cash: sn.cashing ? 1 : 0, color: sn.color, name: sn.name
     });
   });
   const pkt = {
@@ -1715,6 +1716,33 @@ io.on('connection', socket => {
     } else {
       socket.to(lobbyId).emit('ssin', d);
     }
+  });
+  // Spawn a practice bot — FREE lobby only (no wagers there, so it can never affect a real game),
+  // capped so it can't be spammed. Lets the owner spice up / test the free lobby with circling or
+  // fighting bots. (Gated to owner on the client; server allows it anywhere in the free lobby.)
+  socket.on('ss-spawn-bot', (d) => {
+    if (lobbyId !== 'ss-free-lobby' && lobbyId !== 'free-lobby') return;
+    const sg = ssGames.get(lobbyId);
+    if (!sg) return;
+    let botN = 0; sg.snakes.forEach(s => { if (s.bot) botN++; });
+    if (botN >= 6) { socket.emit('err', 'Bot limit reached (6)'); return; }
+    const mode = (d && d.mode === 'fight') ? 'fight' : 'circle';
+    const a = Math.random() * Math.PI * 2, r = SS_ARENA_R * (0.2 + Math.random() * 0.35);
+    const bx = Math.cos(a) * r, by = Math.sin(a) * r, ns = mode === 'fight' ? 30 : 36;
+    const id = 'bot-' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
+    const script = mode === 'fight'
+      ? (t, sn) => ({ angle: Math.atan2(-sn.y, -sn.x), boost: (t % 150) < 45 }) // drift toward center, occasional boost
+      : () => ({ circle: true });                                              // just circle in place
+    sg.snakes.set(id, {
+      pid: id, color: mode === 'fight' ? '#FF5522' : '#22AAFF', name: mode === 'fight' ? 'FIGHTER' : 'CIRCLE',
+      x: bx, y: by, angle: a, targetAngle: a, faceAngle: a, circling: false,
+      size: ssSizeFromNs(ns), ns, thick: ssThick(ns), path: [{ x: bx, y: by }],
+      boostAmount: 0, _lastPathX: bx, _lastPathY: by, _pathAcc: 0, growQueue: 0, _shed: 0,
+      alive: true, boost: false, score: 0, usd: 0, lastTs: Date.now(),
+      bot: true, _botTick: 0, _botScript: script
+    });
+    if (!sg.tickInterval) sg.tickInterval = setInterval(() => ssTick(lobbyId, io), TICK_MS);
+    console.log(`[${lobbyId}] spawned ${mode} bot ${id}`);
   });
   socket.on('ss-tune', (d) => {
     if (!lobbyId.startsWith('ss-') || !d) return;

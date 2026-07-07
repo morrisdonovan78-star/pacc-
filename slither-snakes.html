@@ -2471,7 +2471,7 @@ async function pkConnect(roomId,gameToken,spectate){
         if(sd.id===myPid&&_cashedOut){s.alive=false;if(s.path&&s.path.length)s.path=[];return;}
         // Don't reanimate a recently-killed snake (stale packet from before kill)
         if(!s.alive&&_snakeDeathTs.has(sd.id)&&Date.now()-(_snakeDeathTs.get(sd.id)||0)<2000){_ssBuf.delete(sd.id);return;}
-        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;
+        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;s.cashing=!!sd.cash;
         s.numSections=sd.ns||s.numSections;s.color=sd.color||s.color;s.name=sd.name||s.name;
         // ── Option A body-sync: adopt the server's authoritative body via its periodic KEYFRAME
         // (rk = full trail, flat head-first [x0,y0,...]; sent on spawn + every ~5s). Stash it here;
@@ -3401,7 +3401,7 @@ function applyRemoteState(d){
         else{s.alive=false;return;}
       }
       s._tAngle=sd.angle; s._lastSeen=Date.now(); s.botCircle=!!sd.circle; // lerp toward server angle; timestamp for timeout
-      s.alive=true; s.score=sd.score||0; s.boost=sd.boost||false; s.usd=sd.usd||0;
+      s.alive=true; s.score=sd.score||0; s.boost=sd.boost||false; s.usd=sd.usd||0; s.cashing=!!sd.cash;
       s.numSections=sd.ns||(sd.segs&&sd.segs.length)||s.numSections;
       s.color=sd.color||s.color; s.name=sd.name||s.name;
       if(sd.segs&&sd.segs.length>1){
@@ -3489,7 +3489,7 @@ function startGuestLoop(){
     // steering responsiveness is unaffected by how the snake is drawn.
     _sio.emit('ssin',{id:myPid,angle:targetAngleToMouse(my),circle:!!_autoCircle,
       boost:canBoost,x:Math.round(h.x),y:Math.round(h.y),ns:my.numSections||26,
-      color:my.color||colorFromId(myPid),usd:_myUsd||0,seed:1});
+      color:my.color||colorFromId(myPid),usd:_myUsd||0,seed:1,cash:_cashoutTimer?1:0});
   },33); // match server tick rate
 }
 
@@ -3754,7 +3754,8 @@ function launchSnakeGame(){
   }else{
     _showMobileCtl(false);
   }
-  const _bb=document.getElementById('bot-bar');if(_bb)_bb.style.display=(_isPractice&&localStorage.getItem('ss_owner')==='1')?'flex':'none';
+  const _bbFree=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby');
+  const _bb=document.getElementById('bot-bar');if(_bb)_bb.style.display=((_isPractice||_bbFree)&&localStorage.getItem('ss_owner')==='1'&&!isSpectating)?'flex':'none';
   if(_firstRemoteSync){const _jo=document.getElementById('join-sync');if(_jo)_jo.style.display='flex';}
   _clipStart(); // begin rolling clip buffer (PC + enabled only; no-op otherwise)
 }
@@ -3919,7 +3920,14 @@ function spawnBotSnake(mode){
     launchSnakeGame();
     addToast('Practice mode started','#FFD700');
   }
-  if(!isHost){addToast('Only host can spawn bots','#FF4444');return;}
+  if(!isHost){
+    // Live lobby: bots run server-side. Allow it in the FREE lobby for the owner (testing).
+    const _isFree=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby');
+    if(_isFree && localStorage.getItem('ss_owner')==='1' && _sio){
+      _sio.emit('ss-spawn-bot',{mode}); addToast('Spawning '+mode+' bot…','#FF6600'); return;
+    }
+    addToast('Only host can spawn bots','#FF4444');return;
+  }
   const botId='bot-'+(++_botCount);
   const circleColors=['#00AAFF','#00CFFF','#44DDFF','#0088CC'];
   const fightColors= ['#FF4400','#FF6600','#FF2200','#FF8800'];
@@ -4843,6 +4851,18 @@ function drawSnake(snake){
   const h=bPts[0]; if(!h)return;
   _drawHeadCircle(snake,r);
 
+  // Cash-out ring — pulsing gold circle around the head so EVERYONE can see who's cashing out.
+  // Own snake uses the local hold timer (instant feedback); others use the broadcast `cashing` flag.
+  if(snake.cashing || (snake.id===myPid && _cashoutTimer)){
+    const _pulse=0.5+0.5*Math.sin(Date.now()/120);
+    ctx.save();
+    ctx.lineWidth=Math.max(3, r*0.35)/1;
+    ctx.strokeStyle='rgba(255,215,0,'+(0.55+0.4*_pulse)+')';
+    ctx.shadowColor='#FFD700'; ctx.shadowBlur=18;
+    ctx.beginPath(); ctx.arc(h.x,h.y, r*(1.7+0.35*_pulse), 0, Math.PI*2); ctx.stroke();
+    ctx.restore();
+  }
+
   // Head hitbox + H2H zone — H-key only (no always-on ring to avoid confusing visuals)
   if(_showHitboxes){
     const bR=msThick(snake)*SS_HB*_tuning.hbs;
@@ -4918,17 +4938,8 @@ function _drawHeadCircle(snake,r){
   ctx.beginPath();ctx.arc(eFwd+_pDx-eR*0.08,-eSide+_pDy-eR*0.15,eR*0.22,0,Math.PI*2);ctx.fill();
   ctx.beginPath();ctx.arc(eFwd+_pDx-eR*0.08, eSide+_pDy-eR*0.15,eR*0.22,0,Math.PI*2);ctx.fill();
 
-  // Boost flame — only behind head (backward-facing half-disk so it never extends past the head tip)
-  if(snake.boost){
-    ctx.rotate(Math.PI); // +x now points backward in world space
-    const g=ctx.createRadialGradient(0,0,0,0,0,r*2.2);
-    g.addColorStop(0,'rgba(255,220,0,0.9)');
-    g.addColorStop(0.45,'rgba(255,80,0,0.55)');
-    g.addColorStop(1,'transparent');
-    ctx.fillStyle=g;
-    // Pie-slice only in +x direction (= backward in world), so flame never adds visual length at the front
-    ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,r*2.2,-Math.PI/2,Math.PI/2);ctx.closePath();ctx.fill();
-  }
+  // (Boost flame removed — the red/orange flame behind the head was distracting; the rainbow glow
+  // along the body already signals boosting, which is the effect we keep.)
 
   ctx.restore();
 }
