@@ -2284,6 +2284,23 @@ async function pkConnect(roomId,gameToken,spectate){
       reconnectionDelay:500,
     });
 
+    // WebSocket health check — if we're STILL on HTTP long-polling several seconds after connecting, the
+    // websocket UPGRADE was blocked LOCALLY (server + upgrade are proven working in a normal browser on
+    // NA+EU). Almost always antivirus/firewall "HTTPS/SSL scanning" or a VPN/proxy. Polling = high ping,
+    // so tell the player how to fix THEIR side. Fires at most once; never fires for the WS-connected majority.
+    try{
+      let _wsWarned=false;
+      const _eng=()=>_sio&&_sio.io&&_sio.io.engine;
+      _sio.on('connect',()=>{ const e=_eng(); if(!e)return;
+        if(e.transport&&e.transport.name==='websocket'){_wsWarned=true;return;}
+        e.on('upgrade',()=>{_wsWarned=true;}); // upgraded to ws → all good, never warn
+        setTimeout(()=>{ try{ const en=_eng(); const tn=en&&en.transport&&en.transport.name;
+          if(!_wsWarned && tn && tn!=='websocket'){ _wsWarned=true;
+            addToast('⚠️ WebSocket blocked on your device — ping will be high. This is your antivirus/firewall "HTTPS scanning" or a VPN/proxy, not the game. Turn off HTTPS/SSL scanning (ESET/Kaspersky/Bitdefender/Avast) or try another network.','#FF4444',11000);
+          } }catch(_){} }, 6000);
+      });
+    }catch(_){}
+
     let _initRecv=false,_initGuard=null;
 
     _sio.on('init',(data)=>{
