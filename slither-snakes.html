@@ -2272,7 +2272,14 @@ async function pkConnect(roomId,gameToken,spectate){
     _sio=io(getSioUrl(),{
       auth:spectate?{spectate:true,lobbyId:roomId}
                    :{pid:myPid,lobbyId:roomId,gameToken:gameToken||null,name:myName,color:_myCol,wagerSol:ST.wagerSol||0},
-      transports:['websocket','polling'],
+      // Start on polling then UPGRADE to WebSocket in-session (Socket.IO default order). A COLD
+      // websocket-first connection is silently blocked by some TLS-inspecting antivirus / "web shield"
+      // / corporate proxies, which then trap the client on slow HTTP long-polling forever (high ping).
+      // The in-session upgrade rides an already-established HTTP session and passes through those
+      // middleboxes — verified it upgrades to WebSocket on both NA + EU. Everyone else still ends up on
+      // WebSocket after ~1 RTT. (rememberUpgrade left OFF so a blocked client keeps retrying the safe flow.)
+      transports:['polling','websocket'],
+      upgrade:true,
       reconnectionAttempts:Infinity,
       reconnectionDelay:500,
     });
