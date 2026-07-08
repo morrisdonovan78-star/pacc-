@@ -1276,32 +1276,31 @@ function ssCheckCollisionsNose(sg, lid, io) {
   const grazeIn = grazePx * 0.3;
 
   // ── STEP 1 — CIRCLE HEAD-GRAZE (checked FIRST; only vs a VALID_CIRCLE_ACTIVE defender) ──
-  // The kill is the SLIGHTEST clip of the circling snake's HEAD surface. Its ENTIRE coil body is fully
-  // solid to the grazer (NO neck skip here) — touch the body anywhere, or punch past the head surface,
-  // and the GRAZER dies. So the only safe interaction with a circling snake is that razor head-graze;
-  // you can no longer sink into the body while "trying". Undercommit → nothing; overcommit → you die.
+  // BODY DEATH TAKES PRECEDENCE over the graze. Per attacker vs a circling snake, in this exact order:
+  //   1. if the attacker's nose is INSIDE the coil body (within Rd of any segment behind the head) OR has
+  //      punched past the head surface (gapHead < -grazeIn) → the ATTACKER dies. No "graze rescue" while
+  //      buried in the body — this is what stops going into the snake to fish for the kill.
+  //   2. ONLY a clean clip of the head's OUTER surface from OUTSIDE the body (gapHead ∈ [-grazeIn,+grazePx]
+  //      and NOT inside the coil) → the CIRCLER dies. Front/outer edge only; a side/inside clip = death.
+  // So: undercommit → nothing, the slightest true surface graze → kill, anything deeper → you die.
   for (const d of alive) {
     if (died.has(d.pid) || !d.circleActive) continue; // circle-STATE gate only — never an immunity gate
     const Rd = Rv(d), Rd2 = Rd * Rd, dpath = d.path;
-    // (a) a clean head-grazer (nose tip in the tiny band around the HEAD point) → the circler dies.
     let grazer = null;
     for (const a of alive) {
       if (a === d || died.has(a.pid)) continue;
       const na = noses.get(a.pid);
       const gapHead = Math.hypot(na.x - d.x, na.y - d.y) - Rd;
-      if (gapHead >= -grazeIn && gapHead <= grazePx) { grazer = a; break; }
-    }
-    if (grazer) kill(d, grazer, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now });
-    // (b) any OTHER attacker that punched past the head surface OR is touching the coil body → THEY die.
-    for (const a of alive) {
-      if (a === d || a === grazer || died.has(a.pid)) continue;
-      const na = noses.get(a.pid);
-      let hitBody = (Math.hypot(na.x - d.x, na.y - d.y) - Rd) < -grazeIn; // drove into the head past the band
-      if (!hitBody) { for (let k = 1; k + 1 < dpath.length; k++) { // else: touching the coil body (behind head)
-        if (ssPtSegD2(na.x, na.y, dpath[k].x, dpath[k].y, dpath[k + 1].x, dpath[k + 1].y) <= Rd2) { hitBody = true; break; }
+      // (1) inside the body? punched past the head, OR touching the coil (segments behind the head).
+      let inBody = gapHead < -grazeIn;
+      if (!inBody) { for (let k = 1; k + 1 < dpath.length; k++) {
+        if (ssPtSegD2(na.x, na.y, dpath[k].x, dpath[k].y, dpath[k + 1].x, dpath[k + 1].y) <= Rd2) { inBody = true; break; }
       } }
-      if (hitBody) kill(a, d, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now });
+      if (inBody) { kill(a, d, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now }); continue; }
+      // (2) clean outer-surface clip (nose outside the body, just kissing the head) → this attacker grazes.
+      if (gapHead <= grazePx && !grazer) grazer = a;
     }
+    if (grazer && !died.has(d.pid)) kill(d, grazer, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now });
   }
 
   // ── STEP 2 — N2N: the two NOSE TIPS (the actual nose at the front of the face, between the eyes) within
