@@ -247,16 +247,13 @@ const SS_BASE_SPEED    = 288;      // px/s
 const SS_BOOST_SPEED   = 630;      // px/s
 const SS_BOOST_ACCEL   = 4.5;      // boostAmount ramp /s
 const SS_TURN_PER_SEC  = 8.1;      // rad/s
-// ── Circle detection state machine (ss-test-lobby ONLY) ───────────────────────────────────────────
-// A snake is only VALID_CIRCLE_ACTIVE after completing a GENUINE closed loop. Weaving / zig-zag /
-// reversing / spiralling must never qualify. Tracks net signed turning + instantaneous radius; a loop
-// counts only when it accumulates ~a full turn in ONE direction at a consistent radius AND returns
-// near where it started. Breaking the loop (straighten / reverse / radius jump) resets progress.
-const SS_CIRC_MINRATE    = 0.010;   // rad/substep below which we're "going straight"
-const SS_CIRC_REVERSE    = 0.010;   // opposite-direction turn (rad/substep) that breaks the loop
-const SS_CIRC_STRAIGHT_MAX = 8;     // consecutive "straight" substeps tolerated before reset
-const SS_CIRC_RADIUS_RATIO = 1.7;   // max Rmax/Rmin over the loop (spiral / erratic radius → reset)
-const SS_CIRC_CLOSE_FRAC = 0.55;    // must return within this × avg-radius of the loop's start point (rejects spirals)
+// ── Circle detection (ss-test-lobby ONLY) — winding accumulator ───────────────────────────────────
+// A snake is VALID_CIRCLE_ACTIVE after ONE tight loop, and STOPS being active the moment it comes out
+// of the circle (opens the radius / slows / straightens / reverses). Winds up signed turning while
+// turning TIGHTLY in one direction; ~one full turn (circDeg) → active. Turning slower than SS_CIRC_RATE
+// (a wide/gentle turn = coming out) or reversing resets it → you must complete a fresh full circle.
+const SS_CIRC_RATE      = 0.045;  // min turn (rad/substep) to count as tight circling (~<=110px radius). below = coming out
+const SS_CIRC_SLOWGRACE = 3;      // substeps below the rate tolerated before reset (absorbs a 1-frame wobble)
 const SS_BOOST_BURN    = 0.18984375;    // size burn fraction /s while boosting
 const SS_START_SIZE    = 100;      // size for a fresh snake (→ ns 26)
 function ssSegForSize(size){ const sz=Math.max(SS_MIN_SIZE, Number(size)||SS_MIN_SIZE); let seg = 8 + (sz-40)*(26-8)/(100-40); if(sz>100) seg = 26 + (sz-100)*0.08; return Math.max(8, Math.round(seg)); }
@@ -1188,48 +1185,34 @@ function ssCheckCollisions(sg, lid, io) {
   }
 }
 
-// ── Circle detection state machine (ss-test-lobby). States: 0 NOT_CIRCLING, 1 TRACKING, 2 ACTIVE. ──
-// Only state 2 (VALID_CIRCLE_ACTIVE) makes the head grazeable. Validated ONLY by: ~a full net turn in
-// ONE direction (circDeg), a consistent radius (no spiral), and loop closure (head returns near the
-// loop's start). Weaving / zig-zag / reversing / random spiralling never qualify; straighten/reverse
-// resets progress. Runs per-substep, test lobby only. Does not touch movement/visuals in any way.
+// ── Circle detection (ss-test-lobby) — winding accumulator. See SS_CIRC_* above. ──
+// Winds up signed turning while turning TIGHTLY in one direction; ~one full turn (circDeg) → grazeable.
+// The MOMENT the snake comes out of the circle — opens the radius / slows below SS_CIRC_RATE, or
+// reverses — the winding resets and circleActive drops, so a fresh full circle is required to re-arm.
+// One tight loop arms it (no multi-loop validation); weaving/zig-zag/straight never wind up. Test lobby
+// only; does not touch movement or visuals.
 function ssUpdateCircleState(sn, sg) {
   const T = sg.tuning || {};
   const complete = (T.circDeg != null ? T.circDeg : 340) * Math.PI / 180;
-  if (sn._cs == null) { sn._cs = 0; sn._csTurn = 0; sn._csDir = 0; sn._csStraight = 0; sn._csRmin = Infinity; sn._csRmax = 0; sn._csRsum = 0; sn._csN = 0; sn.circleActive = false; }
-  const reset = () => { sn._cs = 0; sn._csTurn = 0; sn._csDir = 0; sn._csStraight = 0; sn._csRmin = Infinity; sn._csRmax = 0; sn._csRsum = 0; sn._csN = 0; sn.circleActive = false; };
+  if (sn._csWind == null) { sn._csWind = 0; sn._csDir = 0; sn._csSlow = 0; sn.circleActive = false; }
 
   const dA = ssAngleDiff(sn.angle, sn._prevAngle != null ? sn._prevAngle : sn.angle);
   sn._prevAngle = sn.angle;
   const mag = Math.abs(dA), dir = dA >= 0 ? 1 : -1;
-  const speed = SS_BASE_SPEED + (SS_BOOST_SPEED - SS_BASE_SPEED) * (sn.boostAmount || 0);
-  const step = speed * SS_DT;
 
-  // Nearly straight → the loop is breaking. Tolerate a few substeps, then reset all progress.
-  if (mag < SS_CIRC_MINRATE) {
-    if (sn._cs) { sn._csStraight++; if (sn._csStraight > SS_CIRC_STRAIGHT_MAX) reset(); }
+  // Turning too gently (going straight OR opening the radius = COMING OUT of the circle). Tolerate a
+  // 1-frame wobble, then reset: no longer circling → not grazeable, must complete a fresh full circle.
+  if (mag < SS_CIRC_RATE) {
+    if (++sn._csSlow > SS_CIRC_SLOWGRACE) { sn._csWind = 0; sn._csDir = 0; sn.circleActive = false; }
     return;
   }
-  sn._csStraight = 0;
+  sn._csSlow = 0;
 
-  if (sn._cs === 0) { sn._cs = 1; sn._csDir = dir; sn._csTurn = 0; sn._csRmin = Infinity; sn._csRmax = 0; sn._csRsum = 0; sn._csN = 0; sn._csX0 = sn.x; sn._csY0 = sn.y; }
-  if (dir !== sn._csDir && mag > SS_CIRC_REVERSE) { reset(); return; } // reversing → weaving/zig-zag never accumulates
+  // Reversed direction → loop broken; start winding fresh the other way (weaving/zig-zag never accrues).
+  if (dir !== sn._csDir) { sn._csDir = dir; sn._csWind = 0; sn.circleActive = false; }
 
-  sn._csTurn += dA;               // net signed turning (same sign while circling one way)
-  const r = step / mag;           // instantaneous turn radius
-  if (r < sn._csRmin) sn._csRmin = r;
-  if (r > sn._csRmax) sn._csRmax = r;
-  sn._csRsum += r; sn._csN++;
-
-  if (sn._cs === 1 && Math.abs(sn._csTurn) >= complete) {
-    const Ravg = sn._csRsum / Math.max(1, sn._csN);
-    const radiusOk = sn._csRmax <= sn._csRmin * SS_CIRC_RADIUS_RATIO;   // reject spirals / erratic radius
-    const dx = sn.x - sn._csX0, dy = sn.y - sn._csY0;
-    const closed = (dx * dx + dy * dy) <= (SS_CIRC_CLOSE_FRAC * Ravg) ** 2; // returned near start → real loop
-    if (radiusOk && closed) { sn._cs = 2; sn.circleActive = true; }
-    else reset(); // turned a full revolution but it wasn't a clean loop → start over
-  }
-  // state 2 persists (circleActive stays true) until a straighten/reverse above resets it.
+  sn._csWind += dA;                                   // signed; grows while tightly circling one way
+  if (Math.abs(sn._csWind) >= complete) sn.circleActive = true; // one full tight loop → grazeable
 }
 
 // ── SPECIAL circle head-graze collision — ss-test-lobby ONLY ──────────────────────────────────────

@@ -3840,6 +3840,8 @@ function launchSnakeGame(){
 
 // ── Combat Tuning Suite ──────────────────────────────────────
 function _toggleTuning(){
+  // OWNER-ONLY. Hard gate here so no trigger (key, button, console) can open it for anyone else.
+  if(localStorage.getItem('ss_owner')!=='1'){ _showTuning=false; const _p=document.getElementById('tuning-panel'); if(_p)_p.style.display='none'; return; }
   _showTuning=!_showTuning;
   const p=document.getElementById('tuning-panel');
   if(p)p.style.display=_showTuning?'block':'none';
@@ -4026,14 +4028,17 @@ function spawnBotSnake(mode){
     launchSnakeGame();
     addToast('Practice mode started','#FFD700');
   }
-  if(!isHost){
-    // Live lobby: bots run server-side. Allow it in the FREE lobby and the TEST lobby for the owner.
-    const _isFree=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
-    if(_isFree && localStorage.getItem('ss_owner')==='1' && _sio){
-      _sio.emit('ss-spawn-bot',{mode}); addToast('Spawning '+mode+' bot…','#FF6600'); return;
-    }
-    addToast('Only host can spawn bots','#FF4444');return;
+  // Server-authoritative ss- lobbies (test/free): the bot MUST be created on the SERVER, never locally.
+  // A local bot isn't in the server's ss-state snapshot, so the ss-state reconciler prunes it after ~2
+  // packets → "spawns then instantly disappears". This must NOT be gated on !isHost — the test-lobby
+  // owner is alone so isHost is true; check the lobby type FIRST.
+  const _srvLobby=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
+  if(_srvLobby){
+    if(localStorage.getItem('ss_owner')==='1' && _sio){ _sio.emit('ss-spawn-bot',{mode}); addToast('Spawning '+mode+' bot…','#FF6600'); }
+    else addToast('Only the owner can spawn bots here','#FF4444');
+    return;
   }
+  if(!isHost){ addToast('Only host can spawn bots','#FF4444');return; }
   const botId='bot-'+(++_botCount);
   const circleColors=['#00AAFF','#00CFFF','#44DDFF','#0088CC'];
   const fightColors= ['#FF4400','#FF6600','#FF2200','#FF8800'];
