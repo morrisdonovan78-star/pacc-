@@ -247,13 +247,15 @@ const SS_BASE_SPEED    = 288;      // px/s
 const SS_BOOST_SPEED   = 630;      // px/s
 const SS_BOOST_ACCEL   = 4.5;      // boostAmount ramp /s
 const SS_TURN_PER_SEC  = 8.1;      // rad/s
-// ── Circle detection (ss-test-lobby ONLY) — winding accumulator ───────────────────────────────────
-// A snake is VALID_CIRCLE_ACTIVE after ONE tight loop, and STOPS being active the moment it comes out
-// of the circle (opens the radius / slows / straightens / reverses). Winds up signed turning while
-// turning TIGHTLY in one direction; ~one full turn (circDeg) → active. Turning slower than SS_CIRC_RATE
-// (a wide/gentle turn = coming out) or reversing resets it → you must complete a fresh full circle.
-const SS_CIRC_RATE      = 0.045;  // min turn (rad/substep) to count as tight circling (~<=110px radius). below = coming out
-const SS_CIRC_SLOWGRACE = 3;      // substeps below the rate tolerated before reset (absorbs a 1-frame wobble)
+// ── Circle detection (ss-test-lobby ONLY) — RELATIVE-rate model ───────────────────────────────────
+// Adapts to how tightly the player circles (tight OR wide), so it arms on any real loop. Grazeable
+// after ONE full rotation (circDeg), and drops the INSTANT the player leaves the circle — i.e. the
+// current turn rate falls to < RELDROP of the loop's own established rate (opening the radius / slowing,
+// even in the same direction), or goes nearly straight, or reverses. Never active unless circling NOW.
+const SS_CIRC_MINRATE   = 0.02;   // rad/substep floor: below this you're going straight (not circling at all)
+const SS_CIRC_RELDROP   = 0.70;   // if current turn < this × the loop's established rate → you've left the circle
+const SS_CIRC_RATEDECAY = 0.97;   // EMA for the loop's established turn rate (slow → reflects the sustained circle)
+const SS_CIRC_SLOWGRACE = 2;      // substeps out of the circle before winding fully resets (must re-loop to re-arm)
 const SS_BOOST_BURN    = 0.18984375;    // size burn fraction /s while boosting
 const SS_START_SIZE    = 100;      // size for a fresh snake (→ ns 26)
 function ssSegForSize(size){ const sz=Math.max(SS_MIN_SIZE, Number(size)||SS_MIN_SIZE); let seg = 8 + (sz-40)*(26-8)/(100-40); if(sz>100) seg = 26 + (sz-100)*0.08; return Math.max(8, Math.round(seg)); }
@@ -494,9 +496,10 @@ function getSsGame(lid) {
     testHitbox: lid === SS_TEST_LOBBY, // isolated sandbox uses the experimental nose/body model
     tuning: (lid === SS_TEST_LOBBY)
       // Test-lobby model. ALL radii are ×ssSectionRadius (the DRAWN radius) so the hitbox = the sprite.
-      // bodyScale=1.0 → die exactly at the drawn body surface (solid). n2nScale = head-on distance
-      // (×(Ra+Rb)). grazePx = the tiny circle-graze shell half-width in FIXED px (size-independent).
-      ? { n2nScale: 0.55, bodyScale: 1.0, grazePx: 2, circDeg: 340, faceDeg: 45, rule: 'biggest_wins' }
+      // bodyScale=1.0 → die exactly at the drawn body surface (solid). n2nScale = nose-tip touch distance
+      // (×(Ra+Rb), the between-the-eyes nose region). grazePx = head-graze outer reach in FIXED px
+      // (tunable down to 0.01 for a razor mechanic). circDeg = degrees of one full circle to arm.
+      ? { n2nScale: 0.30, bodyScale: 1.0, grazePx: 1.0, circDeg: 360, faceDeg: 45, rule: 'biggest_wins' }
       : { hbs: SS_HBS, hhbs: SS_HHBS, faceDeg: 75, rule: 'smallest_wins' }
   });
   return ssGames.get(lid);
@@ -547,19 +550,20 @@ function ssHandleInput(lid, pid, d, io) {
   if (typeof d.angle === 'number') sn.faceAngle = d.angle;
 }
 
-// Socket-level disconnect (WebSocket dropped/closed). Does NOT kill or drop the wager as food —
-// only freezes the snake (movement paused, collision-immune, see ssTick) and starts the grace
-// clock. ssTick's per-tick check is what actually converts the wager to food, and only once
-// SS_DISCONNECT_GRACE_MS has fully elapsed with no reconnect (ssHandleInput un-freezes on any
-// fresh input, cancelling this — see there for why a simple flag/timestamp beats a setTimeout
-// here: reconnecting just stops matching the check next tick, no timer bookkeeping needed).
+// Socket-level disconnect (refresh / reload / brief blip). Does NOT kill or freeze the snake — it keeps
+// MOVING in a straight line along its last heading and stays FULLY COLLIDABLE (see ssTick / the collision
+// filters), so (a) a refreshing player resumes their real body still gliding forward instead of a frozen
+// stub, and (b) nobody can abuse disconnect as an invulnerable "freeze in place" to dodge a fight. On
+// any fresh input (reconnect) ssHandleInput clears sn.disconnected and control resumes seamlessly. Only
+// if SS_DISCONNECT_GRACE_MS fully elapses with no reconnect does ssTick forfeit (wager → food).
 function ssPlayerLeft(lid, pid, io) {
   const sg = ssGames.get(lid);
   if (!sg) return;
   const sn = sg.snakes.get(pid);
   if (sn && sn.alive && !sn.disconnected) {
-    console.log('disconnected (frozen, grace pending)', pid, sn.ns, Date.now());
+    console.log('disconnected (coasting straight, grace pending)', pid, sn.ns, Date.now());
     sn.disconnected = true; sn.disconnectedAt = Date.now();
+    sn.circling = false; sn.targetAngle = null; sn.boost = false; // coast straight on the last heading
   }
 }
 
@@ -650,16 +654,21 @@ function ssStepMovement(sn, sg, lid, io, now) {
     sn.ns = ssSegForSize(sn.size);
   }
 
-  // Boost burn: size -= size*BURN*DT (continuous) + shed a pellet per whole segment lost
+  // Boost burn: size -= size*BURN*DT (continuous) + shed a pellet per whole segment lost.
+  // TEST LOBBY ONLY: drain +20% (so boost-circling is a net LENGTH LOSS — you can't farm length by
+  // boosting), and drop only HALF as many trail pebbles (still leaves a trail, just thinner). Other
+  // lobbies keep the current tuning untouched.
   if (sn.boost) {
     if (sn.size <= SS_MIN_SIZE) { sn.boost = false; }
     else {
+      const burn = sg.testHitbox ? SS_BOOST_BURN * 1.2 : SS_BOOST_BURN;
+      const shedEvery = sg.testHitbox ? SS_FOOD_GROW * 2 : SS_FOOD_GROW;
       const beforeNs = sn.ns;
-      sn.size = Math.max(SS_MIN_SIZE, sn.size - sn.size * SS_BOOST_BURN * SS_DT);
+      sn.size = Math.max(SS_MIN_SIZE, sn.size - sn.size * burn * SS_DT);
       sn.ns = ssSegForSize(sn.size);
       sn._shed = (sn._shed || 0) + (beforeNs - sn.ns);
-      while (sn._shed >= SS_FOOD_GROW) {
-        sn._shed -= SS_FOOD_GROW;
+      while (sn._shed >= shedEvery) {
+        sn._shed -= shedEvery;
         const tail = sn.path[sn.path.length - 1] || { x: sn.x, y: sn.y };
         sg.food.push(ssMakeFood(tail.x + (Math.random()-0.5)*6, tail.y + (Math.random()-0.5)*6, 0, 0, sn.pid, now + SS_SHED_NE_MS));
         sg._foodDirty = true;
@@ -769,7 +778,10 @@ function ssTick(lid, io) {
   // Remember each head's pre-tick position so food pickup can test the swept segment.
   sg.snakes.forEach(sn => { if (sn.alive) { sn._phx = sn.x; sn._phy = sn.y; } });
   for (let _sub = 0; _sub < SS_SUBSTEPS; _sub++) {
-    sg.snakes.forEach(sn => { if (sn.alive && !sn.disconnected) ssStepMovement(sn, sg, lid, io, now); });
+    // Disconnected snakes KEEP MOVING (they coast straight along their last heading — ssPlayerLeft
+    // cleared circling/targetAngle) so a refresh resumes a real gliding body and disconnect can't be
+    // used as an invulnerable freeze. They are NOT skipped here or in the collision filters.
+    sg.snakes.forEach(sn => { if (sn.alive) ssStepMovement(sn, sg, lid, io, now); });
     if (sg.testHitbox) ssCheckCollisionsNose(sg, lid, io); // isolated sandbox — experimental model
     else ssCheckCollisions(sg, lid, io);
     // Mid-tick broadcast: send each sub-step's position instead of only the final one, so
@@ -981,7 +993,7 @@ function ssCheckCollisions(sg, lid, io) {
   // MoneySlither: collide on the exact head (s.x,s.y) against the raw 1.6px path — no segs.
   // Disconnected (frozen) snakes are excluded entirely — collision-immune both ways, so nobody
   // can be killed while their input is stuck (backgrounded tab) and unable to react or flee.
-  const alive = [...sg.snakes.values()].filter(s => s.alive && !s.disconnected && s.path && s.path.length > 1);
+  const alive = [...sg.snakes.values()].filter(s => s.alive && s.path && s.path.length > 1); // disconnected snakes coast + still collide (not immune)
   const died = new Set();
   const _evalOrder = alive.map(s => s.pid.slice(0, 8));
   let _h2hKilled = false;
@@ -1193,26 +1205,31 @@ function ssCheckCollisions(sg, lid, io) {
 // only; does not touch movement or visuals.
 function ssUpdateCircleState(sn, sg) {
   const T = sg.tuning || {};
-  const complete = (T.circDeg != null ? T.circDeg : 340) * Math.PI / 180;
-  if (sn._csWind == null) { sn._csWind = 0; sn._csDir = 0; sn._csSlow = 0; sn.circleActive = false; }
+  const complete = (T.circDeg != null ? T.circDeg : 360) * Math.PI / 180;
+  if (sn._csWind == null) { sn._csWind = 0; sn._csDir = 0; sn._csSlow = 0; sn._csRate = 0; sn._csLoop = false; sn.circleActive = false; }
+  const clear = () => { sn._csWind = 0; sn._csRate = 0; sn._csLoop = false; sn._csDir = 0; };
 
   const dA = ssAngleDiff(sn.angle, sn._prevAngle != null ? sn._prevAngle : sn.angle);
   sn._prevAngle = sn.angle;
   const mag = Math.abs(dA), dir = dA >= 0 ? 1 : -1;
 
-  // Turning too gently (going straight OR opening the radius = COMING OUT of the circle). Tolerate a
-  // 1-frame wobble, then reset: no longer circling → not grazeable, must complete a fresh full circle.
-  if (mag < SS_CIRC_RATE) {
-    if (++sn._csSlow > SS_CIRC_SLOWGRACE) { sn._csWind = 0; sn._csDir = 0; sn.circleActive = false; }
+  // Reversed direction → the loop is broken; start a fresh winding the other way (weaving never accrues).
+  if (dir !== sn._csDir && mag > SS_CIRC_MINRATE) { clear(); sn._csDir = dir; sn._csRate = mag; sn._csSlow = 0; sn.circleActive = false; return; }
+
+  // "Left the circle" = going nearly straight, OR the current turn dropped well below the loop's own
+  // established rate (opening the radius / slowing — even in the same direction). Drop grazeable NOW.
+  const leaving = mag < SS_CIRC_MINRATE || (sn._csRate > SS_CIRC_MINRATE && mag < sn._csRate * SS_CIRC_RELDROP);
+  if (leaving) {
+    sn.circleActive = false;                                     // INSTANT off the moment you leave the circle
+    if (++sn._csSlow > SS_CIRC_SLOWGRACE) clear();               // sustained → wipe progress, must re-loop to re-arm
     return;
   }
   sn._csSlow = 0;
-
-  // Reversed direction → loop broken; start winding fresh the other way (weaving/zig-zag never accrues).
-  if (dir !== sn._csDir) { sn._csDir = dir; sn._csWind = 0; sn.circleActive = false; }
-
-  sn._csWind += dA;                                   // signed; grows while tightly circling one way
-  if (Math.abs(sn._csWind) >= complete) sn.circleActive = true; // one full tight loop → grazeable
+  // Track the loop's established turn rate with a slow EMA (so a real slow-down stands out against it).
+  sn._csRate = sn._csRate > 0 ? sn._csRate * SS_CIRC_RATEDECAY + mag * (1 - SS_CIRC_RATEDECAY) : mag;
+  sn._csWind += dA;
+  if (Math.abs(sn._csWind) >= complete) sn._csLoop = true;       // one full rotation completed
+  sn.circleActive = sn._csLoop;                                  // grazeable only after a loop AND still circling now
 }
 
 // ── SPECIAL circle head-graze collision — ss-test-lobby ONLY ──────────────────────────────────────
@@ -1221,10 +1238,11 @@ function ssUpdateCircleState(sn, sg) {
 // `ssThick`, a ~1.6× SMALLER radius, so a nose could sink 20-38px into the drawn body before dying —
 // the "drive through the body" bug. Proven + fixed in scratchpad solid_body_sim.js / fixed_collide_sim.js.)
 // The nose is the VISUAL nose tip = head + heading*ssSectionRadius. Priority per frame:
-//  STEP 1 CIRCLE-GRAZE (VALID_CIRCLE_ACTIVE defender only, FIRST): attacker nose tip vs defender HEAD
-//    surface, gap = dist - Rvis(def). gap∈[-grazePx,+grazePx] → clean graze (DEFENDER dies). gap<-grazePx
-//    (punched through the head) → OVER-COMMIT (ATTACKER dies). This is the ONLY exception to solid body.
-//  STEP 2 N2N head-on: head points within (Ra+Rb)*n2nScale AND both facing → bigger wins.
+//  STEP 1 CIRCLE-GRAZE (VALID_CIRCLE_ACTIVE defender only, FIRST): the kill is the SLIGHTEST clip of the
+//    circling snake's HEAD surface (nose gap∈[-grazeIn,+grazePx] of Rvis(def), grazePx tiny/tunable to
+//    0.01). Its ENTIRE coil body is fully solid to the grazer (no neck skip) — touch the body anywhere,
+//    or punch past the head band, and the GRAZER dies. Undercommit → nothing; overcommit → you die.
+//  STEP 2 N2N head-on: the two NOSE TIPS within (Ra+Rb)*n2nScale AND both facing → bigger wins.
 //  STEP 3 NOSE-TO-BODY: nose tip within Rvis(def)*bodyScale of a body (past a one-head neck) → attacker
 //    dies. bodyScale=1.0 → die exactly at the drawn surface, ZERO visible overlap. Bodies are ALWAYS
 //    solid (immunity is a death-shield only, enforced in kill(); it never removes a body from checks).
@@ -1237,7 +1255,7 @@ function ssCheckCollisionsNose(sg, lid, io) {
   const faceCos   = Math.cos(((T.faceDeg != null ? T.faceDeg : 45)) * Math.PI / 180);
   const rule = T.rule || 'biggest_wins';
   const now = Date.now();
-  const alive = [...sg.snakes.values()].filter(s => s.alive && !s.disconnected && s.path && s.path.length > 1);
+  const alive = [...sg.snakes.values()].filter(s => s.alive && s.path && s.path.length > 1); // disconnected snakes coast + still collide (not immune)
   const died = new Set();
   // Spawn immunity is a DEATH-SHIELD ONLY. Collision is ALWAYS detected — every snake's body, nose and
   // head stay fully solid, so nobody ever passes through anyone. Immunity only IGNORES a would-be death
@@ -1252,36 +1270,50 @@ function ssCheckCollisionsNose(sg, lid, io) {
   };
   const Rv = s => ssSectionRadius(s.ns);
   const noses = new Map(); for (const s of alive) noses.set(s.pid, ssNoseTip(s));
+  // Head-graze window: the grazer's nose tip may reach up to grazePx px OUTSIDE the circler's head
+  // surface and only grazeIn px INSIDE it to score the kill. Deeper than that = you've driven into the
+  // head = YOU die. Tiny = "just barely clip the head", no burrowing.
+  const grazeIn = grazePx * 0.3;
 
   // ── STEP 1 — CIRCLE HEAD-GRAZE (checked FIRST; only vs a VALID_CIRCLE_ACTIVE defender) ──
+  // The kill is the SLIGHTEST clip of the circling snake's HEAD surface. Its ENTIRE coil body is fully
+  // solid to the grazer (NO neck skip here) — touch the body anywhere, or punch past the head surface,
+  // and the GRAZER dies. So the only safe interaction with a circling snake is that razor head-graze;
+  // you can no longer sink into the body while "trying". Undercommit → nothing; overcommit → you die.
   for (const d of alive) {
     if (died.has(d.pid) || !d.circleActive) continue; // circle-STATE gate only — never an immunity gate
-    const Rd = Rv(d);
-    // (a) a clean grazer → the circling defender dies (unless spawn-immune), attacker survives.
+    const Rd = Rv(d), Rd2 = Rd * Rd, dpath = d.path;
+    // (a) a clean head-grazer (nose tip in the tiny band around the HEAD point) → the circler dies.
     let grazer = null;
     for (const a of alive) {
       if (a === d || died.has(a.pid)) continue;
       const na = noses.get(a.pid);
-      const gap = Math.hypot(na.x - d.x, na.y - d.y) - Rd; // attacker nose tip vs defender head SURFACE
-      if (gap <= grazePx && gap >= -grazePx) { grazer = a; break; } // inside the tiny shell → clean graze
+      const gapHead = Math.hypot(na.x - d.x, na.y - d.y) - Rd;
+      if (gapHead >= -grazeIn && gapHead <= grazePx) { grazer = a; break; }
     }
-    if (grazer) { kill(d, grazer, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now }); if (died.has(d.pid)) continue; }
-    // (b) no clean graze → anyone who punched THROUGH the head (over-committed) dies (unless immune).
+    if (grazer) kill(d, grazer, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now });
+    // (b) any OTHER attacker that punched past the head surface OR is touching the coil body → THEY die.
     for (const a of alive) {
-      if (a === d || died.has(a.pid)) continue;
+      if (a === d || a === grazer || died.has(a.pid)) continue;
       const na = noses.get(a.pid);
-      const gap = Math.hypot(na.x - d.x, na.y - d.y) - Rd;
-      if (gap < -grazePx) kill(a, d, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now });
+      let hitBody = (Math.hypot(na.x - d.x, na.y - d.y) - Rd) < -grazeIn; // drove into the head past the band
+      if (!hitBody) { for (let k = 1; k + 1 < dpath.length; k++) { // else: touching the coil body (behind head)
+        if (ssPtSegD2(na.x, na.y, dpath[k].x, dpath[k].y, dpath[k + 1].x, dpath[k + 1].y) <= Rd2) { hitBody = true; break; }
+      } }
+      if (hitBody) kill(a, d, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now });
     }
   }
 
-  // ── STEP 2 — N2N (head-on): head points within (Ra+Rb)*n2nScale AND both facing each other → bigger wins.
+  // ── STEP 2 — N2N: the two NOSE TIPS (the actual nose at the front of the face, between the eyes) within
+  // (Ra+Rb)*n2nScale AND both facing each other → bigger wins. Small = just the nose region, not the head.
   for (let i = 0; i < alive.length; i++) {
     const p = alive[i]; if (died.has(p.pid)) continue;
     for (let j = i + 1; j < alive.length; j++) {
       const q = alive[j]; if (died.has(q.pid)) continue;
+      const np = noses.get(p.pid), nq = noses.get(q.pid);
+      const nd = Math.hypot(nq.x - np.x, nq.y - np.y);
+      if (nd > (Rv(p) + Rv(q)) * n2nScale) continue; // nose tips not touching
       const dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
-      if (d > (Rv(p) + Rv(q)) * n2nScale) continue;
       const pFace = (Math.cos(p.angle) * dx + Math.sin(p.angle) * dy) / d;
       const qFace = (Math.cos(q.angle) * -dx + Math.sin(q.angle) * -dy) / d;
       if (pFace < faceCos || qFace < faceCos) continue; // not a true head-on → let STEP 3 handle it
@@ -1913,9 +1945,9 @@ io.on('connection', socket => {
     const sg = getSsGame(lobbyId); // auto-create so pre-game ss-tune from owner is not dropped
     if (sg.testHitbox) {
       // Test lobby uses the separate visual-radius params — isolated from every other lobby's tuning.
-      if (typeof d.n2nScale  === 'number') sg.tuning.n2nScale  = Math.max(0.2, Math.min(1.2, d.n2nScale));
+      if (typeof d.n2nScale  === 'number') sg.tuning.n2nScale  = Math.max(0.1, Math.min(1.2, d.n2nScale));
       if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.5, Math.min(1.2, d.bodyScale));
-      if (typeof d.grazePx   === 'number') sg.tuning.grazePx   = Math.max(0.5, Math.min(12, d.grazePx));
+      if (typeof d.grazePx   === 'number') sg.tuning.grazePx   = Math.max(0.01, Math.min(12, d.grazePx));
       if (typeof d.circDeg   === 'number') sg.tuning.circDeg   = Math.max(180, Math.min(360, d.circDeg));
       if (typeof d.faceDeg   === 'number') sg.tuning.faceDeg   = Math.max(0, Math.min(120, d.faceDeg));
       if (['smallest_wins','biggest_wins','random'].includes(d.rule)) sg.tuning.rule = d.rule;
@@ -1951,11 +1983,10 @@ io.on('connection', socket => {
     if (!lobbyId.startsWith('ss-')) return;
     const dp = room.players.get(pid);
     if (dp && dp.socketId !== socket.id) return; // superseded by a newer socket — leave it alone
-    ssForfeitNow(lobbyId, pid, io);              // die where they were + wager drops as food, now
-    // Keep the room.players entry as a DEAD tombstone (do NOT delete it) so a reconnect is treated
-    // as a dead player and blocked by the single-use-token gate — you can't rejoin a wager you just
-    // forfeited. The disconnect that immediately follows this (transport close) handles its cleanup.
-    if (dp) dp.alive = false;
+    // pagehide fires on BOTH a real leave AND a refresh, so we can't kill here — the snake just starts
+    // coasting straight + collidable (ssPlayerLeft). A refresh reconnects into it; a real leave is
+    // forfeited by ssTick's grace-expiry. dp.alive stays true so the reconnect is a same-session resume.
+    ssPlayerLeft(lobbyId, pid, io);
   });
 
   socket.on('disconnect', (reason) => {
@@ -1965,18 +1996,13 @@ io.on('connection', socket => {
     // event arrived), dp.socketId no longer matches this socket. Acting on it here would
     // freeze/delete the CURRENT live session out from under the player. No-op instead.
     if (dp && dp.socketId !== socket.id) return;
-    // Refresh / close tab / navigate away closes the socket → the player genuinely LEFT, so kill
-    // their snake NOW (dies where they were, wager drops as food) instead of freezing it, and mark
-    // them dead so the single-use-token gate blocks any reconnect. We forfeit on EVERY SS disconnect
-    // reason EXCEPT 'ping timeout' — a backgrounded/tab-switched player never disconnects at all
-    // (their socket stays open → handled by the SS_GHOST_MS freeze), so the only thing that reaches
-    // here is an actual connection close (refresh/close = 'transport close'/'transport error', which
-    // must forfeit) or a suspended/dead-but-not-closed link ('ping timeout', which keeps the grace
-    // so a genuine blip / phone-suspend can still reconnect). This is the server-side guarantee
-    // behind the client's 'ss-quit' emit, for whenever that packet doesn't flush before unload.
-    if (lobbyId.startsWith('ss-') && reason !== 'ping timeout') {
-      ssForfeitNow(lobbyId, pid, io);
-      if (dp) dp.alive = false;
+    // Refresh / reload / close / blip closes the socket. We do NOT kill on disconnect anymore: the snake
+    // keeps COASTING straight and stays collidable (ssPlayerLeft), so a refresh lands the player right
+    // back into their own moving body (no frozen stub, no invulnerability to exploit), and if they never
+    // come back ssTick's grace-expiry converts the wager to food. dp.alive stays TRUE so the reconnect is
+    // recognised as the same session and skips re-validating the single-use token.
+    if (lobbyId.startsWith('ss-')) {
+      ssPlayerLeft(lobbyId, pid, io);
     }
     // Grace period: a brief network blip / heartbeat timeout shouldn't wipe the player.
     // Keep them frozen + non-collidable so they resume the SAME spot and score on
