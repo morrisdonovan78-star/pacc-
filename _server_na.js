@@ -496,10 +496,10 @@ function getSsGame(lid) {
     arenaR: SS_ARENA_R, shrinkPct: 0, shrinkResetAt: 0, // dynamic border state
     testHitbox: lid === SS_TEST_LOBBY, // isolated sandbox uses the experimental nose/body model
     tuning: (lid === SS_TEST_LOBBY)
-      // Separate tuning for the test lobby's nose/body model. noseScale = nose-to-nose radius
-      // (×thick per snake); bodyScale = body hitbox radius (×thick) — SMALLER = tighter = more skill;
-      // bodySkip = head-adjacent body points treated as the nose zone (not lethal body).
-      ? { noseFwd: 1.0, noseScale: 0.35, bodyScale: 0.90, grazePx: 3, circDeg: 340, faceDeg: 45, rule: 'biggest_wins' }
+      // Test-lobby model. ALL radii are ×ssSectionRadius (the DRAWN radius) so the hitbox = the sprite.
+      // bodyScale=1.0 → die exactly at the drawn body surface (solid). n2nScale = head-on distance
+      // (×(Ra+Rb)). grazePx = the tiny circle-graze shell half-width in FIXED px (size-independent).
+      ? { n2nScale: 0.55, bodyScale: 1.0, grazePx: 2, circDeg: 340, faceDeg: 45, rule: 'biggest_wins' }
       : { hbs: SS_HBS, hhbs: SS_HHBS, faceDeg: 75, rule: 'smallest_wins' }
   });
   return ssGames.get(lid);
@@ -1233,24 +1233,24 @@ function ssUpdateCircleState(sn, sg) {
 }
 
 // ── SPECIAL circle head-graze collision — ss-test-lobby ONLY ──────────────────────────────────────
-// An ISOLATED extra state check layered on top of the normal N2N + nose-to-body rules (which are
-// UNCHANGED). Priority per frame:
-//  STEP 1  CIRCLE-GRAZE — only vs a VALID_CIRCLE_ACTIVE defender, checked FIRST. Attacker's tiny nose
-//          point vs the defender's HEAD surface, in a FIXED-px shell (grazePx, size-independent):
-//            gap in [-grazePx, +grazePx]  → clean graze → DEFENDER dies, attacker survives.
-//            gap < -grazePx (punched through the head) → OVER-COMMIT → ATTACKER dies.
-//          A successful graze removes the defender before STEP 3, so it never trades kills.
-//  STEP 2  N2N — normal nose-to-nose head-on (small nose points + facing gate), bigger wins.
-//  STEP 3  NOSE-TO-BODY — normal Slither: nose into a body (past the neck) → you die.
-// Non-circling snakes are never grazeable, so normal combat is exactly as before. Spawn-immune snakes
-// (fresh bots) neither die nor kill for a short window.
-function ssNoseTip(s, fwd) { return { x: s.x + Math.cos(s.angle) * s.thick * fwd, y: s.y + Math.sin(s.angle) * s.thick * fwd }; }
+// CRITICAL: all geometry uses the VISUAL radius `ssSectionRadius(ns)` — the SAME radius the client
+// draws the body/head at — so the hitbox matches the sprite exactly. (The old code collided at
+// `ssThick`, a ~1.6× SMALLER radius, so a nose could sink 20-38px into the drawn body before dying —
+// the "drive through the body" bug. Proven + fixed in scratchpad solid_body_sim.js / fixed_collide_sim.js.)
+// The nose is the VISUAL nose tip = head + heading*ssSectionRadius. Priority per frame:
+//  STEP 1 CIRCLE-GRAZE (VALID_CIRCLE_ACTIVE defender only, FIRST): attacker nose tip vs defender HEAD
+//    surface, gap = dist - Rvis(def). gap∈[-grazePx,+grazePx] → clean graze (DEFENDER dies). gap<-grazePx
+//    (punched through the head) → OVER-COMMIT (ATTACKER dies). This is the ONLY exception to solid body.
+//  STEP 2 N2N head-on: head points within (Ra+Rb)*n2nScale AND both facing → bigger wins.
+//  STEP 3 NOSE-TO-BODY: nose tip within Rvis(def)*bodyScale of a body (past a one-head neck) → attacker
+//    dies. bodyScale=1.0 → die exactly at the drawn surface, ZERO visible overlap. Bodies are ALWAYS
+//    solid (immunity is a death-shield only, enforced in kill(); it never removes a body from checks).
+function ssNoseTip(s) { const r = ssSectionRadius(s.ns); return { x: s.x + Math.cos(s.angle) * r, y: s.y + Math.sin(s.angle) * r }; }
 function ssCheckCollisionsNose(sg, lid, io) {
   const T = sg.tuning || {};
-  const noseFwd = T.noseFwd  != null ? T.noseFwd  : 1.0;
-  const n2nR    = T.noseScale!= null ? T.noseScale: 0.35;  // N2N nose radius (×thick) — normal head-on
-  const bodyScale = T.bodyScale != null ? T.bodyScale : 0.90; // nose-to-body radius (×thick) — normal
-  const grazePx = T.grazePx != null ? T.grazePx : 3;       // circle graze shell half-width — FIXED px, size-independent
+  const n2nScale  = T.n2nScale != null ? T.n2nScale : 0.55; // N2N head-on distance (×(Ra+Rb)) — head-to-head
+  const bodyScale = T.bodyScale != null ? T.bodyScale : 1.0; // nose-to-body radius (×Rvis) — 1.0 = solid at surface
+  const grazePx   = T.grazePx  != null ? T.grazePx  : 2;    // circle graze shell half-width — FIXED px, size-independent
   const faceCos   = Math.cos(((T.faceDeg != null ? T.faceDeg : 45)) * Math.PI / 180);
   const rule = T.rule || 'biggest_wins';
   const now = Date.now();
@@ -1258,8 +1258,7 @@ function ssCheckCollisionsNose(sg, lid, io) {
   const died = new Set();
   // Spawn immunity is a DEATH-SHIELD ONLY. Collision is ALWAYS detected — every snake's body, nose and
   // head stay fully solid, so nobody ever passes through anyone. Immunity only IGNORES a would-be death
-  // when the DYING snake is still spawn-protected. There is NO `immune()` inside any detection loop; it
-  // is enforced solely in kill(). This is the separation of detection vs death-resolution.
+  // when the DYING snake is still spawn-protected, enforced solely in kill() (detection vs resolution).
   const immune = s => s._immuneUntil && now < s._immuneUntil;
   const kill = (victim, killer, diag) => {
     if (died.has(victim.pid)) return;
@@ -1268,17 +1267,19 @@ function ssCheckCollisionsNose(sg, lid, io) {
     console.log(`[${lid}] ${diag.stage} ${victim.pid.slice(0,8)} → dies${killer ? ' (by ' + killer.pid.slice(0,8) + ')' : ''}`);
     ssKill(victim, killer, lid, io, diag);
   };
-  const noses = new Map(); for (const s of alive) noses.set(s.pid, ssNoseTip(s, noseFwd));
+  const Rv = s => ssSectionRadius(s.ns);
+  const noses = new Map(); for (const s of alive) noses.set(s.pid, ssNoseTip(s));
 
   // ── STEP 1 — CIRCLE HEAD-GRAZE (checked FIRST; only vs a VALID_CIRCLE_ACTIVE defender) ──
   for (const d of alive) {
     if (died.has(d.pid) || !d.circleActive) continue; // circle-STATE gate only — never an immunity gate
+    const Rd = Rv(d);
     // (a) a clean grazer → the circling defender dies (unless spawn-immune), attacker survives.
     let grazer = null;
     for (const a of alive) {
       if (a === d || died.has(a.pid)) continue;
       const na = noses.get(a.pid);
-      const gap = Math.hypot(na.x - d.x, na.y - d.y) - d.thick; // attacker nose vs defender head SURFACE
+      const gap = Math.hypot(na.x - d.x, na.y - d.y) - Rd; // attacker nose tip vs defender head SURFACE
       if (gap <= grazePx && gap >= -grazePx) { grazer = a; break; } // inside the tiny shell → clean graze
     }
     if (grazer) { kill(d, grazer, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now }); if (died.has(d.pid)) continue; }
@@ -1286,21 +1287,18 @@ function ssCheckCollisionsNose(sg, lid, io) {
     for (const a of alive) {
       if (a === d || died.has(a.pid)) continue;
       const na = noses.get(a.pid);
-      const gap = Math.hypot(na.x - d.x, na.y - d.y) - d.thick;
+      const gap = Math.hypot(na.x - d.x, na.y - d.y) - Rd;
       if (gap < -grazePx) kill(a, d, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now });
     }
   }
 
-  // ── STEP 2 — N2N (nose-to-nose): normal head-on, UNCHANGED. Tiny nose points + facing gate → bigger wins.
+  // ── STEP 2 — N2N (head-on): head points within (Ra+Rb)*n2nScale AND both facing each other → bigger wins.
   for (let i = 0; i < alive.length; i++) {
     const p = alive[i]; if (died.has(p.pid)) continue;
     for (let j = i + 1; j < alive.length; j++) {
       const q = alive[j]; if (died.has(q.pid)) continue;
-      const np = noses.get(p.pid), nq = noses.get(q.pid);
-      const ndx = nq.x - np.x, ndy = nq.y - np.y, nd2 = ndx * ndx + ndy * ndy;
-      const nr = (p.thick + q.thick) * n2nR;
-      if (nd2 > nr * nr) continue;
       const dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
+      if (d > (Rv(p) + Rv(q)) * n2nScale) continue;
       const pFace = (Math.cos(p.angle) * dx + Math.sin(p.angle) * dy) / d;
       const qFace = (Math.cos(q.angle) * -dx + Math.sin(q.angle) * -dy) / d;
       if (pFace < faceCos || qFace < faceCos) continue; // not a true head-on → let STEP 3 handle it
@@ -1314,16 +1312,16 @@ function ssCheckCollisionsNose(sg, lid, io) {
     }
   }
 
-  // ── STEP 3 — NOSE-TO-BODY: normal Slither, UNCHANGED. Your nose into another snake's BODY (past its
-  // neck) → YOU die. Every body is checked (no immunity skip) so bodies are always solid; kill() alone
-  // decides whether the toucher actually dies. Circle state does not affect this pass at all.
+  // ── STEP 3 — NOSE-TO-BODY: nose tip within Rvis(def)*bodyScale of a body (past a one-head neck) → you
+  // die. bodyScale=1.0 = die exactly at the drawn body surface (solid). The neck (one head radius) is
+  // skipped so a genuine head-on is resolved by N2N, not counted as a body hit.
   for (const a of alive) {
     if (died.has(a.pid)) continue;
     const na = noses.get(a.pid);
     for (const b of alive) {
       if (a === b || died.has(b.pid)) continue;
-      const bR = b.thick * bodyScale, bR2 = bR * bR, path = b.path;
-      const neck = Math.max(2, Math.round(b.thick / SS_POINT_DIST)); // skip ~one head-radius of neck
+      const Rb = Rv(b) * bodyScale, bR2 = Rb * Rb, path = b.path;
+      const neck = Math.max(2, Math.round(Rv(b) / SS_POINT_DIST)); // skip ~one head-radius of neck
       let hit = false;
       for (let k = neck; k + 1 < path.length; k++) {
         if (ssPtSegD2(na.x, na.y, path[k].x, path[k].y, path[k + 1].x, path[k + 1].y) <= bR2) { hit = true; break; }
@@ -1931,15 +1929,14 @@ io.on('connection', socket => {
     if (!lobbyId.startsWith('ss-') || !d) return;
     const sg = getSsGame(lobbyId); // auto-create so pre-game ss-tune from owner is not dropped
     if (sg.testHitbox) {
-      // Test lobby uses the separate nose/body params — isolated from every other lobby's tuning.
-      if (typeof d.noseFwd   === 'number') sg.tuning.noseFwd   = Math.max(0.3, Math.min(2.0, d.noseFwd));
-      if (typeof d.noseScale === 'number') sg.tuning.noseScale = Math.max(0.1, Math.min(1.0, d.noseScale));
-      if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.3, Math.min(1.5, d.bodyScale));
-      if (typeof d.grazePx   === 'number') sg.tuning.grazePx   = Math.max(1, Math.min(20, d.grazePx));
+      // Test lobby uses the separate visual-radius params — isolated from every other lobby's tuning.
+      if (typeof d.n2nScale  === 'number') sg.tuning.n2nScale  = Math.max(0.2, Math.min(1.2, d.n2nScale));
+      if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.5, Math.min(1.2, d.bodyScale));
+      if (typeof d.grazePx   === 'number') sg.tuning.grazePx   = Math.max(0.5, Math.min(12, d.grazePx));
       if (typeof d.circDeg   === 'number') sg.tuning.circDeg   = Math.max(180, Math.min(360, d.circDeg));
       if (typeof d.faceDeg   === 'number') sg.tuning.faceDeg   = Math.max(0, Math.min(120, d.faceDeg));
       if (['smallest_wins','biggest_wins','random'].includes(d.rule)) sg.tuning.rule = d.rule;
-      console.log(`[${lobbyId}] ss-tune(TEST): n2n=${sg.tuning.noseScale} nbody=${sg.tuning.bodyScale} grazePx=${sg.tuning.grazePx} circDeg=${sg.tuning.circDeg} faceDeg=${sg.tuning.faceDeg} rule=${sg.tuning.rule}`);
+      console.log(`[${lobbyId}] ss-tune(TEST): n2n=${sg.tuning.n2nScale} body=${sg.tuning.bodyScale} grazePx=${sg.tuning.grazePx} circDeg=${sg.tuning.circDeg} faceDeg=${sg.tuning.faceDeg} rule=${sg.tuning.rule}`);
       return;
     }
     if (typeof d.hbs === 'number') sg.tuning.hbs = Math.max(0.5, Math.min(3.0, d.hbs));

@@ -667,18 +667,18 @@ body.mctl #voice-speakers{left:150px;}
   <div id="tun-nose" style="display:none;">
     <div style="color:#FF66FF;font-size:9px;margin-bottom:6px;letter-spacing:1px;">🧪 TEST-LOBBY HITBOXES (independent)</div>
     <div style="margin-bottom:11px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">N2N nose radius (×thick)</span><span id="tun-nose-val" style="color:#FF66FF;min-width:44px;text-align:right;">0.35×</span></div>
-      <input type="range" id="tun-noseScale" min="0.10" max="1.00" step="0.01" value="0.35" oninput="_onTuning()" style="width:100%;accent-color:#FF66FF;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">N2N head-on distance (×R)</span><span id="tun-nose-val" style="color:#FF66FF;min-width:44px;text-align:right;">0.55×</span></div>
+      <input type="range" id="tun-n2nScale" min="0.20" max="1.20" step="0.01" value="0.55" oninput="_onTuning()" style="width:100%;accent-color:#FF66FF;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>normal head-on only</span></div>
     </div>
     <div style="margin-bottom:11px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">Nose-to-body radius (×thick)</span><span id="tun-body-val" style="color:#39FF14;min-width:44px;text-align:right;">0.90×</span></div>
-      <input type="range" id="tun-bodyScale" min="0.30" max="1.50" step="0.02" value="0.90" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
-      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>normal body collision</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">Body radius (×drawn, 1=solid)</span><span id="tun-body-val" style="color:#39FF14;min-width:44px;text-align:right;">1.00×</span></div>
+      <input type="range" id="tun-bodyScale" min="0.50" max="1.20" step="0.02" value="1.00" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>tighter</span><span>solid surface</span></div>
     </div>
     <div style="margin-bottom:11px;border-top:1px solid #2a1a3a;padding-top:9px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;">◆ Circle graze radius (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">3 px</span></div>
-      <input type="range" id="tun-grazePx" min="1" max="12" step="1" value="3" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;">◆ Circle graze radius (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">2 px</span></div>
+      <input type="range" id="tun-grazePx" min="0.5" max="8" step="0.5" value="2" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>pixel-perfect</span><span>forgiving</span></div>
     </div>
     <div style="margin-bottom:11px;">
@@ -1124,7 +1124,7 @@ let _autoCircle=false; // toggle: snake auto-circles until toggled off (E key / 
 let _lastRoomId=null;
 let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // Separate tuning for the isolated hitbox test lobby (nose/body model). Never sent to any other lobby.
-let _tuningTest={noseScale:0.35,bodyScale:0.90,grazePx:3,circDeg:340,faceDeg:45,rule:'biggest_wins'};
+let _tuningTest={n2nScale:0.55,bodyScale:1.0,grazePx:2,circDeg:340,faceDeg:45,rule:'biggest_wins'};
 try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv&&localStorage.getItem('ss_owner')==='1')Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
 let _showTuning=false;
 let _botCount=0,_isPractice=false;
@@ -3802,7 +3802,7 @@ function launchSnakeGame(){
   // Push to server regardless of isHost — in ss-* lobbies the owner isn't always amFirst.
   if(localStorage.getItem('ss_owner')==='1'){
     if(_isTestLobby()){
-      try{const _sv=localStorage.getItem('ss_tuning_test3');if(_sv)Object.assign(_tuningTest,JSON.parse(_sv));}catch(_){}
+      try{const _sv=localStorage.getItem('ss_tuning_test4');if(_sv)Object.assign(_tuningTest,JSON.parse(_sv));}catch(_){}
       if(_sio)_sio.emit('ss-tune',_tuningTest); // separate nose/body tuning — test lobby only
     }else{
       try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv)Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
@@ -3840,18 +3840,18 @@ function _toggleTuning(){
 }
 function _onTuning(){
   if(_isTestLobby()){
-    _tuningTest.noseScale=+document.getElementById('tun-noseScale').value;
+    _tuningTest.n2nScale =+document.getElementById('tun-n2nScale').value;
     _tuningTest.bodyScale=+document.getElementById('tun-bodyScale').value;
     _tuningTest.grazePx  =+document.getElementById('tun-grazePx').value;
     _tuningTest.circDeg  =+document.getElementById('tun-circDeg').value;
     _tuningTest.faceDeg  =+document.getElementById('tun-faceDegT').value;
     _tuningTest.rule     = document.getElementById('tun-rule').value;
-    document.getElementById('tun-nose-val').textContent =_tuningTest.noseScale.toFixed(2)+'×';
+    document.getElementById('tun-nose-val').textContent =_tuningTest.n2nScale.toFixed(2)+'×';
     document.getElementById('tun-body-val').textContent =_tuningTest.bodyScale.toFixed(2)+'×';
     document.getElementById('tun-graze-val').textContent=_tuningTest.grazePx+' px';
     document.getElementById('tun-circ-val').textContent =_tuningTest.circDeg+'°';
     document.getElementById('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
-    try{localStorage.setItem('ss_tuning_test3',JSON.stringify(_tuningTest));}catch(_){}
+    try{localStorage.setItem('ss_tuning_test4',JSON.stringify(_tuningTest));}catch(_){}
     if(_sio)_sio.emit('ss-tune',_tuningTest);
     return;
   }
@@ -3873,9 +3873,9 @@ function _syncTuningUI(){
   if(e('tun-normal'))e('tun-normal').style.display=_test?'none':'block';
   if(e('tun-nose'))  e('tun-nose').style.display  =_test?'block':'none';
   if(_test){
-    e('tun-noseScale').value=_tuningTest.noseScale; e('tun-nose-val').textContent=_tuningTest.noseScale.toFixed(2)+'×';
+    if(e('tun-n2nScale')){e('tun-n2nScale').value=_tuningTest.n2nScale; e('tun-nose-val').textContent=(_tuningTest.n2nScale||0.55).toFixed(2)+'×';}
     e('tun-bodyScale').value=_tuningTest.bodyScale; e('tun-body-val').textContent=_tuningTest.bodyScale.toFixed(2)+'×';
-    if(e('tun-grazePx')){e('tun-grazePx').value=_tuningTest.grazePx; e('tun-graze-val').textContent=(_tuningTest.grazePx||3)+' px';}
+    if(e('tun-grazePx')){e('tun-grazePx').value=_tuningTest.grazePx; e('tun-graze-val').textContent=(_tuningTest.grazePx||2)+' px';}
     if(e('tun-circDeg')){e('tun-circDeg').value=_tuningTest.circDeg; e('tun-circ-val').textContent=(_tuningTest.circDeg||340)+'°';}
     e('tun-faceDegT').value =_tuningTest.faceDeg;   e('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
     e('tun-rule').value=_tuningTest.rule||'biggest_wins';
@@ -5019,42 +5019,43 @@ function drawSnake(snake){
     }
   }
 
-  // Test-lobby H-overlay — shows the isolated test hitboxes (not the H2H rings). Radii use msThick
-  // (mirrors the server's `thick`) so they match server collision. The CIRCLE-GRAZE shell only lights
-  // up on a snake that has completed a valid circle (sd.sp) — i.e. whose head is currently grazeable.
+  // Test-lobby H-overlay — hitboxes now use the DRAWN radius (sectionRadius = the sprite), so the rings
+  // sit exactly on the body/head surface, matching the server collision 1:1. Green ring = the solid body
+  // surface (nose touches it → die). Gold shell = the tiny circle-graze window at the head (lit only when
+  // the snake has completed a valid circle, sd.sp). Cyan dot = the visual nose tip used for collision.
   if(_showHitboxes && SG && _isTestLobby()){
-    const th=msThick(snake), T=_tuningTest, ang=snake.angle||0;
-    const nx=h.x+Math.cos(ang)*th, ny=h.y+Math.sin(ang)*th; // nose point (~1×thick fwd, matches server)
-    const grazePx=T.grazePx||3;
+    const R=sectionRadius(snake), T=_tuningTest, ang=snake.angle||0;
+    const nx=h.x+Math.cos(ang)*R, ny=h.y+Math.sin(ang)*R; // visual nose tip (matches server nose)
+    const grazePx=T.grazePx||2;
     ctx.save();
-    // nose-to-body radius (normal) — faint green ring
-    ctx.strokeStyle='rgba(57,255,20,0.30)';ctx.lineWidth=1.3/_camZoom;
-    ctx.beginPath();ctx.arc(h.x,h.y,th*(T.bodyScale||0.9),0,Math.PI*2);ctx.stroke();
-    // CIRCLE-GRAZE shell — a thin band at the head SURFACE (radius th ± grazePx). Bright gold + fill
-    // ONLY when circle-active (head grazeable); otherwise a faint hint so you can see where it will be.
+    // body surface (nose-to-body kill radius) — green ring right at the drawn edge
+    ctx.strokeStyle='rgba(57,255,20,0.45)';ctx.lineWidth=1.5/_camZoom;
+    ctx.beginPath();ctx.arc(h.x,h.y,R*(T.bodyScale||1.0),0,Math.PI*2);ctx.stroke();
+    // CIRCLE-GRAZE shell — thin band at the head surface (R ± grazePx). Bright gold + fill ONLY when
+    // circle-active (head grazeable); otherwise a faint dashed hint at the surface.
     const active=!!snake.spinning;
     ctx.setLineDash([]);
     if(active){
-      ctx.fillStyle='rgba(255,215,0,0.10)';ctx.beginPath();ctx.arc(h.x,h.y,th+grazePx,0,Math.PI*2);ctx.arc(h.x,h.y,Math.max(1,th-grazePx),0,Math.PI*2,true);ctx.fill('evenodd');
+      ctx.fillStyle='rgba(255,215,0,0.14)';ctx.beginPath();ctx.arc(h.x,h.y,R+grazePx,0,Math.PI*2);ctx.arc(h.x,h.y,Math.max(1,R-grazePx),0,Math.PI*2,true);ctx.fill('evenodd');
       ctx.strokeStyle='rgba(255,215,0,1.0)';ctx.lineWidth=1.6/_camZoom;
-      ctx.beginPath();ctx.arc(h.x,h.y,th+grazePx,0,Math.PI*2);ctx.stroke();
-      ctx.beginPath();ctx.arc(h.x,h.y,Math.max(1,th-grazePx),0,Math.PI*2);ctx.stroke();
+      ctx.beginPath();ctx.arc(h.x,h.y,R+grazePx,0,Math.PI*2);ctx.stroke();
+      ctx.beginPath();ctx.arc(h.x,h.y,Math.max(1,R-grazePx),0,Math.PI*2);ctx.stroke();
       ctx.fillStyle='rgba(255,215,0,0.95)';ctx.font=(10/_camZoom)+'px Orbitron,sans-serif';ctx.textAlign='center';
-      ctx.fillText('CIRCLE ✓ GRAZEABLE',h.x,h.y-(th+grazePx)-6/_camZoom);
+      ctx.fillText('CIRCLE ✓ GRAZEABLE',h.x,h.y-(R+grazePx)-6/_camZoom);
     }else{
       ctx.strokeStyle='rgba(255,215,0,0.22)';ctx.lineWidth=1/_camZoom;ctx.setLineDash([3/_camZoom,4/_camZoom]);
-      ctx.beginPath();ctx.arc(h.x,h.y,th,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+      ctx.beginPath();ctx.arc(h.x,h.y,R,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
     }
     // N2N head-on gate lines — cyan dashed
-    const faceRad=(T.faceDeg||45)*Math.PI/180, gl=th*2.2;
+    const faceRad=(T.faceDeg||45)*Math.PI/180, gl=R*2.2;
     ctx.strokeStyle='rgba(0,220,255,0.8)';ctx.lineWidth=1.3/_camZoom;ctx.setLineDash([5/_camZoom,4/_camZoom]);
     ctx.beginPath();
     ctx.moveTo(h.x,h.y);ctx.lineTo(h.x+Math.cos(ang-faceRad)*gl,h.y+Math.sin(ang-faceRad)*gl);
     ctx.moveTo(h.x,h.y);ctx.lineTo(h.x+Math.cos(ang+faceRad)*gl,h.y+Math.sin(ang+faceRad)*gl);
     ctx.stroke();ctx.setLineDash([]);
-    // N2N nose point — cyan dot, radius = nose-nose half
+    // visual nose tip — cyan dot
     ctx.fillStyle='rgba(0,255,255,0.95)';ctx.shadowColor='#00FFFF';ctx.shadowBlur=6;
-    ctx.beginPath();ctx.arc(nx,ny,Math.max(1.5,th*(T.noseScale||0.35)),0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(nx,ny,Math.max(1.5,3/_camZoom),0,Math.PI*2);ctx.fill();
     ctx.restore();
   }
   // Head hitbox + H2H zone — H-key only (no always-on ring to avoid confusing visuals)
