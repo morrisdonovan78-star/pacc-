@@ -756,6 +756,7 @@ const TICK_MS      = 33;    // 30 TPS
 // damnbruh.com exact physics constants (extracted from page-d38402305f41a2e6.js)
 const SIZE_PER_SEGMENT   = 5;    // segments = floor(size / 5)
 const SEGMENT_SPACING    = 0.5;  // segmentSpacing = radius * 0.5
+const SS_N2N_FWD         = 0.75; // N2N nose-patch forward offset (× head radius) — MUST match server ssN2NNose
 const BASE_RADIUS        = 8;    // minimum snake radius
 const RADIUS_GROWTH      = 0.6;  // exponent for radius curve
 const RADIUS_SCALE       = 0.8;  // multiplier for radius curve
@@ -5175,12 +5176,14 @@ function drawSnake(snake){
       ctx.strokeStyle='rgba(255,215,0,0.20)';ctx.lineWidth=1/_camZoom;ctx.setLineDash([3/_camZoom,4/_camZoom]);
       ctx.beginPath();ctx.arc(h.x,h.y,R,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
     }
-    // N2N nose region — small magenta circle at the nose tip (the between-the-eyes nose), radius ≈ R*n2nScale
+    // N2N nose region — small magenta circle on the between-the-eyes nose PATCH (matches server ssN2NNose:
+    // centre at R*SS_N2N_FWD forward, radius R*n2nScale). This is the head-on nose-to-nose target.
+    const n2x=h.x+Math.cos(ang)*R*SS_N2N_FWD, n2y=h.y+Math.sin(ang)*R*SS_N2N_FWD;
     const nR=Math.max(2,R*(T.n2nScale||0.30));
     ctx.strokeStyle='rgba(255,102,255,0.9)';ctx.lineWidth=1.4/_camZoom;
-    ctx.beginPath();ctx.arc(nx,ny,nR,0,Math.PI*2);ctx.stroke();
+    ctx.beginPath();ctx.arc(n2x,n2y,nR,0,Math.PI*2);ctx.stroke();
     ctx.fillStyle='rgba(255,102,255,0.95)';ctx.shadowColor='#FF66FF';ctx.shadowBlur=5;
-    ctx.beginPath();ctx.arc(nx,ny,Math.max(1.2,2/_camZoom),0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(n2x,n2y,Math.max(1.2,2/_camZoom),0,Math.PI*2);ctx.fill();
     ctx.restore();
   }
   // Head hitbox + H2H zone — H-key only (no always-on ring to avoid confusing visuals)
@@ -5260,6 +5263,14 @@ function _drawHeadCircle(snake,r){
   ctx.fillStyle='rgba(255,255,255,0.75)';
   ctx.beginPath();ctx.arc(eFwd+_pDx-eR*0.08,-eSide+_pDy-eR*0.15,eR*0.22,0,Math.PI*2);ctx.fill();
   ctx.beginPath();ctx.arc(eFwd+_pDx-eR*0.08, eSide+_pDy-eR*0.15,eR*0.22,0,Math.PI*2);ctx.fill();
+
+  // Test lobby: draw the N2N nose PATCH (between the eyes) as a small red ring so the head-on target is
+  // visible during play — this circle IS the server N2N hitbox (centre R*SS_N2N_FWD fwd, radius R*n2nScale).
+  if(_tEye){
+    const _nfx=r*SS_N2N_FWD, _nr=Math.max(2,r*((_tuningTest&&_tuningTest.n2nScale)||0.30));
+    ctx.strokeStyle='rgba(255,70,70,0.95)';ctx.lineWidth=1.8;
+    ctx.beginPath();ctx.arc(_nfx,0,_nr,0,Math.PI*2);ctx.stroke();
+  }
 
   // (Boost flame removed — the red/orange flame behind the head was distracting; the rainbow glow
   // along the body already signals boosting, which is the effect we keep.)

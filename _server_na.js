@@ -1247,6 +1247,11 @@ function ssUpdateCircleState(sn, sg) {
 //    dies. bodyScale=1.0 → die exactly at the drawn surface, ZERO visible overlap. Bodies are ALWAYS
 //    solid (immunity is a death-shield only, enforced in kill(); it never removes a body from checks).
 function ssNoseTip(s) { const r = ssSectionRadius(s.ns); return { x: s.x + Math.cos(s.angle) * r, y: s.y + Math.sin(s.angle) * r }; }
+// N2N nose = the small nose PATCH between the eyes (front-of-face), NOT the extreme front tip. Used ONLY
+// by STEP 2 (head-on nose-to-nose) so the collision sits on the VISIBLE nose. Circle-graze (STEP 1) and
+// nose-to-body (STEP 3) still use the tip (ssNoseTip). Test lobby only — no other lobby calls this path.
+const SS_N2N_FWD = 0.75; // forward offset (× head radius) of the nose-patch centre — between-the-eyes spot
+function ssN2NNose(s) { const r = ssSectionRadius(s.ns) * SS_N2N_FWD; return { x: s.x + Math.cos(s.angle) * r, y: s.y + Math.sin(s.angle) * r }; }
 function ssCheckCollisionsNose(sg, lid, io) {
   const T = sg.tuning || {};
   const n2nScale  = T.n2nScale != null ? T.n2nScale : 0.55; // N2N head-on distance (×(Ra+Rb)) — head-to-head
@@ -1317,9 +1322,9 @@ function ssCheckCollisionsNose(sg, lid, io) {
     const p = alive[i]; if (died.has(p.pid)) continue;
     for (let j = i + 1; j < alive.length; j++) {
       const q = alive[j]; if (died.has(q.pid)) continue;
-      const np = noses.get(p.pid), nq = noses.get(q.pid);
+      const np = ssN2NNose(p), nq = ssN2NNose(q);      // small nose PATCH between the eyes (front-of-face)
       const nd = Math.hypot(nq.x - np.x, nq.y - np.y);
-      if (nd > (Rv(p) + Rv(q)) * n2nScale) continue; // nose tips not touching
+      if (nd > (Rv(p) + Rv(q)) * n2nScale) continue; // nose patches not overlapping → no N2N
       const dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
       const pFace = (Math.cos(p.angle) * dx + Math.sin(p.angle) * dy) / d;
       const qFace = (Math.cos(q.angle) * -dx + Math.sin(q.angle) * -dy) / d;
