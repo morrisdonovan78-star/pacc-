@@ -671,8 +671,8 @@ body.mctl #voice-speakers{left:150px;}
       <div style="font-size:9px;color:#555;">the face arc BETWEEN THE EYES — part of the snake's outline, fixed by the sprite's eye geometry (not tunable)</div>
     </div>
     <div style="margin-bottom:11px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">Body radius (×drawn, 1=solid)</span><span id="tun-body-val" style="color:#39FF14;min-width:44px;text-align:right;">1.00×</span></div>
-      <input type="range" id="tun-bodyScale" min="0.50" max="1.20" step="0.02" value="1.00" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;" title="Circle skim HITBOX scale: multiplies a CIRCLING snake's head radius for the trail-kill check only. Smaller = smaller hitbox, so your head can visually skim deeper into the body before it counts as reaching the trail. 1.0 = normal.">Circle skim hitbox (×head, circler)</span><span id="tun-body-val" style="color:#39FF14;min-width:44px;text-align:right;">1.00×</span></div>
+      <input type="range" id="tun-bodyScale" min="0.30" max="1.20" step="0.02" value="1.00" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>tighter</span><span>solid surface</span></div>
     </div>
     <div style="margin-bottom:11px;border-top:1px solid #2a1a3a;padding-top:9px;">
@@ -1124,7 +1124,11 @@ let _autoCircle=false; // toggle: snake auto-circles until toggled off (E key / 
 let _lastRoomId=null;
 let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // Separate tuning for the isolated hitbox test lobby (nose/body model). Never sent to any other lobby.
-let _tuningTest={bodyScale:1.0,grazePx:1.0,circDeg:360,faceDeg:60,rule:'biggest_wins'};
+// SINGLE SOURCE OF TRUTH for test-lobby defaults — RESET restores exactly this, so it always
+// reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
+// bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
+const _TEST_DEFAULTS={bodyScale:1.0,grazePx:1.0,circDeg:360,faceDeg:60,rule:'biggest_wins'};
+let _tuningTest={..._TEST_DEFAULTS};
 try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv&&localStorage.getItem('ss_owner')==='1')Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
 let _showTuning=false;
 let _botCount=0,_isPractice=false;
@@ -3911,6 +3915,16 @@ function _syncTuningUI(){
   _drawTuningPreview();
 }
 function _resetTuning(){
+  // In the TEST lobby, reset the TEST tuning to the CURRENT code defaults (_TEST_DEFAULTS),
+  // clear its cached localStorage, and push to the server — never leave stale/old values.
+  if(typeof _isTestLobby==='function' && _isTestLobby()){
+    _tuningTest={..._TEST_DEFAULTS};
+    try{localStorage.removeItem('ss_tuning_test8');}catch(_){}
+    _syncTuningUI();
+    if(_sio)_sio.emit('ss-tune',_tuningTest);
+    addToast('Test tuning reset to current defaults','#888');
+    return;
+  }
   _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
   try{localStorage.removeItem('ss_tuning_v4');}catch(_){}
   _syncTuningUI();
