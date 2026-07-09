@@ -1238,29 +1238,23 @@ function ssUpdateCircleState(sn, sg) {
 // draws the body/head at — so the hitbox matches the sprite exactly. (The old code collided at
 // `ssThick`, a ~1.6× SMALLER radius, so a nose could sink 20-38px into the drawn body before dying —
 // the "drive through the body" bug. Proven + fixed in scratchpad solid_body_sim.js / fixed_collide_sim.js.)
-// The nose is the VISUAL nose tip = head + heading*ssSectionRadius. Priority per frame:
-//  STEP 1 CIRCLE-GRAZE (VALID_CIRCLE_ACTIVE defender only, FIRST): the kill is the SLIGHTEST clip of the
-//    circling snake's HEAD surface (nose gap∈[-grazeIn,+grazePx] of Rvis(def), grazePx tiny/tunable to
-//    0.01). Its ENTIRE coil body is fully solid to the grazer (no neck skip) — touch the body anywhere,
-//    or punch past the head band, and the GRAZER dies. Undercommit → nothing; overcommit → you die.
-//  STEP 2 N2N head-on: the two NOSE TIPS within (Ra+Rb)*n2nScale AND both facing → bigger wins.
-//  STEP 3 NOSE-TO-BODY: nose tip within Rvis(def)*bodyScale of a body (past a one-head neck) → attacker
-//    dies. bodyScale=1.0 → die exactly at the drawn surface, ZERO visible overlap. Bodies are ALWAYS
-//    solid (immunity is a death-shield only, enforced in kill(); it never removes a body from checks).
-function ssNoseTip(s) { const r = ssSectionRadius(s.ns); return { x: s.x + Math.cos(s.angle) * r, y: s.y + Math.sin(s.angle) * r }; }
-// N2N nose = the small nose PATCH between the eyes (front-of-face), NOT the extreme front tip. Used ONLY
-// by STEP 2 (head-on nose-to-nose) so the collision sits on the VISIBLE nose. Circle-graze (STEP 1) and
-// nose-to-body (STEP 3) still use the tip (ssNoseTip). Test lobby only — no other lobby calls this path.
-const SS_N2N_FWD = 0.75; // forward offset (× head radius) of the nose-patch centre — between-the-eyes spot
-function ssN2NNose(s) { const r = ssSectionRadius(s.ns) * SS_N2N_FWD; return { x: s.x + Math.cos(s.angle) * r, y: s.y + Math.sin(s.angle) * r }; }
+// ── THE NOSE (test lobby) — part of the snake's OUTLINE, not a point/disc/offset shape ──
+// The nose is the ARC of the head circle between the two eyes. Derived from the client's test-lobby face
+// (slither-snakes.html: eyes at (+0.52r, ±0.37r), eye radius 0.42r): each eye disc covers the outline from
+// 20.1°..50.8° off the heading, so the exposed face arc BETWEEN the eyes is exactly ±20.1° around the
+// heading. A contact "counts as nose" when the contact point on the head circle lies inside that arc —
+// i.e. the direction head-centre → contact point is within SS_NOSE_ARC of the snake's heading. No bigger,
+// no smaller, and it sits ON the visible outline (the head circle itself, radius = sectionRadius).
+const SS_NOSE_ARC = 20.1 * Math.PI / 180; // half-angle of the face arc between the eyes
 function ssCheckCollisionsNose(sg, lid, io) {
   // ── ss-test-lobby collision — NORMAL collision (always) kept SEPARATE from the SPECIAL circle graze ──
   // All geometry uses the DRAWN radius (sectionRadius) and resolves on the SAME substep (no queues/delays).
   //  NORMAL (always, every snake):
   //    1) BODY: your HEAD CIRCLE (Ra) vs another snake's BODY (past the neck), SWEPT → YOU die. Accurate,
   //       angle-independent, no visual penetration, no tunneling.
-  //    3) N2N: tiny NOSE disc vs tiny NOSE disc + both facing → head-on duel, bigger wins. ONLY when
-  //       neither snake is a circling defender (a circling defender is handled by the graze instead).
+  //    3) N2N: NOSE OUTLINE-ARC vs NOSE OUTLINE-ARC — the heads' circles touch AND the contact point lies
+  //       on BOTH snakes' nose arcs (±SS_NOSE_ARC of heading, i.e. the visible face between the eyes) →
+  //       bigger wins. ONLY when neither snake is a circling defender (that's the graze instead).
   //  SPECIAL circle graze (2) — ONLY vs a defender whose circleActive is TRUE (a completed valid circle):
   //    Over the ATTACKER's swept head this substep, take the CLOSEST head-centre distance to the circling
   //    head → overlap = (Ra+Rd) - minDist.  overlap<=0 → nothing;  0<overlap<=grazeTol → the CIRCLER dies
@@ -1270,9 +1264,8 @@ function ssCheckCollisionsNose(sg, lid, io) {
   //    coil anywhere → attacker dies first). If the defender is NOT circling, this special kill does NOT
   //    exist — normal rules only.
   const T = sg.tuning || {};
-  const noseScale = T.n2nScale != null ? T.n2nScale : 0.16; // TINY N2N nose disc radius (×R)
-  const grazeTol  = T.grazePx  != null ? T.grazePx  : 1.5;  // circle-graze head-overlap tolerance in px (1-2)
-  const faceCos   = Math.cos(((T.faceDeg != null ? T.faceDeg : 60)) * Math.PI / 180);
+  const grazeTol   = T.grazePx != null ? T.grazePx : 1.5;   // circle-graze head-overlap tolerance in px (1-2)
+  const noseCosMin = Math.cos(SS_NOSE_ARC);                 // contact must land on the outline arc between the eyes
   const rule = T.rule || 'biggest_wins';
   const now = Date.now();
   const alive = [...sg.snakes.values()].filter(s => s.alive && s.path && s.path.length > 1);
@@ -1289,7 +1282,6 @@ function ssCheckCollisionsNose(sg, lid, io) {
   };
   const R = s => ssSectionRadius(s.ns);
   const prevHead = s => ({ x: s._chpx != null ? s._chpx : s.x, y: s._chpy != null ? s._chpy : s.y });
-  const noseAt = (s) => { const r = R(s) * SS_N2N_FWD; return { x: s.x + Math.cos(s.angle) * r, y: s.y + Math.sin(s.angle) * r }; };
   const sweep = (ax, ay, bx, by, step) => {           // sample a swept point A→B so a fast head can't tunnel
     const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / step)), out = [];
     for (let i = 0; i <= n; i++) out.push({ x: ax + (bx - ax) * i / n, y: ay + (by - ay) * i / n });
@@ -1338,23 +1330,32 @@ function ssCheckCollisionsNose(sg, lid, io) {
       const overlap = reach - Math.hypot(D.x - cx, D.y - cy);
       if (overlap <= 0) continue;                                                             // undercommit / miss
       if (overlap > grazeTol) { kill(A, D, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now }); continue; } // too deep → attacker
-      if (t < 0.999) kill(D, A, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now });            // reached closest, in band → circler
+      // In the band: the graze ONLY kills if the attacker STRUCK WITH THE FACE — the contact point on the
+      // attacker's head must lie on the NOSE ARC (the outline between the eyes). A circling head sweeping
+      // back into the SIDE of a bystander's head is NOT a graze (this was the "they die a full loop after
+      // my missed attempt" bug) — that brush does nothing.
+      if (t < 0.999) {
+        const ndx = D.x - cx, ndy = D.y - cy, nd = Math.hypot(ndx, ndy) || 1;
+        if ((Math.cos(A.angle) * ndx + Math.sin(A.angle) * ndy) / nd >= noseCosMin)
+          kill(D, A, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now });                       // face-struck, in band → circler
+      }
     }
   }
 
-  // 3) N2N (normal head-on) — tiny nose vs tiny nose + facing, bigger wins. Skipped for circling pairs
-  //    (those are the special graze above); this is the ordinary head-on that exists in every fight.
+  // 3) N2N (normal head-on) — NOSE OUTLINE vs NOSE OUTLINE, bigger wins. The nose is the arc of each head's
+  //    outline between the eyes (SS_NOSE_ARC). Contact between two circles happens on the line between the
+  //    centres, so: heads' circles touch (dist ≤ Ra+Rd) AND that contact direction lies on BOTH snakes'
+  //    nose arcs → the visible noses touched. Skipped for circling pairs (those are the graze above).
   for (let i = 0; i < alive.length; i++) {
     const A = alive[i]; if (died.has(A.pid) || A.circleActive) continue;
     for (let j = i + 1; j < alive.length; j++) {
       const D = alive[j]; if (died.has(D.pid) || D.circleActive) continue;
-      const Ra = R(A), Rd = R(D), rnA = Math.max(2, Ra * noseScale), rnD = Math.max(2, Rd * noseScale);
-      const nA = noseAt(A), nD = noseAt(D);
-      if (Math.hypot(nA.x - nD.x, nA.y - nD.y) > rnA + rnD) continue;                       // tiny noses not touching
+      const Ra = R(A), Rd = R(D);
       const dx = D.x - A.x, dy = D.y - A.y, dd = Math.hypot(dx, dy) || 1;
-      const aFace = (Math.cos(A.angle) * dx + Math.sin(A.angle) * dy) / dd;
-      const dFace = (Math.cos(D.angle) * -dx + Math.sin(D.angle) * -dy) / dd;
-      if (aFace < faceCos || dFace < faceCos) continue;                                     // not a true head-on
+      if (dd > Ra + Rd) continue;                                                           // outlines not touching
+      const aNose = (Math.cos(A.angle) * dx + Math.sin(A.angle) * dy) / dd;                 // contact dir vs A heading
+      const dNose = (Math.cos(D.angle) * -dx + Math.sin(D.angle) * -dy) / dd;               // contact dir vs D heading
+      if (aNose < noseCosMin || dNose < noseCosMin) continue;                               // contact not on both nose arcs
       let aWins; if (A.size === D.size) aWins = Math.random() < 0.5; else if (rule === 'smallest_wins') aWins = A.size < D.size; else if (rule === 'random') aWins = Math.random() < 0.5; else aWins = A.size > D.size;
       kill(aWins ? D : A, aWins ? A : D, { stage: 'N2N', reason: rule, tick: sg.tick, t: now });
     }

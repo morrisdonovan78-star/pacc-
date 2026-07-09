@@ -667,9 +667,8 @@ body.mctl #voice-speakers{left:150px;}
   <div id="tun-nose" style="display:none;">
     <div style="color:#FF66FF;font-size:9px;margin-bottom:6px;letter-spacing:1px;">🧪 TEST-LOBBY HITBOXES (independent)</div>
     <div style="margin-bottom:11px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">N2N nose size (×R)</span><span id="tun-nose-val" style="color:#FF66FF;min-width:44px;text-align:right;">0.18×</span></div>
-      <input type="range" id="tun-n2nScale" min="0.06" max="0.60" step="0.01" value="0.18" oninput="_onTuning()" style="width:100%;accent-color:#FF66FF;">
-      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>tiny nose</span><span>wide</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">N2N nose</span><span id="tun-nose-val" style="color:#FF66FF;text-align:right;">outline arc ±20.1°</span></div>
+      <div style="font-size:9px;color:#555;">the face arc BETWEEN THE EYES — part of the snake's outline, fixed by the sprite's eye geometry (not tunable)</div>
     </div>
     <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">Body radius (×drawn, 1=solid)</span><span id="tun-body-val" style="color:#39FF14;min-width:44px;text-align:right;">1.00×</span></div>
@@ -756,7 +755,7 @@ const TICK_MS      = 33;    // 30 TPS
 // damnbruh.com exact physics constants (extracted from page-d38402305f41a2e6.js)
 const SIZE_PER_SEGMENT   = 5;    // segments = floor(size / 5)
 const SEGMENT_SPACING    = 0.5;  // segmentSpacing = radius * 0.5
-const SS_N2N_FWD         = 0.75; // N2N nose-patch forward offset (× head radius) — MUST match server ssN2NNose
+// N2N nose = the arc of the head OUTLINE within ±20.1° of heading (between the eyes) — server SS_NOSE_ARC.
 const BASE_RADIUS        = 8;    // minimum snake radius
 const RADIUS_GROWTH      = 0.6;  // exponent for radius curve
 const RADIUS_SCALE       = 0.8;  // multiplier for radius curve
@@ -1125,7 +1124,7 @@ let _autoCircle=false; // toggle: snake auto-circles until toggled off (E key / 
 let _lastRoomId=null;
 let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // Separate tuning for the isolated hitbox test lobby (nose/body model). Never sent to any other lobby.
-let _tuningTest={n2nScale:0.16,bodyScale:1.0,grazePx:1.5,circDeg:360,faceDeg:60,rule:'biggest_wins'};
+let _tuningTest={bodyScale:1.0,grazePx:1.5,circDeg:360,faceDeg:60,rule:'biggest_wins'};
 try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv&&localStorage.getItem('ss_owner')==='1')Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
 let _showTuning=false;
 let _botCount=0,_isPractice=false;
@@ -3827,7 +3826,7 @@ function launchSnakeGame(){
   // Push to server regardless of isHost — in ss-* lobbies the owner isn't always amFirst.
   if(localStorage.getItem('ss_owner')==='1'){
     if(_isTestLobby()){
-      try{const _sv=localStorage.getItem('ss_tuning_test7');if(_sv)Object.assign(_tuningTest,JSON.parse(_sv));}catch(_){}
+      try{const _sv=localStorage.getItem('ss_tuning_test8');if(_sv)Object.assign(_tuningTest,JSON.parse(_sv));}catch(_){}
       if(_sio)_sio.emit('ss-tune',_tuningTest); // separate nose/body tuning — test lobby only
     }else{
       try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv)Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
@@ -3867,18 +3866,16 @@ function _toggleTuning(){
 }
 function _onTuning(){
   if(_isTestLobby()){
-    _tuningTest.n2nScale =+document.getElementById('tun-n2nScale').value;
     _tuningTest.bodyScale=+document.getElementById('tun-bodyScale').value;
     _tuningTest.grazePx  =+document.getElementById('tun-grazePx').value;
     _tuningTest.circDeg  =+document.getElementById('tun-circDeg').value;
     _tuningTest.faceDeg  =+document.getElementById('tun-faceDegT').value;
     _tuningTest.rule     = document.getElementById('tun-rule').value;
-    document.getElementById('tun-nose-val').textContent =_tuningTest.n2nScale.toFixed(2)+'×';
     document.getElementById('tun-body-val').textContent =_tuningTest.bodyScale.toFixed(2)+'×';
     document.getElementById('tun-graze-val').textContent=_tuningTest.grazePx.toFixed(2)+' px';
     document.getElementById('tun-circ-val').textContent =_tuningTest.circDeg+'°';
     document.getElementById('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
-    try{localStorage.setItem('ss_tuning_test7',JSON.stringify(_tuningTest));}catch(_){}
+    try{localStorage.setItem('ss_tuning_test8',JSON.stringify(_tuningTest));}catch(_){}
     if(_sio)_sio.emit('ss-tune',_tuningTest);
     return;
   }
@@ -3900,7 +3897,6 @@ function _syncTuningUI(){
   if(e('tun-normal'))e('tun-normal').style.display=_test?'none':'block';
   if(e('tun-nose'))  e('tun-nose').style.display  =_test?'block':'none';
   if(_test){
-    if(e('tun-n2nScale')){e('tun-n2nScale').value=_tuningTest.n2nScale; e('tun-nose-val').textContent=(_tuningTest.n2nScale||0.30).toFixed(2)+'×';}
     e('tun-bodyScale').value=_tuningTest.bodyScale; e('tun-body-val').textContent=_tuningTest.bodyScale.toFixed(2)+'×';
     if(e('tun-grazePx')){e('tun-grazePx').value=_tuningTest.grazePx; e('tun-graze-val').textContent=(_tuningTest.grazePx||1).toFixed(2)+' px';}
     if(e('tun-circDeg')){e('tun-circDeg').value=_tuningTest.circDeg; e('tun-circ-val').textContent=(_tuningTest.circDeg||360)+'°';}
@@ -5156,11 +5152,11 @@ function drawSnake(snake){
   //                 any angle, no visual penetration).
   //   GOLD ring   = shown ONLY while this snake is CIRCLING (circle-active): its head is now grazeable —
   //                 bring your head centre to just kiss this surface (≤ graze tol) to kill it; go deeper → you die.
-  //   MAGENTA nose= the TINY N2N nose between the eyes (server pos head+heading*R*0.75) — normal head-on point.
+  //   MAGENTA arc = THE NOSE: part of the OUTLINE itself — the arc of the head circle between the two eyes
+  //                 (±20.1° of heading, exactly the gap the eyes leave on the face). Matches server SS_NOSE_ARC.
   if(_showHitboxes && SG && _isTestLobby()){
-    const R=sectionRadius(snake), T=_tuningTest, ang=snake.angle||0;
-    const nx=h.x+Math.cos(ang)*R*SS_N2N_FWD, ny=h.y+Math.sin(ang)*R*SS_N2N_FWD; // N2N nose centre (matches server)
-    const rn=Math.max(2,R*(T.n2nScale||0.16));                                   // tiny nose radius
+    const R=sectionRadius(snake), ang=snake.angle||0;
+    const NOSE_ARC=20.1*Math.PI/180; // = server SS_NOSE_ARC (eyes at (0.52r,±0.37r) r=0.42r ⇒ face gap ±20.1°)
     ctx.save();
     ctx.strokeStyle='rgba(57,255,20,0.5)';ctx.lineWidth=1.6/_camZoom;            // body/head surface
     ctx.beginPath();ctx.arc(h.x,h.y,R,0,Math.PI*2);ctx.stroke();
@@ -5170,10 +5166,9 @@ function drawSnake(snake){
       ctx.fillStyle='rgba(255,215,0,0.95)';ctx.font=(9/_camZoom)+'px Orbitron,sans-serif';ctx.textAlign='center';
       ctx.fillText('CIRCLING — HEAD GRAZEABLE',h.x,h.y-R-6/_camZoom);
     }
-    // tiny N2N nose (small ellipse — the actual nose between the eyes, not a big circle)
-    ctx.translate(nx,ny);ctx.rotate(ang);
-    ctx.fillStyle='rgba(255,60,150,0.35)';ctx.strokeStyle='rgba(255,60,150,0.95)';ctx.lineWidth=1.3/_camZoom;
-    ctx.beginPath();ctx.ellipse(0,0,rn*0.85,rn*1.15,0,0,Math.PI*2);ctx.fill();ctx.stroke();
+    // THE NOSE — drawn ON the outline: the arc of the head circle between the two eyes, no bigger no smaller
+    ctx.strokeStyle='rgba(255,60,150,1)';ctx.lineWidth=3.5/_camZoom;ctx.lineCap='round';
+    ctx.beginPath();ctx.arc(h.x,h.y,R,ang-NOSE_ARC,ang+NOSE_ARC);ctx.stroke();
     ctx.restore();
   }
   // Head hitbox + H2H zone — H-key only (no always-on ring to avoid confusing visuals)
