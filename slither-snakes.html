@@ -667,8 +667,8 @@ body.mctl #voice-speakers{left:150px;}
   <div id="tun-nose" style="display:none;">
     <div style="color:#FF66FF;font-size:9px;margin-bottom:6px;letter-spacing:1px;">🧪 TEST-LOBBY HITBOXES (independent)</div>
     <div style="margin-bottom:11px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">N2N nose size (×R)</span><span id="tun-nose-val" style="color:#FF66FF;min-width:44px;text-align:right;">0.30×</span></div>
-      <input type="range" id="tun-n2nScale" min="0.10" max="1.20" step="0.01" value="0.30" oninput="_onTuning()" style="width:100%;accent-color:#FF66FF;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">N2N nose size (×R)</span><span id="tun-nose-val" style="color:#FF66FF;min-width:44px;text-align:right;">0.18×</span></div>
+      <input type="range" id="tun-n2nScale" min="0.06" max="0.60" step="0.01" value="0.18" oninput="_onTuning()" style="width:100%;accent-color:#FF66FF;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>tiny nose</span><span>wide</span></div>
     </div>
     <div style="margin-bottom:11px;">
@@ -1125,7 +1125,7 @@ let _autoCircle=false; // toggle: snake auto-circles until toggled off (E key / 
 let _lastRoomId=null;
 let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // Separate tuning for the isolated hitbox test lobby (nose/body model). Never sent to any other lobby.
-let _tuningTest={n2nScale:0.30,bodyScale:1.0,grazePx:1.0,circDeg:360,faceDeg:45,rule:'biggest_wins'};
+let _tuningTest={n2nScale:0.18,bodyScale:1.0,grazePx:1.0,circDeg:360,faceDeg:60,rule:'biggest_wins'};
 try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv&&localStorage.getItem('ss_owner')==='1')Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
 let _showTuning=false;
 let _botCount=0,_isPractice=false;
@@ -3827,7 +3827,7 @@ function launchSnakeGame(){
   // Push to server regardless of isHost — in ss-* lobbies the owner isn't always amFirst.
   if(localStorage.getItem('ss_owner')==='1'){
     if(_isTestLobby()){
-      try{const _sv=localStorage.getItem('ss_tuning_test5');if(_sv)Object.assign(_tuningTest,JSON.parse(_sv));}catch(_){}
+      try{const _sv=localStorage.getItem('ss_tuning_test6');if(_sv)Object.assign(_tuningTest,JSON.parse(_sv));}catch(_){}
       if(_sio)_sio.emit('ss-tune',_tuningTest); // separate nose/body tuning — test lobby only
     }else{
       try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv)Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
@@ -3878,7 +3878,7 @@ function _onTuning(){
     document.getElementById('tun-graze-val').textContent=_tuningTest.grazePx.toFixed(2)+' px';
     document.getElementById('tun-circ-val').textContent =_tuningTest.circDeg+'°';
     document.getElementById('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
-    try{localStorage.setItem('ss_tuning_test5',JSON.stringify(_tuningTest));}catch(_){}
+    try{localStorage.setItem('ss_tuning_test6',JSON.stringify(_tuningTest));}catch(_){}
     if(_sio)_sio.emit('ss-tune',_tuningTest);
     return;
   }
@@ -4875,7 +4875,8 @@ function rafDraw(ts){
     _myEyeAngle=Math.atan2(_mwy-_ph.y,_mwx-_ph.x)-_pS.angle;
   }else{_myEyeAngle=null;}}
   if(SG)SG.snakes.forEach(s=>{if(s.alive&&s.path.length>1)drawSnake(s);});
-  try{_circleProbe();}catch(_e){} // READ-ONLY same-frame render-vs-server geometry capture (test lobby)
+  // (circle-probe retired — the render-vs-server capture proved the nose-point MODEL gap; the collision
+  //  is now head-circle based, so the probe's old-model math no longer applies. Left defined, not called.)
   // Hitbox overlay (H key) and own-snake H2H ring are now drawn inside drawSnake()
   // at body z-level, so circles end exactly where the snake body ends.
 
@@ -5149,41 +5150,20 @@ function drawSnake(snake){
     }
   }
 
-  // Test-lobby H-overlay — hitboxes now use the DRAWN radius (sectionRadius = the sprite), so the rings
-  // sit exactly on the body/head surface, matching the server collision 1:1. Green ring = the solid body
-  // surface (nose touches it → die). Gold shell = the tiny circle-graze window at the head (lit only when
-  // the snake has completed a valid circle, sd.sp). Cyan dot = the visual nose tip used for collision.
+  // Test-lobby H-overlay (H key ONLY — never drawn on the live sprite). Matches the NEW collision model
+  // 1:1 (everything uses the DRAWN radius = sectionRadius):
+  //   GREEN ring   = this snake's BODY/HEAD surface. Your head circle touching it → YOU die (accurate —
+  //                  no nose-point slop, so you can't visually enter it at any angle).
+  //   MAGENTA disc = the TINY nose at the front tip — the strike/N2N point (touch their head with it → win).
   if(_showHitboxes && SG && _isTestLobby()){
     const R=sectionRadius(snake), T=_tuningTest, ang=snake.angle||0;
-    const nx=h.x+Math.cos(ang)*R, ny=h.y+Math.sin(ang)*R; // visual nose tip (matches server nose)
-    const grazePx=(T.grazePx!=null?T.grazePx:1.0), grazeIn=grazePx*0.3;
+    const nx=h.x+Math.cos(ang)*R, ny=h.y+Math.sin(ang)*R;   // front tip = nose centre (server: head+heading*R)
+    const rn=Math.max(2,R*(T.n2nScale||0.18));               // tiny nose disc radius
     ctx.save();
-    // body surface (SOLID to a grazer — the whole coil kills; touch it → you die) — faint green ring
-    ctx.strokeStyle='rgba(57,255,20,0.40)';ctx.lineWidth=1.4/_camZoom;
-    ctx.beginPath();ctx.arc(h.x,h.y,R*(T.bodyScale||1.0),0,Math.PI*2);ctx.stroke();
-    // CIRCLE head-graze band — razor shell at the head surface (R-grazeIn .. R+grazePx). Bright gold +
-    // fill ONLY when circle-active (head grazeable); else a faint dashed hint at the surface.
-    const active=!!snake.spinning;
-    ctx.setLineDash([]);
-    if(active){
-      ctx.fillStyle='rgba(255,215,0,0.16)';ctx.beginPath();ctx.arc(h.x,h.y,R+grazePx,0,Math.PI*2);ctx.arc(h.x,h.y,Math.max(1,R-grazeIn),0,Math.PI*2,true);ctx.fill('evenodd');
-      ctx.strokeStyle='rgba(255,215,0,1.0)';ctx.lineWidth=1.6/_camZoom;
-      ctx.beginPath();ctx.arc(h.x,h.y,R+grazePx,0,Math.PI*2);ctx.stroke();
-      ctx.beginPath();ctx.arc(h.x,h.y,Math.max(1,R-grazeIn),0,Math.PI*2);ctx.stroke();
-      ctx.fillStyle='rgba(255,215,0,0.95)';ctx.font=(10/_camZoom)+'px Orbitron,sans-serif';ctx.textAlign='center';
-      ctx.fillText('CIRCLE ✓ GRAZEABLE',h.x,h.y-(R+grazePx)-6/_camZoom);
-    }else{
-      ctx.strokeStyle='rgba(255,215,0,0.20)';ctx.lineWidth=1/_camZoom;ctx.setLineDash([3/_camZoom,4/_camZoom]);
-      ctx.beginPath();ctx.arc(h.x,h.y,R,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
-    }
-    // N2N nose region — small magenta circle on the between-the-eyes nose PATCH (matches server ssN2NNose:
-    // centre at R*SS_N2N_FWD forward, radius R*n2nScale). This is the head-on nose-to-nose target.
-    const n2x=h.x+Math.cos(ang)*R*SS_N2N_FWD, n2y=h.y+Math.sin(ang)*R*SS_N2N_FWD;
-    const nR=Math.max(2,R*(T.n2nScale||0.30));
-    ctx.strokeStyle='rgba(255,102,255,0.9)';ctx.lineWidth=1.4/_camZoom;
-    ctx.beginPath();ctx.arc(n2x,n2y,nR,0,Math.PI*2);ctx.stroke();
-    ctx.fillStyle='rgba(255,102,255,0.95)';ctx.shadowColor='#FF66FF';ctx.shadowBlur=5;
-    ctx.beginPath();ctx.arc(n2x,n2y,Math.max(1.2,2/_camZoom),0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='rgba(57,255,20,0.5)';ctx.lineWidth=1.6/_camZoom;   // body/head surface
+    ctx.beginPath();ctx.arc(h.x,h.y,R,0,Math.PI*2);ctx.stroke();
+    ctx.fillStyle='rgba(255,60,150,0.30)';ctx.strokeStyle='rgba(255,60,150,0.95)';ctx.lineWidth=1.4/_camZoom; // tiny nose
+    ctx.beginPath();ctx.arc(nx,ny,rn,0,Math.PI*2);ctx.fill();ctx.stroke();
     ctx.restore();
   }
   // Head hitbox + H2H zone — H-key only (no always-on ring to avoid confusing visuals)
@@ -5263,14 +5243,6 @@ function _drawHeadCircle(snake,r){
   ctx.fillStyle='rgba(255,255,255,0.75)';
   ctx.beginPath();ctx.arc(eFwd+_pDx-eR*0.08,-eSide+_pDy-eR*0.15,eR*0.22,0,Math.PI*2);ctx.fill();
   ctx.beginPath();ctx.arc(eFwd+_pDx-eR*0.08, eSide+_pDy-eR*0.15,eR*0.22,0,Math.PI*2);ctx.fill();
-
-  // Test lobby: draw the N2N nose PATCH (between the eyes) as a small red ring so the head-on target is
-  // visible during play — this circle IS the server N2N hitbox (centre R*SS_N2N_FWD fwd, radius R*n2nScale).
-  if(_tEye){
-    const _nfx=r*SS_N2N_FWD, _nr=Math.max(2,r*((_tuningTest&&_tuningTest.n2nScale)||0.30));
-    ctx.strokeStyle='rgba(255,70,70,0.95)';ctx.lineWidth=1.8;
-    ctx.beginPath();ctx.arc(_nfx,0,_nr,0,Math.PI*2);ctx.stroke();
-  }
 
   // (Boost flame removed — the red/orange flame behind the head was distracting; the rainbow glow
   // along the body already signals boosting, which is the effect we keep.)
