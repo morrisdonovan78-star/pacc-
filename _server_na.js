@@ -1254,18 +1254,24 @@ function ssNoseTip(s) { const r = ssSectionRadius(s.ns); return { x: s.x + Math.
 const SS_N2N_FWD = 0.75; // forward offset (× head radius) of the nose-patch centre — between-the-eyes spot
 function ssN2NNose(s) { const r = ssSectionRadius(s.ns) * SS_N2N_FWD; return { x: s.x + Math.cos(s.angle) * r, y: s.y + Math.sin(s.angle) * r }; }
 function ssCheckCollisionsNose(sg, lid, io) {
-  // ── ss-test-lobby collision — VISUAL-ACCURATE, geometry-driven (NO stored 'circling' state) ──────────
-  // Three checks, strict priority, so the circle kill EMERGES from geometry instead of a state machine:
-  //   1) BODY (precedence): your HEAD CIRCLE (radius Ra) touching another snake's BODY → YOU die. Swept
-  //      along this substep's head motion (no tunneling), at the DRAWN radius — you die the instant your
-  //      VISIBLE head touches their VISIBLE body. Zero overcommit room (fixes the nose-point slop).
-  //   2) N2N: your TINY nose disc touching their TINY nose disc, both facing → head-on duel, bigger wins.
-  //   3) NOSE-STRIKE (the circle kill): your TINY nose disc touching their HEAD circle while your head is
-  //      NOT in their body → THEY die. One-sided; if it's mutual it was already the N2N above.
-  // Result: drive into a body → die at the surface. Cleanly clip an exposed head with your nose → they die.
-  // Overcommit past the head into the coil → the BODY check kills you first. Miss → nothing.
+  // ── ss-test-lobby collision — NORMAL collision (always) kept SEPARATE from the SPECIAL circle graze ──
+  // All geometry uses the DRAWN radius (sectionRadius) and resolves on the SAME substep (no queues/delays).
+  //  NORMAL (always, every snake):
+  //    1) BODY: your HEAD CIRCLE (Ra) vs another snake's BODY (past the neck), SWEPT → YOU die. Accurate,
+  //       angle-independent, no visual penetration, no tunneling.
+  //    3) N2N: tiny NOSE disc vs tiny NOSE disc + both facing → head-on duel, bigger wins. ONLY when
+  //       neither snake is a circling defender (a circling defender is handled by the graze instead).
+  //  SPECIAL circle graze (2) — ONLY vs a defender whose circleActive is TRUE (a completed valid circle):
+  //    Over the ATTACKER's swept head this substep, take the CLOSEST head-centre distance to the circling
+  //    head → overlap = (Ra+Rd) - minDist.  overlap<=0 → nothing;  0<overlap<=grazeTol → the CIRCLER dies
+  //    (clean graze, ~1-2px);  overlap>grazeTol → the ATTACKER dies (overcommit). Angle- AND speed-
+  //    independent (depends only on closest head-centre distance). The attacker NEVER needs to circle;
+  //    only the defender's circle state creates the vulnerability. BODY still takes precedence (touch the
+  //    coil anywhere → attacker dies first). If the defender is NOT circling, this special kill does NOT
+  //    exist — normal rules only.
   const T = sg.tuning || {};
-  const noseScale = T.n2nScale != null ? T.n2nScale : 0.18; // TINY nose disc radius (×R). Small = precise.
+  const noseScale = T.n2nScale != null ? T.n2nScale : 0.16; // TINY N2N nose disc radius (×R)
+  const grazeTol  = T.grazePx  != null ? T.grazePx  : 1.5;  // circle-graze head-overlap tolerance in px (1-2)
   const faceCos   = Math.cos(((T.faceDeg != null ? T.faceDeg : 60)) * Math.PI / 180);
   const rule = T.rule || 'biggest_wins';
   const now = Date.now();
@@ -1283,14 +1289,14 @@ function ssCheckCollisionsNose(sg, lid, io) {
   };
   const R = s => ssSectionRadius(s.ns);
   const prevHead = s => ({ x: s._chpx != null ? s._chpx : s.x, y: s._chpy != null ? s._chpy : s.y });
-  const noseAt = (s, hx, hy) => { const r = R(s); return { x: hx + Math.cos(s.angle) * r, y: hy + Math.sin(s.angle) * r }; };
+  const noseAt = (s) => { const r = R(s) * SS_N2N_FWD; return { x: s.x + Math.cos(s.angle) * r, y: s.y + Math.sin(s.angle) * r }; };
   const sweep = (ax, ay, bx, by, step) => {           // sample a swept point A→B so a fast head can't tunnel
     const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / step)), out = [];
     for (let i = 0; i <= n; i++) out.push({ x: ax + (bx - ax) * i / n, y: ay + (by - ay) * i / n });
     return out;
   };
 
-  // 1) BODY — head circle vs body, swept. A's HEAD may never touch D's BODY (segments past the neck).
+  // 1) BODY (normal, always) — head circle vs body, swept. Your HEAD may never touch another snake's BODY.
   for (const A of alive) {
     if (died.has(A.pid)) continue;
     const Ra = R(A), ph = prevHead(A);
@@ -1309,32 +1315,48 @@ function ssCheckCollisionsNose(sg, lid, io) {
     }
   }
 
-  // 2)+3) NOSE — tiny nose disc, swept. Mutual+facing = N2N (bigger wins); one-sided = strike (target dies).
-  const bigWins = (A, D) => { let aw; if (A.size === D.size) aw = Math.random() < 0.5; else if (rule === 'smallest_wins') aw = A.size < D.size; else if (rule === 'random') aw = Math.random() < 0.5; else aw = A.size > D.size; return aw; };
+  // 2) SPECIAL circle graze — ONLY vs a circleActive defender. Angle/speed-INDEPENDENT: the head moves in a
+  //    straight line each substep, so the swept path is the segment [prevHead → head]; take the analytic
+  //    CLOSEST point of the circling head to that segment (dist + param t∈[0,1]).
+  //      overlap = (Ra+Rd) - closestDist.
+  //      overlap > grazeTol  → ATTACKER dies immediately (drove too deep — fires the instant you cross the
+  //                            tolerance, any speed, before you ever reach "closest", so no fishing).
+  //      0 < overlap ≤ grazeTol AND t < 1 (you've REACHED your closest approach this substep, not still
+  //                            closing) → the CIRCLER dies (clean graze). Classified by your ACTUAL closest
+  //                            distance, so straight/curved/boost/slow all behave the same.
+  //      overlap ≤ 0         → nothing.
+  for (const D of alive) {
+    if (!D.circleActive || died.has(D.pid)) continue;
+    const Rd = R(D);
+    for (const A of alive) {
+      if (A === D || died.has(A.pid) || died.has(D.pid)) continue;
+      const Ra = R(A), reach = Ra + Rd, ph = prevHead(A);
+      const abx = A.x - ph.x, aby = A.y - ph.y, ab2 = abx * abx + aby * aby;
+      let t = ab2 > 0 ? ((D.x - ph.x) * abx + (D.y - ph.y) * aby) / ab2 : 0; // 0 = not moving ⇒ treat as "at closest"
+      if (t < 0) t = 0; else if (t > 1) t = 1;
+      const cx = ph.x + abx * t, cy = ph.y + aby * t;
+      const overlap = reach - Math.hypot(D.x - cx, D.y - cy);
+      if (overlap <= 0) continue;                                                             // undercommit / miss
+      if (overlap > grazeTol) { kill(A, D, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now }); continue; } // too deep → attacker
+      if (t < 0.999) kill(D, A, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now });            // reached closest, in band → circler
+    }
+  }
+
+  // 3) N2N (normal head-on) — tiny nose vs tiny nose + facing, bigger wins. Skipped for circling pairs
+  //    (those are the special graze above); this is the ordinary head-on that exists in every fight.
   for (let i = 0; i < alive.length; i++) {
-    const A = alive[i]; if (died.has(A.pid)) continue;
+    const A = alive[i]; if (died.has(A.pid) || A.circleActive) continue;
     for (let j = i + 1; j < alive.length; j++) {
-      const D = alive[j]; if (died.has(D.pid)) continue;
+      const D = alive[j]; if (died.has(D.pid) || D.circleActive) continue;
       const Ra = R(A), Rd = R(D), rnA = Math.max(2, Ra * noseScale), rnD = Math.max(2, Rd * noseScale);
-      const aSweep = sweep(noseAt(A, prevHead(A).x, prevHead(A).y).x, noseAt(A, prevHead(A).x, prevHead(A).y).y, noseAt(A, A.x, A.y).x, noseAt(A, A.x, A.y).y, rnA);
-      const dSweep = sweep(noseAt(D, prevHead(D).x, prevHead(D).y).x, noseAt(D, prevHead(D).x, prevHead(D).y).y, noseAt(D, D.x, D.y).x, noseAt(D, D.x, D.y).y, rnD);
-      // (2) N2N — tiny nose vs tiny nose, both facing → true head-on.
-      const n2nT2 = (rnA + rnD) * (rnA + rnD);
-      let n2n = false;
-      for (let a = 0; a < aSweep.length && !n2n; a++) for (let b = 0; b < dSweep.length; b++) { const dx = aSweep[a].x - dSweep[b].x, dy = aSweep[a].y - dSweep[b].y; if (dx*dx+dy*dy <= n2nT2) { n2n = true; break; } }
-      if (n2n) {
-        const dx = D.x - A.x, dy = D.y - A.y, dd = Math.hypot(dx, dy) || 1;
-        const aFace = (Math.cos(A.angle) * dx + Math.sin(A.angle) * dy) / dd;
-        const dFace = (Math.cos(D.angle) * -dx + Math.sin(D.angle) * -dy) / dd;
-        if (aFace >= faceCos && dFace >= faceCos) { const aw = bigWins(A, D); kill(aw ? D : A, aw ? A : D, { stage: 'N2N', reason: rule, tick: sg.tick, t: now }); continue; }
-      }
-      // (3) NOSE-STRIKE — tiny nose vs the OTHER head circle. One-sided → struck snake dies.
-      const tAD2 = (rnA + Rd) * (rnA + Rd), tDA2 = (rnD + Ra) * (rnD + Ra);
-      let aStrikesD = false; for (let a = 0; a < aSweep.length; a++) { const dx = aSweep[a].x - D.x, dy = aSweep[a].y - D.y; if (dx*dx+dy*dy <= tAD2) { aStrikesD = true; break; } }
-      let dStrikesA = false; for (let b = 0; b < dSweep.length; b++) { const dx = dSweep[b].x - A.x, dy = dSweep[b].y - A.y; if (dx*dx+dy*dy <= tDA2) { dStrikesA = true; break; } }
-      if (aStrikesD && dStrikesA) { const aw = bigWins(A, D); kill(aw ? D : A, aw ? A : D, { stage: 'HEAD', tick: sg.tick, t: now }); }
-      else if (aStrikesD) kill(D, A, { stage: 'NOSE-STRIKE', tick: sg.tick, t: now });
-      else if (dStrikesA) kill(A, D, { stage: 'NOSE-STRIKE', tick: sg.tick, t: now });
+      const nA = noseAt(A), nD = noseAt(D);
+      if (Math.hypot(nA.x - nD.x, nA.y - nD.y) > rnA + rnD) continue;                       // tiny noses not touching
+      const dx = D.x - A.x, dy = D.y - A.y, dd = Math.hypot(dx, dy) || 1;
+      const aFace = (Math.cos(A.angle) * dx + Math.sin(A.angle) * dy) / dd;
+      const dFace = (Math.cos(D.angle) * -dx + Math.sin(D.angle) * -dy) / dd;
+      if (aFace < faceCos || dFace < faceCos) continue;                                     // not a true head-on
+      let aWins; if (A.size === D.size) aWins = Math.random() < 0.5; else if (rule === 'smallest_wins') aWins = A.size < D.size; else if (rule === 'random') aWins = Math.random() < 0.5; else aWins = A.size > D.size;
+      kill(aWins ? D : A, aWins ? A : D, { stage: 'N2N', reason: rule, tick: sg.tick, t: now });
     }
   }
 }
