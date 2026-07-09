@@ -783,6 +783,7 @@ function ssTick(lid, io) {
     // used as an invulnerable freeze. They are NOT skipped here or in the collision filters.
     sg.snakes.forEach(sn => { if (sn.alive) { sn._chpx = sn.x; sn._chpy = sn.y; } }); // pre-substep head → swept collision (test lobby)
     sg.snakes.forEach(sn => { if (sn.alive) ssStepMovement(sn, sg, lid, io, now); });
+    sg._subFrame = _sub; // substep index this tick — used by the graze/body overlap instrumentation
     if (sg.testHitbox) ssCheckCollisionsNose(sg, lid, io); // isolated sandbox — experimental model
     else ssCheckCollisions(sg, lid, io);
     // Mid-tick broadcast: send each sub-step's position instead of only the final one, so
@@ -1247,25 +1248,20 @@ function ssUpdateCircleState(sn, sg) {
 // no smaller, and it sits ON the visible outline (the head circle itself, radius = sectionRadius).
 const SS_NOSE_ARC = 20.1 * Math.PI / 180; // half-angle of the face arc between the eyes
 function ssCheckCollisionsNose(sg, lid, io) {
-  // ── ss-test-lobby collision — NORMAL collision (always) kept SEPARATE from the SPECIAL circle graze ──
-  // All geometry uses the DRAWN radius (sectionRadius) and resolves on the SAME substep (no queues/delays).
-  //  NORMAL (always, every snake):
-  //    1) BODY: your HEAD CIRCLE (Ra) vs another snake's BODY (past the neck), SWEPT → YOU die. Accurate,
-  //       angle-independent, no visual penetration, no tunneling.
-  //    3) N2N: NOSE OUTLINE-ARC vs NOSE OUTLINE-ARC — the heads' circles touch AND the contact point lies
-  //       on BOTH snakes' nose arcs (±SS_NOSE_ARC of heading, i.e. the visible face between the eyes) →
-  //       bigger wins. ONLY when neither snake is a circling defender (that's the graze instead).
-  //  SPECIAL circle graze (2) — ONLY vs a defender whose circleActive is TRUE (a completed valid circle):
-  //    Over the ATTACKER's swept head this substep, take the CLOSEST head-centre distance to the circling
-  //    head → overlap = (Ra+Rd) - minDist.  overlap<=0 → nothing;  0<overlap<=grazeTol → the CIRCLER dies
-  //    (clean graze, ~1-2px);  overlap>grazeTol → the ATTACKER dies (overcommit). Angle- AND speed-
-  //    independent (depends only on closest head-centre distance). The attacker NEVER needs to circle;
-  //    only the defender's circle state creates the vulnerability. BODY still takes precedence (touch the
-  //    coil anywhere → attacker dies first). If the defender is NOT circling, this special kill does NOT
-  //    exist — normal rules only.
+  // ── ss-test-lobby collision — TEMPORAL circle-kill model (its own mechanic, no static graze) ──────────
+  // All geometry uses the DRAWN radius (sectionRadius) and the snake's DRAWN trail (sn.path, the exact
+  // history of head positions the body follows). Two passes:
+  //   1) BODY / TRAIL — a snake's SWEPT head vs every OTHER snake's drawn trail:
+  //        • NORMAL snake → dies the instant its head reaches a trail point (overlap > 0). UNCHANGED.
+  //        • CIRCLING snake (circleActive) → SKIM MARGIN: survives while it only skims the trail edge
+  //          (overlap ≤ skimMargin) and dies only when its looping head reaches a trail point DEEPER than
+  //          the margin. This makes the circle-kill TEMPORAL/Damnbruh-like: the circler does NOT die at the
+  //          first graze — it keeps rotating and dies later, when its OWN rotation drives its head into the
+  //          trail the target has laid. The delay is EMERGENT from the geometry + stored trail history.
+  //   3) N2N — normal head-on nose contact, bigger wins. UNCHANGED (still skips circling pairs).
+  // The circler is the snake that DIES; the target it circles is untouched by this mechanic.
   const T = sg.tuning || {};
-  const grazeTol   = T.grazePx != null ? T.grazePx : 1.5;   // circle-graze head-overlap tolerance in px (1-2)
-  const noseCosMin = Math.cos(SS_NOSE_ARC);                 // contact must land on the outline arc between the eyes
+  const noseCosMin = Math.cos(SS_NOSE_ARC);                 // N2N: contact must land on the outline arc between the eyes
   const rule = T.rule || 'biggest_wins';
   const now = Date.now();
   const alive = [...sg.snakes.values()].filter(s => s.alive && s.path && s.path.length > 1);
@@ -1287,62 +1283,70 @@ function ssCheckCollisionsNose(sg, lid, io) {
     for (let i = 0; i <= n; i++) out.push({ x: ax + (bx - ax) * i / n, y: ay + (by - ay) * i / n });
     return out;
   };
+  // ── VISIBLE-BODY LENGTH (render/collision sync) ─────────────────────────────────────────────────
+  // The client draws exactly `ns` body circles spaced r*0.5 apart (getBodyPoints), so the drawn tail
+  // ends at arc-length ns*r*0.5 → path index ns*r*0.5 / SS_POINT_DIST. `sn.path` is a much LONGER
+  // history buffer (kept at ≥800 pts so the tail is always covered). Colliding against the whole
+  // buffer means the head can die on trail the snake ALREADY LEFT — an invisible tail hitbox with no
+  // sprite. bodyEndIdx clamps every body loop to the last DRAWN segment, so collision length == what
+  // the player sees. (Matches the production H2B bound `min(ns,1200)` in ssCheckCollisions.)
+  const bodyEndIdx = s => {
+    const last = (s.path ? s.path.length : 0) - 1;
+    return Math.min(last, Math.round(s.ns * ssSectionRadius(s.ns) * 0.5 / SS_POINT_DIST));
+  };
+  // Temporary render/collision-sync diagnostic (≤ once per second per lobby): shows, per snake, the
+  // server's full buffer length vs the DRAWN tail index the collision is now clamped to. A large gap
+  // was the invisible-tail bug (collided buffer ≫ drawn body). Remove after field verification.
+  if (!sg._lastSyncDiag || now - sg._lastSyncDiag > 1000) {
+    sg._lastSyncDiag = now;
+    for (const s of alive) {
+      const drawn = bodyEndIdx(s), buf = (s.path ? s.path.length : 0) - 1;
+      if (buf - drawn > 4)
+        console.log(`[${lid}] RENDER-SYNC ${s.pid.slice(0,8)} ns=${s.ns} drawnTailIdx=${drawn} bufferIdx=${buf} invisibleTailPts=${buf - drawn} (${((buf - drawn) * SS_POINT_DIST).toFixed(0)}px now clamped OUT)`);
+    }
+  }
 
-  // 1) BODY (normal, always) — head circle vs body, swept. Your HEAD may never touch another snake's BODY.
+  // 1) BODY / TRAIL — swept head vs every OTHER snake's DRAWN trail (past the neck, clamped to bodyEndIdx).
+  //    overlap = (Ra+Rd) − closest distance from the swept head to the trail.
+  //      • NORMAL snake            → dies when overlap > 0        (die on touch — UNCHANGED body collision).
+  //      • CIRCLING (circleActive) → dies when overlap > skimMargin (skims the edge & keeps rotating; dies
+  //        only when its looping head reaches a trail point deeper than the margin → the temporal kill).
+  //    Implemented as a distance test (no sqrt in the hot loop): overlap > margin ⇔ dist < reach − margin.
+  const skimMargin = T.grazePx != null ? T.grazePx : 1.0; // circle skim margin in px (live slider; 0 = die on touch)
   for (const A of alive) {
     if (died.has(A.pid)) continue;
     const Ra = R(A), ph = prevHead(A);
     const hsweep = sweep(ph.x, ph.y, A.x, A.y, Math.max(3, Ra * 0.5));
+    const margin = A.circleActive ? skimMargin : 0;             // only a circler may skim; everyone else dies on touch
     for (const D of alive) {
       if (A === D) continue;
-      const Rd = R(D), reach = Ra + Rd, reach2 = reach * reach, dpath = D.path;
-      const neck = Math.max(2, Math.ceil(reach / SS_POINT_DIST)); // skip head+neck so HEAD contact isn't BODY
-      let hit = false;
-      for (let si = 0; si < hsweep.length && !hit; si++) {
-        for (let k = neck; k + 1 < dpath.length; k++) {
-          if (ssPtSegD2(hsweep[si].x, hsweep[si].y, dpath[k].x, dpath[k].y, dpath[k + 1].x, dpath[k + 1].y) <= reach2) { hit = true; break; }
+      const Rd = R(D), reach = Ra + Rd, dpath = D.path;
+      const killDist = reach - margin, killDist2 = killDist > 0 ? killDist * killDist : 0; // reach within this of a trail pt → die
+      const neck = Math.max(2, Math.ceil(reach / SS_POINT_DIST)); // skip head+neck so a HEAD-ON contact is N2N, not trail
+      const end = bodyEndIdx(D);                                   // stop at the last DRAWN segment (no invisible tail)
+      let minD2 = Infinity;
+      for (let si = 0; si < hsweep.length; si++) {
+        for (let k = neck; k < end; k++) {
+          const d2 = ssPtSegD2(hsweep[si].x, hsweep[si].y, dpath[k].x, dpath[k].y, dpath[k + 1].x, dpath[k + 1].y);
+          if (d2 < minD2) minD2 = d2;
         }
       }
-      if (hit) { kill(A, D, { stage: 'BODY', tick: sg.tick, t: now }); break; }
-    }
-  }
-
-  // 2) SPECIAL circle graze — ONLY vs a circleActive defender. Angle/speed-INDEPENDENT: the head moves in a
-  //    straight line each substep, so the swept path is the segment [prevHead → head]; take the analytic
-  //    CLOSEST point of the circling head to that segment (dist + param t∈[0,1]).
-  //      overlap = (Ra+Rd) - closestDist.
-  //      overlap > grazeTol  → ATTACKER dies immediately (drove too deep — fires the instant you cross the
-  //                            tolerance, any speed, before you ever reach "closest", so no fishing).
-  //      0 < overlap ≤ grazeTol AND t < 1 (you've REACHED your closest approach this substep, not still
-  //                            closing) → the CIRCLER dies (clean graze). Classified by your ACTUAL closest
-  //                            distance, so straight/curved/boost/slow all behave the same.
-  //      overlap ≤ 0         → nothing.
-  for (const D of alive) {
-    if (!D.circleActive || died.has(D.pid)) continue;
-    const Rd = R(D);
-    for (const A of alive) {
-      if (A === D || died.has(A.pid) || died.has(D.pid)) continue;
-      const Ra = R(A), reach = Ra + Rd, ph = prevHead(A);
-      const abx = A.x - ph.x, aby = A.y - ph.y, ab2 = abx * abx + aby * aby;
-      let t = ab2 > 0 ? ((D.x - ph.x) * abx + (D.y - ph.y) * aby) / ab2 : 0; // 0 = not moving ⇒ treat as "at closest"
-      if (t < 0) t = 0; else if (t > 1) t = 1;
-      const cx = ph.x + abx * t, cy = ph.y + aby * t;
-      const overlap = reach - Math.hypot(D.x - cx, D.y - cy);
-      if (overlap <= 0) continue;                                                             // undercommit / miss
-      if (overlap > grazeTol) { kill(A, D, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now }); continue; } // too deep → attacker
-      // In the band: the graze ONLY kills if the attacker STRUCK WITH THE FACE — the contact point on the
-      // attacker's head must lie on the NOSE ARC (the outline between the eyes). A circling head sweeping
-      // back into the SIDE of a bystander's head is NOT a graze (this was the "they die a full loop after
-      // my missed attempt" bug) — that brush does nothing.
-      if (t < 0.999) {
-        const ndx = D.x - cx, ndy = D.y - cy, nd = Math.hypot(ndx, ndy) || 1;
-        if ((Math.cos(A.angle) * ndx + Math.sin(A.angle) * ndy) / nd >= noseCosMin)
-          kill(D, A, { stage: 'CIRCLE-GRAZE', tick: sg.tick, t: now });                       // face-struck, in band → circler
+      if (minD2 <= killDist2) {
+        const overlap = reach - Math.sqrt(minD2);
+        if (A.circleActive) {
+          // ── temporary circle-kill instrumentation + rolling overlap stats over the last 100 kills ──
+          if (!sg._circ) sg._circ = [];
+          sg._circ.push(overlap); if (sg._circ.length > 100) sg._circ.shift();
+          let mn = Infinity, mx = -Infinity; for (const v of sg._circ) { if (v < mn) mn = v; if (v > mx) mx = v; }
+          console.log(`[${lid}] CIRCLE-TRAIL-KILL circler=${A.pid.slice(0,8)} on ${D.pid.slice(0,8)}'s trail overlapPx=${overlap.toFixed(3)} margin=${skimMargin} frame=t${sg.tick}.s${sg._subFrame} | last${sg._circ.length}: min=${mn.toFixed(3)} max=${mx.toFixed(3)} span=${(mx - mn).toFixed(3)}`);
+        }
+        kill(A, D, { stage: A.circleActive ? 'CIRCLE-TRAIL' : 'BODY', tick: sg.tick, t: now, overlap: +overlap.toFixed(2), margin });
+        break;
       }
     }
   }
 
-  // 3) N2N (normal head-on) — NOSE OUTLINE vs NOSE OUTLINE, bigger wins. The nose is the arc of each head's
+  // 2) N2N (normal head-on) — NOSE OUTLINE vs NOSE OUTLINE, bigger wins. The nose is the arc of each head's
   //    outline between the eyes (SS_NOSE_ARC). Contact between two circles happens on the line between the
   //    centres, so: heads' circles touch (dist ≤ Ra+Rd) AND that contact direction lies on BOTH snakes'
   //    nose arcs → the visible noses touched. Skipped for circling pairs (those are the graze above).
@@ -1963,7 +1967,7 @@ io.on('connection', socket => {
       // Test lobby uses the separate visual-radius params — isolated from every other lobby's tuning.
       if (typeof d.n2nScale  === 'number') sg.tuning.n2nScale  = Math.max(0.1, Math.min(1.2, d.n2nScale));
       if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.5, Math.min(1.2, d.bodyScale));
-      if (typeof d.grazePx   === 'number') sg.tuning.grazePx   = Math.max(0.01, Math.min(12, d.grazePx));
+      if (typeof d.grazePx   === 'number') sg.tuning.grazePx   = Math.max(0, Math.min(12, d.grazePx)); // circle skim margin (0 = die on touch)
       if (typeof d.circDeg   === 'number') sg.tuning.circDeg   = Math.max(180, Math.min(360, d.circDeg));
       if (typeof d.faceDeg   === 'number') sg.tuning.faceDeg   = Math.max(0, Math.min(120, d.faceDeg));
       if (['smallest_wins','biggest_wins','random'].includes(d.rule)) sg.tuning.rule = d.rule;

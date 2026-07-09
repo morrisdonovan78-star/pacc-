@@ -676,8 +676,8 @@ body.mctl #voice-speakers{left:150px;}
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>tighter</span><span>solid surface</span></div>
     </div>
     <div style="margin-bottom:11px;border-top:1px solid #2a1a3a;padding-top:9px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;">◆ Circle graze tolerance (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.50 px</span></div>
-      <input type="range" id="tun-grazePx" min="0.5" max="3" step="0.1" value="1.5" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="Circle skim margin: how far a CIRCLING snake's head may reach into another snake's trail and still survive (skim). It dies only when its looping head reaches deeper than this. 0 = die on touch; higher = more forgiving skim.">◆ Circle skim margin (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.00 px</span></div>
+      <input type="range" id="tun-grazePx" min="0" max="6" step="0.1" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0.5 = razor</span><span>3 = forgiving</span></div>
     </div>
     <div style="margin-bottom:11px;">
@@ -1124,7 +1124,7 @@ let _autoCircle=false; // toggle: snake auto-circles until toggled off (E key / 
 let _lastRoomId=null;
 let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // Separate tuning for the isolated hitbox test lobby (nose/body model). Never sent to any other lobby.
-let _tuningTest={bodyScale:1.0,grazePx:1.5,circDeg:360,faceDeg:60,rule:'biggest_wins'};
+let _tuningTest={bodyScale:1.0,grazePx:1.0,circDeg:360,faceDeg:60,rule:'biggest_wins'};
 try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv&&localStorage.getItem('ss_owner')==='1')Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
 let _showTuning=false;
 let _botCount=0,_isPractice=false;
@@ -2088,7 +2088,7 @@ function setupOtp(){
 
 // ══ LOBBY ═══════════════════════════════════════════════════
 function populateLobby(){
-  { const _tb=document.getElementById('test-lobby-btn'); if(_tb)_tb.style.display=localStorage.getItem('ss_owner')==='1'?'inline-flex':'none'; }
+  { const _tb=document.getElementById('test-lobby-btn'); if(_tb)_tb.style.display='inline-flex'; } // test lobby open to everyone; tuning panel stays owner-only
   fetchPrice().then(()=>{
     const s1=usdToSol(1),s5=usdToSol(5);
     const el=id=>document.getElementById(id);
@@ -2116,11 +2116,11 @@ function fetchLobbyCounts(){
 }
 function stopLobbyCountPoll(){clearInterval(_lobbyCountTimer);_lobbyCountTimer=null;}
 
-// Owner-only isolated hitbox sandbox. Free (no wager) and it runs the experimental nose/body
-// collision on the server — nothing here affects any other lobby.
+// Public isolated hitbox sandbox — open to EVERYONE. Free (no wager) and it runs the experimental
+// nose/body collision on the server — nothing here affects any other lobby. Only the hitbox TUNING
+// panel stays owner-only (gated in _toggleTuning / the T key / the join-time ss-tune push).
 async function joinTestLobby(){
   if(!ST.address){alert('Log in first');return;}
-  if(localStorage.getItem('ss_owner')!=='1'){addToast('Test lobby is owner-only','#FF4444');return;}
   const _nin=document.getElementById('name-input');
   if(_nin&&_nin.value.trim()){const _nv=_nin.value.trim().toUpperCase().slice(0,12);localStorage.setItem('ss_name_'+(ST.address||''),_nv);}
   if(pkRoomId&&pkRoomId!=='ss-test-lobby'){ _joiningLobby=false; if(_sio){try{_sio.disconnect();}catch(_){}  _sio=null;} } // explicit switch — clear stale guard
@@ -5049,6 +5049,17 @@ function drawSnake(snake){
   }
   const bPts=getBodyPoints(snake);
   if(bPts.length<2)return;
+  // ── TEMP render/collision-sync diagnostic (≤1/s): the server collides `numSections` body segments,
+  // so if we render FEWER than that the extra segments are an invisible hitbox on our screen. Logs the
+  // rendered-vs-server segment gap + how much path history we have. Remove after field verification.
+  if(snake.id!==myPid&&window._SYNC_DIAG!==false){
+    const _nowD=performance.now();
+    if(!window._lastSyncDiag||_nowD-window._lastSyncDiag>1000){
+      window._lastSyncDiag=_nowD;
+      const _want=snake.numSections|0, _got=bPts.length, _gap=_want-_got;
+      if(_gap>1) console.warn(`[RENDER-SYNC] ${(''+snake.id).slice(0,8)} ns=${_want} renderedSegs=${_got} MISSING=${_gap} pathPts=${snake.path.length} (collides ${_want}, draws ${_got} → ${_gap} invisible tail segs)`);
+    }
+  }
   // Stage 2 — precise cull: build body points (cheap vs rasterization) then skip the 3 fill passes +
   // head if NO drawn point lands in the viewport (covers a long snake whose head is near but whose
   // whole body coils off-screen). On-screen snakes early-exit on their first visible point.
