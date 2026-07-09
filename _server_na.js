@@ -1296,6 +1296,14 @@ function ssCheckCollisionsNose(sg, lid, io) {
       if (!inBody) { for (let k = 1; k + 1 < dpath.length; k++) {
         if (ssPtSegD2(na.x, na.y, dpath[k].x, dpath[k].y, dpath[k + 1].x, dpath[k + 1].y) <= Rd2) { inBody = true; break; }
       } }
+      // READ-ONLY probe (no gameplay effect): whenever an attacker nose is near a circling head, log the
+      // EXACT server geometry so the client's same-frame render-vs-server capture can be validated
+      // against server truth. Only near-contact frames, test lobby only — no spam, no control-flow change.
+      if (gapHead < Rd * 1.5) {
+        let _nrst2 = Infinity;
+        for (let k = 1; k + 1 < dpath.length; k++) { const q = ssPtSegD2(na.x, na.y, dpath[k].x, dpath[k].y, dpath[k + 1].x, dpath[k + 1].y); if (q < _nrst2) _nrst2 = q; }
+        console.log('[CIRCLE_PROBE_SRV] ' + JSON.stringify({ tick: sg.tick, t: now, defHead: { x: +d.x.toFixed(1), y: +d.y.toFixed(1), a: +d.angle.toFixed(3), ns: d.ns }, nose: { x: +na.x.toFixed(1), y: +na.y.toFixed(1) }, gapHead: +gapHead.toFixed(2), nearestSeg: +Math.sqrt(_nrst2).toFixed(2), Rd: +Rd.toFixed(2), inBody, graze: (!inBody && gapHead <= grazePx) }));
+      }
       if (inBody) { kill(a, d, { stage: 'CIRCLE-OVERCOMMIT', tick: sg.tick, t: now }); continue; }
       // (2) clean outer-surface clip (nose outside the body, just kissing the head) → this attacker grazes.
       if (gapHead <= grazePx && !grazer) grazer = a;

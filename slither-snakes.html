@@ -4500,7 +4500,70 @@ function gpadFocus(dir){
 // at its shipped value and can never be changed at runtime; see _OWN_CORRECT above.)
 document.addEventListener('keydown',function(e){
   if((e.key==='t'||e.key==='T')&&!e.repeat&&localStorage.getItem('ss_owner')==='1')_toggleTuning();
+  // Shift+P — dump the circle-probe trace (render-vs-server same-frame geometry). Test lobby only.
+  if((e.key==='p'||e.key==='P')&&!e.repeat&&_isTestLobby()){
+    const withSrv=_cpBuf.filter(r=>r.headOffsetPx!=null);
+    const ev=_cpBuf.filter(r=>r.EVENT).length;
+    const avgHead=withSrv.length?withSrv.reduce((a,r)=>a+r.headOffsetPx,0)/withSrv.length:0;
+    const maxHead=withSrv.reduce((a,r)=>Math.max(a,r.headOffsetPx||0),0);
+    const seenInsideSrvClear=_cpBuf.filter(r=>r.EVENT==='seen_inside_server_clear').length;
+    const summary={frames:_cpBuf.length,eventsTotal:ev,seenInside_serverClear:seenInsideSrvClear,
+      avgHeadRenderOffsetPx:+avgHead.toFixed(1),maxHeadRenderOffsetPx:+maxHead.toFixed(1),
+      interpDelayMs:(typeof window._INTERP_DELAY==='number'?window._INTERP_DELAY:_INTERP_DELAY)};
+    console.log('[CIRCLE_PROBE] '+JSON.stringify(summary));
+    try{const blob=new Blob([JSON.stringify({summary,trace:_cpBuf},null,2)],{type:'application/json'});
+      const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='circle_probe_'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}catch(_e){}
+  }
 });
+
+// ── CIRCLE PROBE (ss-test-lobby, READ-ONLY, no gameplay effect) ────────────────────────────────
+// Proves — from real play — WHERE the "drive into the body without dying" discrepancy comes from.
+// Every frame it computes the server's STEP-1 geometry TWICE with the IDENTICAL math the server uses:
+//   • RENDERED  — from the interpolated positions actually drawn on screen (what YOU see).
+//   • SERVER    — from the freshest raw server SNAPSHOT in _ssBuf (the authoritative broadcast
+//                 position; the defender's body centreline is its recent snapshot trajectory).
+// It flags frames where the RENDERED geometry shows your nose INSIDE the body while the SERVER
+// geometry shows it OUTSIDE (clear) — i.e. exactly the "I went in and didn't die" case — and records
+// the head render-offset (px) so the error can be quantified over time. Shift+P downloads the trace.
+const _cpBuf=[]; const _CP_MAX=1400; let _cpEvents=0, _cpLastWarn=0;
+function _ssSecR(ns){ return BASE_RADIUS+Math.pow((ns||1)*SIZE_PER_SEGMENT,RADIUS_GROWTH)*RADIUS_SCALE; }
+function _cpPtSeg(px,py,ax,ay,bx,by){ const abx=bx-ax,aby=by-ay,ab2=abx*abx+aby*aby; let t=ab2>0?((px-ax)*abx+(py-ay)*aby)/ab2:0; if(t<0)t=0;else if(t>1)t=1; const cx=ax+abx*t,cy=ay+aby*t,dx=px-cx,dy=py-cy; return Math.hypot(dx,dy); }
+function _cpGeom(nose,head,ns,path){ // STEP-1 geometry for a nose point vs a defender coil (path idx0=head)
+  const Rd=_ssSecR(ns);
+  const gapHead=Math.hypot(nose.x-head.x,nose.y-head.y)-Rd;
+  let nearest=Infinity;
+  for(let k=1;k+1<path.length;k++){ const q=_cpPtSeg(nose.x,nose.y,path[k].x,path[k].y,path[k+1].x,path[k+1].y); if(q<nearest)nearest=q; }
+  return {Rd,gapHead,nearest,inside:(gapHead<0||nearest<Rd)};
+}
+function _circleProbe(){
+  if(!_isTestLobby()||!SG) return;
+  const me=SG.snakes.get(myPid); if(!me||!me.alive||!me.path||!me.path.length) return;
+  let def=null,dd=Infinity; // nearest OTHER alive snake = the circling defender in the sandbox
+  SG.snakes.forEach(s=>{ if(s===me||s.id===myPid||!s.alive||!s.path||s.path.length<2)return;
+    const q=Math.hypot(s.path[0].x-me.path[0].x,s.path[0].y-me.path[0].y); if(q<dd){dd=q;def=s;} });
+  if(!def) return;
+  // RENDERED geometry (what you see): own nose from interp head, defender coil = its drawn path.
+  const noseRen={x:me.path[0].x+Math.cos(me.angle)*_ssSecR(me.numSections), y:me.path[0].y+Math.sin(me.angle)*_ssSecR(me.numSections)};
+  const gRen=_cpGeom(noseRen,def.path[0],def.numSections,def.path);
+  const rec={t:Date.now(), gapHeadRen:+gRen.gapHead.toFixed(2), nearestRen:+gRen.nearest.toFixed(2), RdRen:+gRen.Rd.toFixed(2), insideRen:gRen.inside};
+  // SERVER geometry (authoritative): freshest raw snapshots. Defender coil = its snapshot trajectory.
+  const ob=_ssBuf.get(myPid), db=_ssBuf.get(def.id);
+  if(ob&&ob.length&&db&&db.length>=2){
+    const lo=ob[ob.length-1], ls=db[db.length-1];
+    const noseSrv={x:lo.x+Math.cos(lo.angle)*_ssSecR(lo.ns), y:lo.y+Math.sin(lo.angle)*_ssSecR(lo.ns)};
+    const pth=[]; for(let i=db.length-1;i>=0;i--)pth.push({x:db[i].x,y:db[i].y});
+    const gSrv=_cpGeom(noseSrv,{x:ls.x,y:ls.y},ls.ns,pth);
+    rec.gapHeadSrv=+gSrv.gapHead.toFixed(2); rec.nearestSrv=+gSrv.nearest.toFixed(2); rec.insideSrv=gSrv.inside;
+    rec.headOffsetPx=+Math.hypot(def.path[0].x-ls.x,def.path[0].y-ls.y).toFixed(1);
+    rec.noseOffsetPx=+Math.hypot(noseRen.x-noseSrv.x,noseRen.y-noseSrv.y).toFixed(1);
+    rec.snapAgeMs=Date.now()-ls.t;
+    if(gRen.inside && !gSrv.inside){ rec.EVENT='seen_inside_server_clear'; _cpEvents++;
+      if(Date.now()-_cpLastWarn>250){ _cpLastWarn=Date.now();
+        console.warn(`[CIRCLE_PROBE] SEEN INSIDE body (nearestRen=${rec.nearestRen}px < Rd=${rec.RdRen}) but SERVER CLEAR (nearestSrv=${rec.nearestSrv}px). Defender head render-offset=${rec.headOffsetPx}px → you survive this frame.`); }
+    } else if(!gRen.inside && gSrv.inside){ rec.EVENT='seen_clear_server_inside'; }
+  }
+  _cpBuf.push(rec); if(_cpBuf.length>_CP_MAX)_cpBuf.shift(); window._cpBuf=_cpBuf;
+}
 
 // Local-player prediction — MoneySlither-exact 60 Hz sub-steps (boost ramp + chord speed),
 // so the local snake tracks the server's authoritative sim (no boost rubber-band).
@@ -4778,6 +4841,7 @@ function rafDraw(ts){
     _myEyeAngle=Math.atan2(_mwy-_ph.y,_mwx-_ph.x)-_pS.angle;
   }else{_myEyeAngle=null;}}
   if(SG)SG.snakes.forEach(s=>{if(s.alive&&s.path.length>1)drawSnake(s);});
+  try{_circleProbe();}catch(_e){} // READ-ONLY same-frame render-vs-server geometry capture (test lobby)
   // Hitbox overlay (H key) and own-snake H2H ring are now drawn inside drawSnake()
   // at body z-level, so circles end exactly where the snake body ends.
 
