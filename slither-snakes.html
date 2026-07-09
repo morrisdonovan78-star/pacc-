@@ -4502,13 +4502,16 @@ document.addEventListener('keydown',function(e){
   if((e.key==='t'||e.key==='T')&&!e.repeat&&localStorage.getItem('ss_owner')==='1')_toggleTuning();
   // Shift+P — dump the circle-probe trace (render-vs-server same-frame geometry). Test lobby only.
   if((e.key==='p'||e.key==='P')&&!e.repeat&&_isTestLobby()){
-    const withSrv=_cpBuf.filter(r=>r.headOffsetPx!=null);
-    const ev=_cpBuf.filter(r=>r.EVENT).length;
-    const avgHead=withSrv.length?withSrv.reduce((a,r)=>a+r.headOffsetPx,0)/withSrv.length:0;
-    const maxHead=withSrv.reduce((a,r)=>Math.max(a,r.headOffsetPx||0),0);
-    const seenInsideSrvClear=_cpBuf.filter(r=>r.EVENT==='seen_inside_server_clear').length;
-    const summary={frames:_cpBuf.length,eventsTotal:ev,seenInside_serverClear:seenInsideSrvClear,
-      avgHeadRenderOffsetPx:+avgHead.toFixed(1),maxHeadRenderOffsetPx:+maxHead.toFixed(1),
+    const withSrv=_cpBuf.filter(r=>r.srv);
+    const cnt=t=>_cpBuf.filter(r=>r.DIAG===t).length;
+    const avgOff=withSrv.length?withSrv.reduce((a,r)=>a+(r.headPosOffsetPx||0),0)/withSrv.length:0;
+    const maxOff=withSrv.reduce((a,r)=>Math.max(a,r.headPosOffsetPx||0),0);
+    // worst "appear deep in body but survive" frame (biggest drawn head-body overlap with no death)
+    let worst=null; for(const r of _cpBuf){ if(r.ren.won==='none' && (!worst||r.ren.headBodyOverlap>worst.ren.headBodyOverlap)) worst=r; }
+    const summary={frames:_cpBuf.length,
+      MODEL_GAP:cnt('MODEL_GAP')+cnt('MODEL_GAP_norawSrv'), INTERP_GAP:cnt('INTERP_GAP'), VERDICT_SPLIT:cnt('VERDICT_SPLIT'),
+      avgDefHeadRenderOffsetPx:+avgOff.toFixed(1), maxDefHeadRenderOffsetPx:+maxOff.toFixed(1),
+      worstSurviveFrame: worst?{drawnHeadBodyOverlapPx:worst.ren.headBodyOverlap, noseBodyOverlapPx:worst.ren.noseBodyOverlap, won:worst.ren.won, srvWon:worst.srv&&worst.srv.won, DIAG:worst.DIAG}:null,
       interpDelayMs:(typeof window._INTERP_DELAY==='number'?window._INTERP_DELAY:_INTERP_DELAY)};
     console.log('[CIRCLE_PROBE] '+JSON.stringify(summary));
     try{const blob=new Blob([JSON.stringify({summary,trace:_cpBuf},null,2)],{type:'application/json'});
@@ -4525,15 +4528,35 @@ document.addEventListener('keydown',function(e){
 // It flags frames where the RENDERED geometry shows your nose INSIDE the body while the SERVER
 // geometry shows it OUTSIDE (clear) — i.e. exactly the "I went in and didn't die" case — and records
 // the head render-offset (px) so the error can be quantified over time. Shift+P downloads the trace.
-const _cpBuf=[]; const _CP_MAX=1400; let _cpEvents=0, _cpLastWarn=0;
+const _cpBuf=[]; const _CP_MAX=1600; let _cpLastWarn=0;
 function _ssSecR(ns){ return BASE_RADIUS+Math.pow((ns||1)*SIZE_PER_SEGMENT,RADIUS_GROWTH)*RADIUS_SCALE; }
 function _cpPtSeg(px,py,ax,ay,bx,by){ const abx=bx-ax,aby=by-ay,ab2=abx*abx+aby*aby; let t=ab2>0?((px-ax)*abx+(py-ay)*aby)/ab2:0; if(t<0)t=0;else if(t>1)t=1; const cx=ax+abx*t,cy=ay+aby*t,dx=px-cx,dy=py-cy; return Math.hypot(dx,dy); }
-function _cpGeom(nose,head,ns,path){ // STEP-1 geometry for a nose point vs a defender coil (path idx0=head)
-  const Rd=_ssSecR(ns);
-  const gapHead=Math.hypot(nose.x-head.x,nose.y-head.y)-Rd;
-  let nearest=Infinity;
-  for(let k=1;k+1<path.length;k++){ const q=_cpPtSeg(nose.x,nose.y,path[k].x,path[k].y,path[k+1].x,path[k+1].y); if(q<nearest)nearest=q; }
-  return {Rd,gapHead,nearest,inside:(gapHead<0||nearest<Rd)};
+// Full STEP-1 model for an attacker (head centre hx,hy + heading ang + radius Ra) vs a defender coil
+// (defHead + path idx0=head, radius Rd). Returns BOTH the nose-POINT metrics the SERVER actually
+// checks AND the head-CIRCLE metrics the player SEES, plus the server's decision on these positions.
+function _cpModel(hx,hy,ang,Ra,defHead,defNs,path,grazePx){
+  const Rd=_ssSecR(defNs), grazeIn=grazePx*0.3;
+  const nx=hx+Math.cos(ang)*Ra, ny=hy+Math.sin(ang)*Ra;                 // nose TIP (what the server uses)
+  const noseHeadDist=Math.hypot(nx-defHead.x,ny-defHead.y);
+  const gapHead=noseHeadDist-Rd;                                        // nose tip -> head surface
+  const headCtrHeadDist=Math.hypot(hx-defHead.x,hy-defHead.y);         // attacker head CENTRE -> defender head centre
+  let nearNose=Infinity, nearHead=Infinity;                            // nearest defender BODY segment (k>=1)
+  for(let k=1;k+1<path.length;k++){
+    const qn=_cpPtSeg(nx,ny,path[k].x,path[k].y,path[k+1].x,path[k+1].y); if(qn<nearNose)nearNose=qn;
+    const qh=_cpPtSeg(hx,hy,path[k].x,path[k].y,path[k+1].x,path[k+1].y); if(qh<nearHead)nearHead=qh;
+  }
+  // SERVER decision (exactly STEP 1, nose-point model): body/overcommit takes precedence, then graze.
+  const inBody = gapHead < -grazeIn || nearNose <= Rd;
+  const graze  = !inBody && gapHead <= grazePx;
+  const won = inBody ? 'body' : (graze ? 'graze' : 'none');
+  return {
+    Rd, Ra,
+    noseHeadDist:+noseHeadDist.toFixed(2),           // nose tip -> head CENTRE
+    noseBodyOverlap:+(Rd-nearNose).toFixed(2),       // >0 = nose POINT is inside the body (server metric)
+    headBodyOverlap:+((Ra+Rd)-nearHead).toFixed(2),  // >0 = your drawn HEAD CIRCLE overlaps the body (what you SEE)
+    headHeadOverlap:+((Ra+Rd)-headCtrHeadDist).toFixed(2), // >0 = your head circle overlaps the defender HEAD circle
+    gapHead:+gapHead.toFixed(2), won, inBody, graze
+  };
 }
 function _circleProbe(){
   if(!_isTestLobby()||!SG) return;
@@ -4542,25 +4565,35 @@ function _circleProbe(){
   SG.snakes.forEach(s=>{ if(s===me||s.id===myPid||!s.alive||!s.path||s.path.length<2)return;
     const q=Math.hypot(s.path[0].x-me.path[0].x,s.path[0].y-me.path[0].y); if(q<dd){dd=q;def=s;} });
   if(!def) return;
-  // RENDERED geometry (what you see): own nose from interp head, defender coil = its drawn path.
-  const noseRen={x:me.path[0].x+Math.cos(me.angle)*_ssSecR(me.numSections), y:me.path[0].y+Math.sin(me.angle)*_ssSecR(me.numSections)};
-  const gRen=_cpGeom(noseRen,def.path[0],def.numSections,def.path);
-  const rec={t:Date.now(), gapHeadRen:+gRen.gapHead.toFixed(2), nearestRen:+gRen.nearest.toFixed(2), RdRen:+gRen.Rd.toFixed(2), insideRen:gRen.inside};
-  // SERVER geometry (authoritative): freshest raw snapshots. Defender coil = its snapshot trajectory.
+  const grazePx=(_tuningTest&&_tuningTest.grazePx!=null)?_tuningTest.grazePx:1.0;
+  const RaRen=_ssSecR(me.numSections);
+  // -- RENDERED (what you see): own head = me.path[0], defender coil = its drawn path --
+  const R=_cpModel(me.path[0].x,me.path[0].y,me.angle,RaRen,def.path[0],def.numSections,def.path,grazePx);
+  // only log when you're actually near the coil (an "attempt"): head circle within 8px of overlapping
+  if(R.headBodyOverlap < -8 && R.noseHeadDist > R.Rd+RaRen+8) return;
+  const rec={t:Date.now(), grazePx,
+    ren:{noseHeadDist:R.noseHeadDist, noseBodyOverlap:R.noseBodyOverlap, headBodyOverlap:R.headBodyOverlap, headHeadOverlap:R.headHeadOverlap, gapHead:R.gapHead, won:R.won}
+  };
+  // -- SERVER (authoritative freshest snapshot): own head = latest own snapshot, defender coil = its snapshot trajectory --
   const ob=_ssBuf.get(myPid), db=_ssBuf.get(def.id);
   if(ob&&ob.length&&db&&db.length>=2){
     const lo=ob[ob.length-1], ls=db[db.length-1];
-    const noseSrv={x:lo.x+Math.cos(lo.angle)*_ssSecR(lo.ns), y:lo.y+Math.sin(lo.angle)*_ssSecR(lo.ns)};
+    const RaSrv=_ssSecR(lo.ns);
     const pth=[]; for(let i=db.length-1;i>=0;i--)pth.push({x:db[i].x,y:db[i].y});
-    const gSrv=_cpGeom(noseSrv,{x:ls.x,y:ls.y},ls.ns,pth);
-    rec.gapHeadSrv=+gSrv.gapHead.toFixed(2); rec.nearestSrv=+gSrv.nearest.toFixed(2); rec.insideSrv=gSrv.inside;
-    rec.headOffsetPx=+Math.hypot(def.path[0].x-ls.x,def.path[0].y-ls.y).toFixed(1);
-    rec.noseOffsetPx=+Math.hypot(noseRen.x-noseSrv.x,noseRen.y-noseSrv.y).toFixed(1);
+    const S=_cpModel(lo.x,lo.y,lo.angle,RaSrv,{x:ls.x,y:ls.y},ls.ns,pth,grazePx);
+    rec.srv={noseHeadDist:S.noseHeadDist, noseBodyOverlap:S.noseBodyOverlap, headBodyOverlap:S.headBodyOverlap, headHeadOverlap:S.headHeadOverlap, gapHead:S.gapHead, won:S.won};
+    rec.headPosOffsetPx=+Math.hypot(def.path[0].x-ls.x,def.path[0].y-ls.y).toFixed(1);   // render-vs-server defender head
     rec.snapAgeMs=Date.now()-ls.t;
-    if(gRen.inside && !gSrv.inside){ rec.EVENT='seen_inside_server_clear'; _cpEvents++;
-      if(Date.now()-_cpLastWarn>250){ _cpLastWarn=Date.now();
-        console.warn(`[CIRCLE_PROBE] SEEN INSIDE body (nearestRen=${rec.nearestRen}px < Rd=${rec.RdRen}) but SERVER CLEAR (nearestSrv=${rec.nearestSrv}px). Defender head render-offset=${rec.headOffsetPx}px → you survive this frame.`); }
-    } else if(!gRen.inside && gSrv.inside){ rec.EVENT='seen_clear_server_inside'; }
+    rec.overlapDisagreePx=+Math.abs(R.noseBodyOverlap-S.noseBodyOverlap).toFixed(2);
+    rec.wonDisagree = (R.won!==S.won);
+    if(R.headBodyOverlap>3 && R.won==='none' && S.won==='none')      rec.DIAG='MODEL_GAP';   // you visibly overlap; BOTH ren+srv models say no death -> nose-point-vs-head-circle, NOT interp
+    else if(R.won==='body' && S.won!=='body')                        rec.DIAG='INTERP_GAP';  // rendered says you die; server (moved) says not -> interpolation
+    else if(R.won!==S.won)                                           rec.DIAG='VERDICT_SPLIT';
+  } else if(R.headBodyOverlap>3 && R.won==='none'){ rec.DIAG='MODEL_GAP_norawSrv'; }
+  if((rec.DIAG==='MODEL_GAP'||rec.DIAG==='MODEL_GAP_norawSrv') && Date.now()-_cpLastWarn>300){ _cpLastWarn=Date.now();
+    console.warn('[CIRCLE_PROBE] MODEL GAP: drawn HEAD overlaps body by '+R.headBodyOverlap+'px, but nose POINT is '+(R.noseBodyOverlap>0?R.noseBodyOverlap+'px inside':(-R.noseBodyOverlap)+'px OUTSIDE')+' the body -> server model = no death. Nose-point-vs-head-circle gap, NOT interpolation'+(rec.srv?' (server model agrees: won='+rec.srv.won+', overlap-disagree='+rec.overlapDisagreePx+'px).':'.'));
+  } else if(rec.DIAG==='INTERP_GAP' && Date.now()-_cpLastWarn>300){ _cpLastWarn=Date.now();
+    console.warn('[CIRCLE_PROBE] INTERP GAP: rendered positions say BODY-death, but server (head moved '+rec.headPosOffsetPx+'px) says '+rec.srv.won+'. Interpolation moved the verdict.');
   }
   _cpBuf.push(rec); if(_cpBuf.length>_CP_MAX)_cpBuf.shift(); window._cpBuf=_cpBuf;
 }
