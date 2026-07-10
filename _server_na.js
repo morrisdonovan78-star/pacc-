@@ -1343,10 +1343,13 @@ function ssCheckCollisionsNose(sg, lid, io) {
       const killDist = reach - margin, killDist2 = killDist > 0 ? killDist * killDist : 0;
       const neck = Math.max(2, Math.ceil((RaBase + Rd) / SS_POINT_DIST));
       const drawnEnd = bodyEndIdx(D);
-      const end = skimOn ? Math.max(neck + 1, Math.min(drawnEnd, Math.round(drawnEnd * grazeReach))) : drawnEnd; // trail danger length
+      // trail danger length (graze only). CLAMPED to [0, drawnEnd] — never force it past the path end, or
+      // dpath[k+1] reads undefined and crashes the tick. If it lands ≤ neck the loop just skips (safe).
+      const end = skimOn ? Math.min(drawnEnd, Math.round(drawnEnd * grazeReach)) : drawnEnd;
+      const kmax = Math.min(end, dpath.length - 1);            // hard bound: dpath[k+1] must exist (never crash the tick)
       let minD2 = Infinity;
       for (let si = 0; si < hsweep.length; si++) {
-        for (let k = neck; k < end; k++) {
+        for (let k = neck; k < kmax; k++) {
           const d2 = ssPtSegD2(hsweep[si].x, hsweep[si].y, dpath[k].x, dpath[k].y, dpath[k + 1].x, dpath[k + 1].y);
           if (d2 < minD2) minD2 = d2;
         }
