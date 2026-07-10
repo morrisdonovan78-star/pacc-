@@ -499,7 +499,7 @@ function getSsGame(lid) {
       // bodyScale=1.0 → die exactly at the drawn body surface (solid). n2nScale = nose-tip touch distance
       // (×(Ra+Rb), the between-the-eyes nose region). grazePx = head-graze outer reach in FIXED px
       // (tunable down to 0.01 for a razor mechanic). circDeg = degrees of one full circle to arm.
-      ? { n2nScale: 0.30, bodyScale: 1.0, grazePx: 1.0, circDeg: 360, faceDeg: 45, rule: 'biggest_wins' }
+      ? { n2nScale: 0.30, bodyScale: 1.0, grazePx: 1.0, grazeHead: 1.0, grazeReach: 1.0, circDeg: 360, faceDeg: 45, rule: 'biggest_wins' }
       : { hbs: SS_HBS, hhbs: SS_HHBS, faceDeg: 75, rule: 'smallest_wins' }
   });
   return ssGames.get(lid);
@@ -1297,7 +1297,7 @@ function ssCheckCollisionsNose(sg, lid, io) {
   // Temporary render/collision-sync diagnostic (≤ once per second per lobby): shows, per snake, the
   // server's full buffer length vs the DRAWN tail index the collision is now clamped to. A large gap
   // was the invisible-tail bug (collided buffer ≫ drawn body). Remove after field verification.
-  if (!sg._lastSyncDiag || now - sg._lastSyncDiag > 1000) {
+  if (T.dbg && (!sg._lastSyncDiag || now - sg._lastSyncDiag > 1000)) {
     sg._lastSyncDiag = now;
     for (const s of alive) {
       const drawn = bodyEndIdx(s), buf = (s.path ? s.path.length : 0) - 1;
@@ -1312,25 +1312,38 @@ function ssCheckCollisionsNose(sg, lid, io) {
   //      • CIRCLING (circleActive) → dies when overlap > skimMargin (skims the edge & keeps rotating; dies
   //        only when its looping head reaches a trail point deeper than the margin → the temporal kill).
   //    Implemented as a distance test (no sqrt in the hot loop): overlap > margin ⇔ dist < reach − margin.
-  const skimMargin = T.grazePx  != null ? T.grazePx  : 1.0; // circle skim MARGIN px (slider; 0 = die on touch)
-  const skimScale  = T.bodyScale != null ? T.bodyScale : 1.0; // circle skim HITBOX scale (×circler head radius) — slider
+  // ── GRAZE tuning knobs (test lobby ONLY; NONE of these touch normal body/H2H/movement) ──
+  //   grazePx    = MAX BODY OVERLAP px — how many px a graze may sink into the body before it kills (skim depth).
+  //   grazeHead  = GRAZER HEAD HITBOX ×— scales the grazing head's radius for the graze check only.
+  //   bodyScale  = TARGET BODY/TRAIL RADIUS ×— scales the target trail's radius for the graze check only.
+  //   grazeReach = TRAIL DANGER LENGTH ×— how much of the target's drawn trail is lethal (1=full, <1=only near head).
+  const skimMargin = T.grazePx    != null ? T.grazePx    : 1.0;
+  const grazeHead  = T.grazeHead  != null ? T.grazeHead  : 1.0;
+  const grazeBody  = T.bodyScale  != null ? T.bodyScale  : 1.0;
+  const grazeReach = T.grazeReach != null ? T.grazeReach : 1.0;
+  const DBG = !!T.dbg;   // owner DEBUG toggle — gates ALL per-substep instrumentation. Default OFF so normal play has
+                         // ZERO logging / full-scan overhead (the verbose logs were lagging the shared node → paid ping).
   for (const A of alive) {
     if (died.has(A.pid)) continue;
-    const circ = !!A.circleActive;
-    const RaBase = R(A), RaEff = RaBase * (circ ? skimScale : 1), ph = prevHead(A);
+    const aCirc = !!A.circleActive;
+    const RaBase = R(A), ph = prevHead(A);
     const hsweep = sweep(ph.x, ph.y, A.x, A.y, Math.max(3, RaBase * 0.5));
-    const margin = circ ? skimMargin : 0;                       // only a circler may skim; everyone else dies on touch
-    // ── circle-state transition log (owner can see EXACTLY when their snake arms/disarms as a circler) ──
-    if (A._wasCircle !== circ) { A._wasCircle = circ;
-      console.log(`[${lid}] CIRCLE-STATE ${A.pid.slice(0,8)} circleActive → ${circ}  winding=${(Math.abs(A._csWind || 0) * 180 / Math.PI).toFixed(0)}/${(T.circDeg != null ? T.circDeg : 360)}deg`); }
-    let killD = null, killOverlap = 0;                          // FIRST trail that kills A (preserves kill order)
-    let nearOverlap = -Infinity, nearTarget = null;            // deepest trail overlap seen this substep (diagnostic)
+    if (DBG && A._wasCircle !== aCirc) { A._wasCircle = aCirc;
+      console.log(`[${lid}] CIRCLE-STATE ${A.pid.slice(0,8)} circleActive → ${aCirc} winding=${(Math.abs(A._csWind || 0) * 180 / Math.PI).toFixed(0)}/${(T.circDeg != null ? T.circDeg : 360)}deg`); }
+    let killD = null, killOverlap = 0, killMargin = 0, killSkimOn = false; // FIRST trail that kills A
+    let nearOverlap = -Infinity, nearTarget = null, nearSkimOn = false;    // DBG-only diagnostic scan
     for (const D of alive) {
       if (A === D) continue;
-      const Rd = R(D), reach = RaEff + Rd, dpath = D.path;
+      // SKIM applies if EITHER snake is circling: a circler skims trails, AND anyone skims a CIRCLER's body.
+      const skimOn = aCirc || !!D.circleActive;
+      const margin = skimOn ? skimMargin : 0;
+      const RaEff  = RaBase * (skimOn ? grazeHead : 1);        // grazer head hitbox scale (graze only)
+      const Rd = R(D), RdEff = Rd * (skimOn ? grazeBody : 1);   // target body/trail radius scale (graze only)
+      const reach = RaEff + RdEff, dpath = D.path;
       const killDist = reach - margin, killDist2 = killDist > 0 ? killDist * killDist : 0;
-      const neck = Math.max(2, Math.ceil((RaBase + Rd) / SS_POINT_DIST)); // neck by DRAWN radius (scale is hitbox-only)
-      const end = bodyEndIdx(D);
+      const neck = Math.max(2, Math.ceil((RaBase + Rd) / SS_POINT_DIST));
+      const drawnEnd = bodyEndIdx(D);
+      const end = skimOn ? Math.max(neck + 1, Math.min(drawnEnd, Math.round(drawnEnd * grazeReach))) : drawnEnd; // trail danger length
       let minD2 = Infinity;
       for (let si = 0; si < hsweep.length; si++) {
         for (let k = neck; k < end; k++) {
@@ -1339,30 +1352,30 @@ function ssCheckCollisionsNose(sg, lid, io) {
         }
       }
       if (minD2 === Infinity) continue;
-      const ov = reach - Math.sqrt(minD2);
-      if (ov > nearOverlap) { nearOverlap = ov; nearTarget = D; }
-      if (!killD && minD2 <= killDist2) { killD = D; killOverlap = ov; }
+      if (DBG) { const ov = (RaBase + Rd) - Math.sqrt(minD2); if (ov > nearOverlap) { nearOverlap = ov; nearTarget = D; nearSkimOn = skimOn; } }
+      if (minD2 <= killDist2) { killD = D; killMargin = margin; killSkimOn = skimOn; killOverlap = (RaBase + Rd) - Math.sqrt(minD2); if (!DBG) break; } // fast path: stop at first kill
     }
-    // ── skim heartbeat: a circler SURVIVING inside the skim band (proves the skim path is executing) ──
-    if (circ && !killD && nearOverlap > 0) {
+    if (DBG && nearSkimOn && !killD && nearOverlap > 0) {
       A._skimReached = true;
       if (!A._skimLog || now - A._skimLog > 400) { A._skimLog = now;
-        console.log(`[${lid}] CIRCLE-SKIM ${A.pid.slice(0,8)} SKIMMING overlapPx=${nearOverlap.toFixed(2)} margin=${margin} skimScale=${skimScale} SURVIVING vs ${nearTarget ? nearTarget.pid.slice(0,8) : '-'}`); }
+        console.log(`[${lid}] CIRCLE-SKIM ${A.pid.slice(0,8)} SKIMMING overlapPx=${nearOverlap.toFixed(2)} margin=${skimMargin} head=${grazeHead} body=${grazeBody} reach=${grazeReach} SURVIVING vs ${nearTarget ? nearTarget.pid.slice(0,8) : '-'}`); }
     }
     if (killD) {
-      // ── comprehensive DEATH diagnostic — every value the owner asked for, measured at the death frame ──
-      const windDeg = A._csWind != null ? Math.abs(A._csWind) * 180 / Math.PI : 0;
-      const needDeg = (T.circDeg != null ? T.circDeg : 360);
-      let n2nOv = -Infinity, n2nWho = null;                    // nearest head-to-head overlap (N2N proxy) this frame
-      for (const O of alive) { if (O === A) continue; const ov = (RaBase + R(O)) - Math.hypot(O.x - A.x, O.y - A.y); if (ov > n2nOv) { n2nOv = ov; n2nWho = O; } }
-      if (circ) { if (!sg._circ) sg._circ = []; sg._circ.push(killOverlap); if (sg._circ.length > 100) sg._circ.shift(); }
-      let mn = Infinity, mx = -Infinity; if (sg._circ) for (const v of sg._circ) { if (v < mn) mn = v; if (v > mx) mx = v; }
-      console.log(`[${lid}] CIRCLE-DIAG DEATH dying=${A.pid.slice(0,8)} check=TRAIL(firstPass) circleActive=${circ} winding=${windDeg.toFixed(0)}/${needDeg}deg`
-        + ` | trailOverlapPx=${killOverlap.toFixed(2)} vs=${killD.pid.slice(0,8)} marginApplied=${margin} skimScale=${skimScale} effKillDist=${(RaEff + R(killD) - margin).toFixed(1)} baseReach=${(RaBase + R(killD)).toFixed(1)}`
-        + ` | n2nOverlapPx=${n2nOv.toFixed(2)}(${n2nWho ? n2nWho.pid.slice(0, 8) : '-'})`
-        + ` | skimApplied=${circ} skimReachedThisLife=${!!A._skimReached}`
-        + (circ && sg._circ && sg._circ.length ? ` | last${sg._circ.length}: min=${mn.toFixed(2)} max=${mx.toFixed(2)} span=${(mx - mn).toFixed(2)}` : ''));
-      kill(A, killD, { stage: circ ? 'CIRCLE-TRAIL' : 'BODY', tick: sg.tick, t: now, overlap: +killOverlap.toFixed(2), margin, circleActive: circ });
+      if (DBG) {
+        const windDeg = A._csWind != null ? Math.abs(A._csWind) * 180 / Math.PI : 0;
+        const needDeg = (T.circDeg != null ? T.circDeg : 360);
+        const RaEffK = RaBase * (killSkimOn ? grazeHead : 1);
+        let n2nOv = -Infinity, n2nWho = null;
+        for (const O of alive) { if (O === A) continue; const ov = (RaBase + R(O)) - Math.hypot(O.x - A.x, O.y - A.y); if (ov > n2nOv) { n2nOv = ov; n2nWho = O; } }
+        if (killSkimOn) { if (!sg._circ) sg._circ = []; sg._circ.push(killOverlap); if (sg._circ.length > 100) sg._circ.shift(); }
+        let mn = Infinity, mx = -Infinity; if (sg._circ) for (const v of sg._circ) { if (v < mn) mn = v; if (v > mx) mx = v; }
+        const why = aCirc ? 'A-circling' : (killD.circleActive ? 'D-circling(grazing a circler)' : 'neither(normal touch)');
+        console.log(`[${lid}] CIRCLE-DIAG DEATH dying=${A.pid.slice(0,8)} check=TRAIL skimOn=${killSkimOn}(${why}) aCircleActive=${aCirc} winding=${windDeg.toFixed(0)}/${needDeg}deg`
+          + ` | trailOverlapPx=${killOverlap.toFixed(2)} vs=${killD.pid.slice(0,8)}(circleActive=${!!killD.circleActive}) marginApplied=${killMargin} head=${grazeHead} body=${grazeBody} reach=${grazeReach} effKillDist=${(RaEffK + R(killD) * (killSkimOn ? grazeBody : 1) - killMargin).toFixed(1)} baseReach=${(RaBase + R(killD)).toFixed(1)}`
+          + ` | n2nOverlapPx=${n2nOv.toFixed(2)}(${n2nWho ? n2nWho.pid.slice(0, 8) : '-'}) skimApplied=${killSkimOn} skimReachedThisLife=${!!A._skimReached}`
+          + (killSkimOn && sg._circ && sg._circ.length ? ` | last${sg._circ.length}: min=${mn.toFixed(2)} max=${mx.toFixed(2)} span=${(mx - mn).toFixed(2)}` : ''));
+      }
+      kill(A, killD, { stage: killSkimOn ? 'CIRCLE-TRAIL' : 'BODY', tick: sg.tick, t: now, overlap: +killOverlap.toFixed(2), margin: killMargin, skimOn: killSkimOn });
     }
   }
 
@@ -1986,8 +1999,11 @@ io.on('connection', socket => {
     if (sg.testHitbox) {
       // Test lobby uses the separate visual-radius params — isolated from every other lobby's tuning.
       if (typeof d.n2nScale  === 'number') sg.tuning.n2nScale  = Math.max(0.1, Math.min(1.2, d.n2nScale));
-      if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.3, Math.min(1.2, d.bodyScale)); // circle skim hitbox scale (×circler head)
-      if (typeof d.grazePx   === 'number') sg.tuning.grazePx   = Math.max(0, Math.min(12, d.grazePx)); // circle skim margin (0 = die on touch)
+      if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.2, Math.min(2.0, d.bodyScale)); // target body/trail radius scale (graze)
+      if (typeof d.grazePx   === 'number') sg.tuning.grazePx   = Math.max(0, Math.min(20, d.grazePx)); // MAX BODY OVERLAP px (skim depth)
+      if (typeof d.grazeHead === 'number') sg.tuning.grazeHead = Math.max(0.2, Math.min(2.0, d.grazeHead)); // grazer head hitbox scale
+      if (typeof d.grazeReach=== 'number') sg.tuning.grazeReach= Math.max(0.1, Math.min(1.5, d.grazeReach)); // trail danger length scale
+      if (typeof d.dbg       === 'boolean') sg.tuning.dbg      = d.dbg; // owner debug instrumentation toggle (perf-gated)
       if (typeof d.circDeg   === 'number') sg.tuning.circDeg   = Math.max(180, Math.min(360, d.circDeg));
       if (typeof d.faceDeg   === 'number') sg.tuning.faceDeg   = Math.max(0, Math.min(120, d.faceDeg));
       if (['smallest_wins','biggest_wins','random'].includes(d.rule)) sg.tuning.rule = d.rule;

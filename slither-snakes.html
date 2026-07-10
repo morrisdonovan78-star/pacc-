@@ -670,15 +670,26 @@ body.mctl #voice-speakers{left:150px;}
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;">N2N nose</span><span id="tun-nose-val" style="color:#FF66FF;text-align:right;">outline arc ±20.1°</span></div>
       <div style="font-size:9px;color:#555;">the face arc BETWEEN THE EYES — part of the snake's outline, fixed by the sprite's eye geometry (not tunable)</div>
     </div>
+    <div style="color:#FFD700;font-size:9px;margin:2px 0 6px;letter-spacing:1px;border-top:1px solid #2a1a3a;padding-top:8px;">◆ CIRCLE GRAZE — independent knobs (graze kill ONLY; nothing here touches normal body / H2H / movement)</div>
     <div style="margin-bottom:11px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#aaa;" title="Circle skim HITBOX scale: multiplies a CIRCLING snake's head radius for the trail-kill check only. Smaller = smaller hitbox, so your head can visually skim deeper into the body before it counts as reaching the trail. 1.0 = normal.">Circle skim hitbox (×head, circler)</span><span id="tun-body-val" style="color:#39FF14;min-width:44px;text-align:right;">1.00×</span></div>
-      <input type="range" id="tun-bodyScale" min="0.30" max="1.20" step="0.02" value="1.00" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
-      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>tighter</span><span>solid surface</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="MAX BODY OVERLAP: exactly how many visual px a graze may sink INTO the body before it kills. 0 = die on contact. 6 = you can be ~6px inside before dying. This ONLY changes the overlap depth.">① Max body overlap (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.0 px</span></div>
+      <input type="range" id="tun-grazePx" min="0" max="20" step="0.5" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0 = contact</span><span>20 = exaggerated</span></div>
     </div>
-    <div style="margin-bottom:11px;border-top:1px solid #2a1a3a;padding-top:9px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="Circle skim margin: how far a CIRCLING snake's head may reach into another snake's trail and still survive (skim). It dies only when its looping head reaches deeper than this. 0 = die on touch; higher = more forgiving skim.">◆ Circle skim margin (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.00 px</span></div>
-      <input type="range" id="tun-grazePx" min="0" max="6" step="0.1" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
-      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0.5 = razor</span><span>3 = forgiving</span></div>
+    <div style="margin-bottom:11px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#39FF14;" title="GRAZE HEAD HITBOX: scales the grazing head's radius for the graze check ONLY. Smaller = harder / must be more precise; larger = easier.">② Graze head hitbox (×)</span><span id="tun-grazehead-val" style="color:#39FF14;min-width:44px;text-align:right;">1.00×</span></div>
+      <input type="range" id="tun-grazeHead" min="0.2" max="2.0" step="0.05" value="1" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0.2 = strict</span><span>2.0 = easy</span></div>
+    </div>
+    <div style="margin-bottom:11px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#00FFFF;" title="TARGET BODY/TRAIL RADIUS: scales the circling snake's trail radius for the graze check ONLY. Smaller = you can overlap its drawn body more before dying.">③ Target body/trail radius (×)</span><span id="tun-body-val" style="color:#00FFFF;min-width:44px;text-align:right;">1.00×</span></div>
+      <input type="range" id="tun-bodyScale" min="0.2" max="2.0" step="0.05" value="1" oninput="_onTuning()" style="width:100%;accent-color:#00FFFF;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0.2 = thin</span><span>2.0 = fat</span></div>
+    </div>
+    <div style="margin-bottom:11px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FF66FF;" title="TRAIL DANGER LENGTH: how much of the target's drawn trail is lethal to a graze. 1 = the whole drawn body; lower = only the recent trail near its head is hot.">④ Trail danger length (×)</span><span id="tun-grazereach-val" style="color:#FF66FF;min-width:44px;text-align:right;">1.00×</span></div>
+      <input type="range" id="tun-grazeReach" min="0.1" max="1.5" step="0.05" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FF66FF;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>near head only</span><span>full body</span></div>
     </div>
     <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;">◆ Circle completion (°)</span><span id="tun-circ-val" style="color:#FFD700;min-width:44px;text-align:right;">360°</span></div>
@@ -702,6 +713,10 @@ body.mctl #voice-speakers{left:150px;}
     </select>
   </div>
 
+  <div style="display:flex;gap:12px;margin-bottom:9px;font-size:10px;color:#aaa;">
+    <label style="cursor:pointer;"><input type="checkbox" id="tun-vizChk" onchange="_onTuning()" style="vertical-align:middle;"> 👁 Graze viz</label>
+    <label style="cursor:pointer;" title="Enables server-side CIRCLE-DIAG logging. Off by default for performance — only turn on while actively debugging."><input type="checkbox" id="tun-dbgChk" onchange="_onTuning()" style="vertical-align:middle;"> 🐞 Server debug log</label>
+  </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:5px;">
     <button onclick="spawnBotSnake('circle')" style="padding:7px 4px;background:#0055AA;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">⭕ CIRCLE</button>
     <button onclick="spawnBotSnake('fight')" style="padding:7px 4px;background:#AA3300;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">⚔ FIGHTER</button>
@@ -1127,8 +1142,9 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // SINGLE SOURCE OF TRUTH for test-lobby defaults — RESET restores exactly this, so it always
 // reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
 // bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
-const _TEST_DEFAULTS={bodyScale:1.0,grazePx:1.0,circDeg:360,faceDeg:60,rule:'biggest_wins'};
+const _TEST_DEFAULTS={grazePx:1.0,grazeHead:1.0,bodyScale:1.0,grazeReach:1.0,circDeg:360,faceDeg:60,rule:'biggest_wins',dbg:false};
 let _tuningTest={..._TEST_DEFAULTS};
+let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
 try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv&&localStorage.getItem('ss_owner')==='1')Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
 let _showTuning=false;
 let _botCount=0,_isPractice=false;
@@ -3870,15 +3886,22 @@ function _toggleTuning(){
 }
 function _onTuning(){
   if(_isTestLobby()){
-    _tuningTest.bodyScale=+document.getElementById('tun-bodyScale').value;
-    _tuningTest.grazePx  =+document.getElementById('tun-grazePx').value;
-    _tuningTest.circDeg  =+document.getElementById('tun-circDeg').value;
-    _tuningTest.faceDeg  =+document.getElementById('tun-faceDegT').value;
-    _tuningTest.rule     = document.getElementById('tun-rule').value;
-    document.getElementById('tun-body-val').textContent =_tuningTest.bodyScale.toFixed(2)+'×';
-    document.getElementById('tun-graze-val').textContent=_tuningTest.grazePx.toFixed(2)+' px';
-    document.getElementById('tun-circ-val').textContent =_tuningTest.circDeg+'°';
-    document.getElementById('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
+    const g=id=>document.getElementById(id);
+    _tuningTest.grazePx   =+g('tun-grazePx').value;
+    _tuningTest.grazeHead =+g('tun-grazeHead').value;
+    _tuningTest.bodyScale =+g('tun-bodyScale').value;
+    _tuningTest.grazeReach=+g('tun-grazeReach').value;
+    _tuningTest.circDeg   =+g('tun-circDeg').value;
+    _tuningTest.faceDeg   =+g('tun-faceDegT').value;
+    _tuningTest.rule      = g('tun-rule').value;
+    _tuningTest.dbg       = !!(g('tun-dbgChk')&&g('tun-dbgChk').checked);
+    _grazeViz             = !!(g('tun-vizChk')&&g('tun-vizChk').checked);
+    g('tun-graze-val').textContent    =_tuningTest.grazePx.toFixed(1)+' px';
+    g('tun-grazehead-val').textContent=_tuningTest.grazeHead.toFixed(2)+'×';
+    g('tun-body-val').textContent     =_tuningTest.bodyScale.toFixed(2)+'×';
+    g('tun-grazereach-val').textContent=_tuningTest.grazeReach.toFixed(2)+'×';
+    g('tun-circ-val').textContent     =_tuningTest.circDeg+'°';
+    g('tun-faceT-val').textContent    =_tuningTest.faceDeg+'°';
     try{localStorage.setItem('ss_tuning_test8',JSON.stringify(_tuningTest));}catch(_){}
     if(_sio)_sio.emit('ss-tune',_tuningTest);
     return;
@@ -3901,10 +3924,15 @@ function _syncTuningUI(){
   if(e('tun-normal'))e('tun-normal').style.display=_test?'none':'block';
   if(e('tun-nose'))  e('tun-nose').style.display  =_test?'block':'none';
   if(_test){
-    e('tun-bodyScale').value=_tuningTest.bodyScale; e('tun-body-val').textContent=_tuningTest.bodyScale.toFixed(2)+'×';
-    if(e('tun-grazePx')){e('tun-grazePx').value=_tuningTest.grazePx; e('tun-graze-val').textContent=(_tuningTest.grazePx||1).toFixed(2)+' px';}
-    if(e('tun-circDeg')){e('tun-circDeg').value=_tuningTest.circDeg; e('tun-circ-val').textContent=(_tuningTest.circDeg||360)+'°';}
-    e('tun-faceDegT').value =_tuningTest.faceDeg;   e('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
+    const gv=(id,v)=>{const x=e(id); if(x)x.value=v;};
+    gv('tun-grazePx',_tuningTest.grazePx);   if(e('tun-graze-val'))e('tun-graze-val').textContent=(_tuningTest.grazePx??1).toFixed(1)+' px';
+    gv('tun-grazeHead',_tuningTest.grazeHead??1); if(e('tun-grazehead-val'))e('tun-grazehead-val').textContent=(_tuningTest.grazeHead??1).toFixed(2)+'×';
+    gv('tun-bodyScale',_tuningTest.bodyScale); if(e('tun-body-val'))e('tun-body-val').textContent=(_tuningTest.bodyScale??1).toFixed(2)+'×';
+    gv('tun-grazeReach',_tuningTest.grazeReach??1); if(e('tun-grazereach-val'))e('tun-grazereach-val').textContent=(_tuningTest.grazeReach??1).toFixed(2)+'×';
+    gv('tun-circDeg',_tuningTest.circDeg);   if(e('tun-circ-val'))e('tun-circ-val').textContent=(_tuningTest.circDeg||360)+'°';
+    gv('tun-faceDegT',_tuningTest.faceDeg);  if(e('tun-faceT-val'))e('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
+    if(e('tun-dbgChk'))e('tun-dbgChk').checked=!!_tuningTest.dbg;
+    if(e('tun-vizChk'))e('tun-vizChk').checked=!!_grazeViz;
     e('tun-rule').value=_tuningTest.rule||'biggest_wins';
     return;
   }
@@ -4885,6 +4913,7 @@ function rafDraw(ts){
     _myEyeAngle=Math.atan2(_mwy-_ph.y,_mwx-_ph.x)-_pS.angle;
   }else{_myEyeAngle=null;}}
   if(SG)SG.snakes.forEach(s=>{if(s.alive&&s.path.length>1)drawSnake(s);});
+  if(_grazeViz)_drawGrazeViz(); // owner graze debug overlay (test lobby)
   // (circle-probe retired — the render-vs-server capture proved the nose-point MODEL gap; the collision
   //  is now head-circle based, so the probe's old-model math no longer applies. Left defined, not called.)
   // Hitbox overlay (H key) and own-snake H2H ring are now drawn inside drawSnake()
@@ -5043,6 +5072,50 @@ function drawFood(){
       ctx.beginPath();ctx.arc(f.x-r*0.25,f.y-r*0.25,r*0.35,0,Math.PI*2);ctx.fill();
     }
   });
+}
+
+// ── GRAZE DEBUG VISUALIZATION (owner, test lobby) ────────────────────────────────────────────────
+// Draws, for the own snake vs every circleActive opponent, the exact graze geometry the SERVER uses:
+//   • the lethal portion of the circler's DRAWN trail (red highlight, length = grazeReach)
+//   • the KILL-DISTANCE ring around the own head (green = safe, red = you'd die)
+//   • a line + dot to the nearest lethal trail point, with the measured distance
+//   • text: DEAD/SAFE, how many px your head is INTO the drawn body, and the px depth you die at
+// Uses the client's DRAWN body (getBodyPoints) + the live tuning, so it matches the sprite you see.
+function _drawGrazeViz(){
+  if(!_grazeViz||!_isTestLobby()||!SG||typeof ctx==='undefined'||!ctx)return;
+  const me=SG.snakes.get(myPid); if(!me||!me.alive||!me.path||!me.path.length)return;
+  const T=_tuningTest, margin=(+T.grazePx||0), gHead=(+T.grazeHead||1), gBody=(+T.bodyScale||1), gReach=(+T.grazeReach||1);
+  const gph=me.path[0], Rg=sectionRadius(me), gCirc=!!me.spinning;
+  const z=_camZoom||1;
+  ctx.save(); ctx.lineWidth=1.5/z; ctx.font=`${Math.round(11/z)}px monospace`; ctx.textBaseline='top';
+  for(const C of SG.snakes.values()){
+    if(C===me||!C.alive||!C.path||C.path.length<2)continue;
+    const skimOn=gCirc||!!C.spinning; if(!skimOn)continue;         // graze interaction requires SOMEONE circling
+    const Rc=sectionRadius(C);
+    const RgEff=Rg*gHead, RcEff=Rc*gBody, reach=RgEff+RcEff, killDist=Math.max(0,reach-margin);
+    const bpts=getBodyPoints(C); if(!bpts||bpts.length<3)continue;
+    const spacing=Rc*SEGMENT_SPACING;
+    const neckIdx=Math.max(1,Math.min(bpts.length-2,Math.ceil((Rg+Rc)/spacing)));  // skip head+neck (that's N2N, not trail)
+    const endIdx=Math.min(bpts.length-1,Math.max(neckIdx+1,Math.round((bpts.length-1)*gReach)));
+    let minD=Infinity,minPt=null;
+    for(let i=neckIdx;i<=endIdx;i++){const p=bpts[i]; if(!p)continue; const d=Math.hypot(p.x-gph.x,p.y-gph.y); if(d<minD){minD=d;minPt=p;}}
+    // lethal trail (danger zone) highlight
+    ctx.strokeStyle='rgba(255,60,60,0.30)'; ctx.lineWidth=Rc*2*0.9;
+    ctx.beginPath(); for(let i=neckIdx;i<=endIdx;i++){const p=bpts[i]; if(!p)continue; i===neckIdx?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y);} ctx.stroke();
+    ctx.lineWidth=1.5/z;
+    if(!minPt)continue;
+    const dead=minD<=killDist, col=dead?'rgba(255,45,45,0.95)':'rgba(70,255,130,0.95)';
+    ctx.strokeStyle=col; ctx.beginPath(); ctx.arc(gph.x,gph.y,killDist,0,Math.PI*2); ctx.stroke();       // kill ring
+    ctx.beginPath(); ctx.moveTo(gph.x,gph.y); ctx.lineTo(minPt.x,minPt.y); ctx.stroke();                  // distance line
+    ctx.fillStyle=col; ctx.beginPath(); ctx.arc(minPt.x,minPt.y,3.5/z,0,Math.PI*2); ctx.fill();
+    const intoBody=Math.max(0,(Rg+Rc)-minD), dieAt=Math.max(0,(Rg+Rc)-killDist);
+    const tx=gph.x+10/z, ty=gph.y-46/z;
+    ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(tx-3/z,ty-3/z,168/z,46/z);
+    ctx.fillStyle=dead?'#ff6a6a':'#78ff9c'; ctx.fillText(`${dead?'✖ DEAD':'✓ SAFE'}  circler=${(''+C.name||'?').slice(0,6)}`,tx,ty);
+    ctx.fillStyle='#e8e8e8'; ctx.fillText(`into body ${intoBody.toFixed(1)}px (die ≥ ${dieAt.toFixed(1)}px)`,tx,ty+13/z);
+    ctx.fillText(`dist ${minD.toFixed(1)}  killDist ${killDist.toFixed(1)}`,tx,ty+26/z);
+  }
+  ctx.restore();
 }
 
 function drawSnake(snake){
