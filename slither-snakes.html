@@ -3147,6 +3147,8 @@ function _getSegsFromPath(snake){
 function snakeTick(){
   if(!SG||SG.over)return;
   SG.tick++;
+  // capture each head BEFORE it moves this tick → swept collision (matches server _chpx/_chpy)
+  SG.snakes.forEach(s=>{ if(s.alive&&s.path&&s.path.length){ s._pch={x:s.path[0].x,y:s.path[0].y}; } });
 
   // Bot AI — angle-only; position/movement comes from rafDraw dead-reckoning (same as all remote snakes)
   SG.snakes.forEach((s,id)=>{
@@ -3323,58 +3325,65 @@ function snakeTick(){
   sendSnakeState();
 }
 
+// ── PRACTICE COLLISION = the SAME nose/circle-graze model as the server (ssCheckCollisionsNose), with the
+// SAME locked tuning, so practice feels EXACTLY like the live lobbies. Collision still runs HERE on the
+// client (unchanged) — only the mechanic matches. Uses _getSegsFromPath (the DRAWN body) as the trail.
+const _PT={ grazePx:6.5, grazeHead:1.25, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, rule:'biggest_wins' };
+const _PNOSE_ARC=20.1*Math.PI/180;
+// per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
+// per-tick @30Hz, so the "not turning" floor is doubled — winding still arms after one full circDeg loop).
+const _PC_MINRATE=0.04, _PC_SLOWGRACE=2, _PC_RELDROP=0.70, _PC_RATEDECAY=0.97;
+function _practiceCircleState(sn){
+  const complete=_PT.circDeg*Math.PI/180;
+  if(sn._csWind==null){sn._csWind=0;sn._csDir=0;sn._csSlow=0;sn._csRate=0;sn._csLoop=false;sn.circleActive=false;}
+  const clr=()=>{sn._csWind=0;sn._csRate=0;sn._csLoop=false;sn._csDir=0;};
+  const dA=angleDiff(sn.angle,sn._prevAngle!=null?sn._prevAngle:sn.angle); sn._prevAngle=sn.angle;
+  const mag=Math.abs(dA), dir=dA>=0?1:-1;
+  if(dir!==sn._csDir&&mag>_PC_MINRATE){clr();sn._csDir=dir;sn._csRate=mag;sn._csSlow=0;sn.circleActive=false;return;}
+  const leaving=mag<_PC_MINRATE||(sn._csRate>_PC_MINRATE&&mag<sn._csRate*_PC_RELDROP);
+  if(leaving){sn.circleActive=false; if(++sn._csSlow>_PC_SLOWGRACE)clr(); return;}
+  sn._csSlow=0;
+  sn._csRate=sn._csRate>0?sn._csRate*_PC_RATEDECAY+mag*(1-_PC_RATEDECAY):mag;
+  sn._csWind+=dA;
+  if(Math.abs(sn._csWind)>=complete)sn._csLoop=true;
+  sn.circleActive=sn._csLoop;
+}
 function _practiceCheckCollisions(){
   if(!SG||SG.over)return;
-  const T=_tuning;
   const alive=[...SG.snakes.values()].filter(s=>s.alive&&s.path&&s.path.length>1);
+  for(const s of alive)_practiceCircleState(s);
   const died=new Set();
-  // H2H — MoneySlither pipeline mirroring server ssCheckCollisions.
-  // Both must face within faceDeg; gate fails → H2B only. No TYPE-2 fallback.
-  const _faceCos=Math.cos(T.faceDeg*Math.PI/180);
-  for(let i=0;i<alive.length;i++){
-    const p=alive[i];if(died.has(p.id))continue;
-    const px=p.path[0].x,py=p.path[0].y;
-    const hR1=msThick(p)*SS_HB*T.hbs*T.hhbs;
-    for(let j=i+1;j<alive.length;j++){
-      const q=alive[j];if(died.has(q.id))continue;
-      const qx=q.path[0].x,qy=q.path[0].y;
-      const hR2=msThick(q)*SS_HB*T.hbs*T.hhbs;
-      const rr=(hR1+hR2)*T.hbs; // MoneySlither exact: (headR1+headR2)*combatHBS
-      const dx=qx-px,dy=qy-py,d2=dx*dx+dy*dy;
-      if(d2>rr*rr)continue;                                                // Step 2
-      let pDot=0,qDot=0,_dh=0;
-      if(d2>0){                                                             // Step 3
-        _dh=Math.sqrt(d2);
-        pDot=Math.cos(p.angle)*(dx/_dh)+Math.sin(p.angle)*(dy/_dh);
-        qDot=Math.cos(q.angle)*(-dx/_dh)+Math.sin(q.angle)*(-dy/_dh);
-      }
-      if(pDot<_faceCos||qDot<_faceCos)continue;                            // gate fails → H2B
-      let loser,winner;
-      if(p.numSections>q.numSections){winner=p;loser=q;}
-      else if(q.numSections>p.numSections){winner=q;loser=p;}
-      else{winner=Math.random()<0.5?p:q;loser=winner===p?q:p;}
-      died.add(loser.id);eliminateSnake(loser.id,winner.id);               // Step 6
+  const R=s=>sectionRadius(s);
+  const M=_PT.grazePx, gHead=_PT.grazeHead, gBody=_PT.bodyScale, gReach=_PT.grazeReach, noseCos=Math.cos(_PNOSE_ARC);
+  const segsCache=new Map(); for(const s of alive)segsCache.set(s.id,_getSegsFromPath(s));
+  // 1) BODY/TRAIL (swept head vs DRAWN body). NORMAL snake dies on touch; CIRCLING snake gets the skim margin.
+  for(const A of alive){ if(died.has(A.id))continue;
+    const aCirc=!!A.circleActive, RaBase=R(A), head=A.path[0], ph=A._pch||head;
+    const n=Math.max(1,Math.ceil(Math.hypot(head.x-ph.x,head.y-ph.y)/Math.max(3,RaBase*0.5)));
+    for(const D of alive){ if(A===D||died.has(A.id))continue;
+      const skimOn=aCirc||!!D.circleActive, margin=skimOn?M:0;
+      const RaEff=RaBase*(skimOn?gHead:1), Rd=R(D), RdEff=Rd*(skimOn?gBody:1), reach=RaEff+RdEff;
+      const killDist=reach-margin, killDist2=killDist>0?killDist*killDist:0;
+      const segs=segsCache.get(D.id)||[]; if(segs.length<2)continue; const spacing=Rd*SEGMENT_SPACING;
+      const neck=Math.max(2,Math.ceil((RaBase+Rd)/spacing));
+      const drawnEnd=Math.min(segs.length-1,D.numSections);
+      const end=skimOn?Math.min(drawnEnd,Math.round(drawnEnd*gReach)):drawnEnd;
+      const kmax=Math.min(end,segs.length-1);
+      let minD2=Infinity;
+      for(let si=0;si<=n;si++){ const sx=ph.x+(head.x-ph.x)*si/n, sy=ph.y+(head.y-ph.y)*si/n;
+        for(let k=neck;k<kmax;k++){ const seg=segs[k]; if(!seg)continue; const dx=sx-seg.x,dy=sy-seg.y,d2=dx*dx+dy*dy; if(d2<minD2)minD2=d2; } }
+      if(minD2<=killDist2){ died.add(A.id); eliminateSnake(A.id,D.id); break; }
     }
   }
-  // H2B — use _getSegsFromPath (same spacing as server ssGetSegsFromPath) so practice
-  // and server fire H2B at identical distances. Pre-compute segs once per snake per tick.
-  const _segsCache=new Map();
-  alive.forEach(s=>{if(!died.has(s.id))_segsCache.set(s.id,_getSegsFromPath(s));});
-  for(let pi=0;pi<alive.length;pi++){
-    const pp=alive[pi];if(died.has(pp.id))continue;
-    const hx=pp.path[0].x,hy=pp.path[0].y;
-    const hHR=msThick(pp)*SS_HB*T.hbs*T.hhbs;
-    for(let qi=0;qi<alive.length;qi++){
-      if(pi===qi)continue;
-      const qq=alive[qi];if(died.has(qq.id))continue;
-      const bR=msThick(qq)*SS_HB*T.hbs; // MoneySlither exact: bodyR = thick*HITBOX_BASE*combatHBS (no hhbs)
-      const crr2=(hHR+bR)*(hHR+bR);
-      const qsegs=_segsCache.get(qq.id)||[];
-      for(let k=1;k<qsegs.length;k++){
-        const seg=qsegs[k];
-        const sdx=hx-seg.x,sdy=hy-seg.y;
-        if(sdx*sdx+sdy*sdy<=crr2){died.add(pp.id);eliminateSnake(pp.id,qq.id);break;}
-      }
+  // 2) N2N — nose OUTLINE-ARC vs nose OUTLINE-ARC (±20.1°), bigger wins. Skipped for circling pairs.
+  for(let i=0;i<alive.length;i++){ const A=alive[i]; if(died.has(A.id)||A.circleActive)continue;
+    for(let j=i+1;j<alive.length;j++){ const D=alive[j]; if(died.has(D.id)||D.circleActive)continue;
+      const Ra=R(A),Rd=R(D),ah=A.path[0],dh=D.path[0];
+      const dx=dh.x-ah.x,dy=dh.y-ah.y,dd=Math.hypot(dx,dy)||1; if(dd>Ra+Rd)continue;
+      const aN=(Math.cos(A.angle)*dx+Math.sin(A.angle)*dy)/dd, dN=(Math.cos(D.angle)*-dx+Math.sin(D.angle)*-dy)/dd;
+      if(aN<noseCos||dN<noseCos)continue;
+      let aWins; if(A.numSections===D.numSections)aWins=Math.random()<0.5; else if(_PT.rule==='smallest_wins')aWins=A.numSections<D.numSections; else if(_PT.rule==='random')aWins=Math.random()<0.5; else aWins=A.numSections>D.numSections;
+      const loser=aWins?D:A, winner=aWins?A:D; died.add(loser.id); eliminateSnake(loser.id,winner.id);
     }
   }
 }
@@ -3907,12 +3916,10 @@ function launchSnakeGame(){
 
 // ── Combat Tuning Suite ──────────────────────────────────────
 function _toggleTuning(){
-  // OWNER-ONLY. Hard gate here so no trigger (key, button, console) can open it for anyone else.
-  if(localStorage.getItem('ss_owner')!=='1'){ _showTuning=false; const _p=document.getElementById('tuning-panel'); if(_p)_p.style.display='none'; return; }
-  _showTuning=!_showTuning;
-  const p=document.getElementById('tuning-panel');
-  if(p)p.style.display=_showTuning?'block':'none';
-  if(_showTuning){_syncTuningUI();_drawTuningPreview();if(_sio)_sio.emit('ss-tune',_isTestLobby()?_tuningTest:_tuning);}
+  // LOCKED FOR EVERYONE (incl. the owner). Collision tuning is now hardcoded + server-locked, so the panel
+  // is permanently disabled — no key, button, or DevTools ss_owner=1 trick can open it, and the server
+  // ignores ss-tune anyway. Always force it hidden and bail.
+  _showTuning=false; const _p=document.getElementById('tuning-panel'); if(_p)_p.style.display='none';
 }
 function _onTuning(){
   if(_isTestLobby()){
@@ -5037,18 +5044,8 @@ function drawArena(){
   // viewport diagonal in world units; if the farthest visible point is still inside the ring, skip.
   const _reach=Math.hypot(canvas.width,canvas.height)/(2*_camZoom);
   if(Math.hypot(_camX,_camY)+_reach>=bR-1){
-    // Red danger band + shaded death-zone — hidden in the TEST LOBBY (owner asked for no red ring there).
-    if(!_isTestLobby()){
-      if(bR<ARENA_R-1){
-        ctx.beginPath();
-        ctx.arc(0,0,ARENA_R,0,Math.PI*2);
-        ctx.arc(0,0,bR,0,Math.PI*2,true); // subtract the live-arena hole
-        ctx.fillStyle='rgba(255,40,40,0.11)';ctx.fill('evenodd');
-      }
-      // Danger zone — thick red band on the live border
-      ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
-      ctx.strokeStyle='rgba(255,50,50,0.12)';ctx.lineWidth=ARENA_R*0.16;ctx.stroke();
-    }
+    // Red danger band + shaded death-zone REMOVED in ALL lobbies (owner request) — only the cyan border
+    // (below) marks the boundary now, same clean look as the test lobby.
     // Border glow — layered translucent strokes + one soft halo stroke + a crisp core. The halo stroke
     // (90px @0.05) reproduces the exact glow of the old per-frame `shadowBlur=30` (verified pixel-
     // identical: avg diff 1/255) at ~0.6ms instead of ~17ms — shadowBlur on a 3000px ring was THE FPS

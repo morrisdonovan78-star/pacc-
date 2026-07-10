@@ -493,14 +493,12 @@ function getSsGame(lid) {
     snakes: new Map(), tickInterval: null, tick: 0,
     food: [], _foodDirty: true, _lastFoodSend: 0, _history: [],
     arenaR: SS_ARENA_R, shrinkPct: 0, shrinkResetAt: 0, // dynamic border state
-    testHitbox: lid === SS_TEST_LOBBY, // isolated sandbox uses the experimental nose/body model
-    tuning: (lid === SS_TEST_LOBBY)
-      // Test-lobby model. ALL radii are ×ssSectionRadius (the DRAWN radius) so the hitbox = the sprite.
-      // bodyScale=1.0 → die exactly at the drawn body surface (solid). n2nScale = nose-tip touch distance
-      // (×(Ra+Rb), the between-the-eyes nose region). grazePx = head-graze outer reach in FIXED px
-      // (tunable down to 0.01 for a razor mechanic). circDeg = degrees of one full circle to arm.
-      ? { n2nScale: 0.30, bodyScale: 1.0, grazePx: 1.0, grazeHead: 1.0, grazeReach: 1.0, circDeg: 360, faceDeg: 45, rule: 'biggest_wins' }
-      : { hbs: SS_HBS, hhbs: SS_HHBS, faceDeg: 75, rule: 'smallest_wins' }
+    testHitbox: lid === SS_TEST_LOBBY, // test sandbox EXTRAS only (boost drain, food-shed, circle-viz broadcast)
+    // COLLISION MODEL: ALL lobbies now run the (former test-lobby) nose/circle-graze model — collision still
+    // runs HERE on the server exactly as before; only the collision FUNCTION + hitboxes change. Tuning is
+    // LOCKED to the owner-approved values (no ss-tune accepted). Radii are ×ssSectionRadius (the DRAWN sprite).
+    noseCollision: true,
+    tuning: { n2nScale: 0.30, bodyScale: 0.75, grazePx: 6.5, grazeHead: 1.25, grazeReach: 1.00, circDeg: 360, faceDeg: 21, rule: 'biggest_wins' }
   });
   return ssGames.get(lid);
 }
@@ -605,7 +603,7 @@ function ssStepMovement(sn, sg, lid, io, now) {
   while (sn.angle < -Math.PI) sn.angle += 2 * Math.PI;
 
   // Circle detection (test lobby only) — updates sn.circleActive via the loop state machine.
-  if (sg.testHitbox) ssUpdateCircleState(sn, sg);
+  if (sg.noseCollision) ssUpdateCircleState(sn, sg); // circle detection feeds the graze — needed in ALL lobbies now
 
   // Boost ramp: speed = BASE + (BOOST-BASE)*boostAmount
   if (sn.boost && sn.size > SS_MIN_SIZE) sn.boostAmount = Math.min(1, (sn.boostAmount || 0) + SS_BOOST_ACCEL * SS_DT);
@@ -784,8 +782,8 @@ function ssTick(lid, io) {
     sg.snakes.forEach(sn => { if (sn.alive) { sn._chpx = sn.x; sn._chpy = sn.y; } }); // pre-substep head → swept collision (test lobby)
     sg.snakes.forEach(sn => { if (sn.alive) ssStepMovement(sn, sg, lid, io, now); });
     sg._subFrame = _sub; // substep index this tick — used by the graze/body overlap instrumentation
-    if (sg.testHitbox) ssCheckCollisionsNose(sg, lid, io); // isolated sandbox — experimental model
-    else ssCheckCollisions(sg, lid, io);
+    try { if (sg.noseCollision) ssCheckCollisionsNose(sg, lid, io); else ssCheckCollisions(sg, lid, io); }
+    catch (_e) { console.error('[SSCOLL] ' + lid + ' ' + ((_e && _e.stack) || _e)); } // fail-safe: a collision bug skips one substep, never crashes the node
     // Mid-tick broadcast: send each sub-step's position instead of only the final one, so
     // clients receive state at 60Hz (matching the 60Hz sim) instead of 30Hz. Halves the
     // interpolation buffer's inherent render lag for remote snakes. Last sub-step is still
@@ -1996,29 +1994,9 @@ io.on('connection', socket => {
     if (!sg.tickInterval) sg.tickInterval = setInterval(() => ssTick(lobbyId, io), TICK_MS);
     console.log(`[${lobbyId}] spawned ${mode} bot ${id} (immune 2.5s)`);
   });
-  socket.on('ss-tune', (d) => {
-    if (!lobbyId.startsWith('ss-') || !d) return;
-    const sg = getSsGame(lobbyId); // auto-create so pre-game ss-tune from owner is not dropped
-    if (sg.testHitbox) {
-      // Test lobby uses the separate visual-radius params — isolated from every other lobby's tuning.
-      if (typeof d.n2nScale  === 'number') sg.tuning.n2nScale  = Math.max(0.1, Math.min(1.2, d.n2nScale));
-      if (typeof d.bodyScale === 'number') sg.tuning.bodyScale = Math.max(0.2, Math.min(2.0, d.bodyScale)); // target body/trail radius scale (graze)
-      if (typeof d.grazePx   === 'number') sg.tuning.grazePx   = Math.max(0, Math.min(20, d.grazePx)); // MAX BODY OVERLAP px (skim depth)
-      if (typeof d.grazeHead === 'number') sg.tuning.grazeHead = Math.max(0.2, Math.min(2.0, d.grazeHead)); // grazer head hitbox scale
-      if (typeof d.grazeReach=== 'number') sg.tuning.grazeReach= Math.max(0.1, Math.min(1.5, d.grazeReach)); // trail danger length scale
-      if (typeof d.dbg       === 'boolean') sg.tuning.dbg      = d.dbg; // owner debug instrumentation toggle (perf-gated)
-      if (typeof d.circDeg   === 'number') sg.tuning.circDeg   = Math.max(180, Math.min(360, d.circDeg));
-      if (typeof d.faceDeg   === 'number') sg.tuning.faceDeg   = Math.max(0, Math.min(120, d.faceDeg));
-      if (['smallest_wins','biggest_wins','random'].includes(d.rule)) sg.tuning.rule = d.rule;
-      console.log(`[${lobbyId}] ss-tune(TEST): n2n=${sg.tuning.n2nScale} body=${sg.tuning.bodyScale} grazePx=${sg.tuning.grazePx} circDeg=${sg.tuning.circDeg} faceDeg=${sg.tuning.faceDeg} rule=${sg.tuning.rule}`);
-      return;
-    }
-    if (typeof d.hbs === 'number') sg.tuning.hbs = Math.max(0.5, Math.min(3.0, d.hbs));
-    if (typeof d.hhbs === 'number') sg.tuning.hhbs = Math.max(1.0, Math.min(3.0, d.hhbs));
-    if (typeof d.faceDeg === 'number') sg.tuning.faceDeg = Math.max(0, Math.min(120, d.faceDeg));
-    if (['smallest_wins','biggest_wins','both_die','random'].includes(d.rule)) sg.tuning.rule = d.rule;
-    console.log(`[${lobbyId}] ss-tune: hbs=${sg.tuning.hbs} hhbs=${sg.tuning.hhbs} faceDeg=${sg.tuning.faceDeg} rule=${sg.tuning.rule}`);
-  });
+  // ss-tune is LOCKED. Collision tuning is hardcoded per lobby (owner-approved, see getSsGame) and CANNOT be
+  // changed by any client — including a cheater emitting ss-tune directly from DevTools. Ignored entirely.
+  socket.on('ss-tune', () => { /* locked — no runtime tuning changes accepted */ });
 
   // HOST-originated kill — validate server-side, then broadcast elim to everyone.
   // This bypasses the ss.kills strip (server strips kills from ss relay to own collision
