@@ -1104,6 +1104,36 @@ const _snakeDeathTs=new Map();  // id → timestamp of death, for time-based res
 const _recentKillPairs=new Map(); // time-based 2s guard — survives across ticks and host migrations
 let _playerMeta=new Map();
 let _ping=0,_pingIv=null;
+// ── LIVE PERFORMANCE PROFILER + OVERLAY (backtick ` toggles). Pure measurement: reads timers + draws an
+// HUD. Instruments the REAL rafDraw loop per-system so we optimize from the live frame breakdown, not
+// microbenchmarks. Splits JS time per system AND infers GPU/composite = frameInterval − JStime. ────────
+const _perf={on:false,b:{},frames:0,_cur:null,_t:0,fStart:0,jsSum:0,lastTs:0,dtAcc:0,dtN:0,dtMax:0,jank:0,snakes:0,segs:0,food:0,lastUpdate:0,dom:null};
+function _pmk(name){ if(!_perf.on)return; const now=performance.now(); if(_perf._cur!==null)_perf.b[_perf._cur]=(_perf.b[_perf._cur]||0)+(now-_perf._t); _perf._cur=name; _perf._t=now; }
+function _perfFrameStart(ts){ if(!_perf.on)return; _perf.fStart=performance.now(); _perf._cur=null;
+  if(_perf.lastTs){const dt=ts-_perf.lastTs; if(dt>0){_perf.dtAcc+=dt;_perf.dtN++; if(dt>_perf.dtMax)_perf.dtMax=dt; if(_perf.dtN>10&&dt>2*(_perf.dtAcc/_perf.dtN))_perf.jank++;}}
+  _perf.lastTs=ts; _perf.snakes=0;_perf.segs=0;_perf.food=0; }
+function _perfFrameEnd(){ if(!_perf.on)return; _pmk(null); _perf.jsSum+=performance.now()-_perf.fStart; _perf.frames++; if(performance.now()-_perf.lastUpdate>500)_perfUpdate(); }
+function _perfUpdate(){
+  const f=Math.max(1,_perf.frames), dtN=Math.max(1,_perf.dtN);
+  const frameInt=_perf.dtAcc/dtN, fps=1000/frameInt, js=_perf.jsSum/f, b=_perf.b, g=k=>((b[k]||0)/f);
+  const other=Math.max(0,js-g('net')-g('arena')-g('food')-g('snakes')-g('ui'));
+  const rows=[['FPS',fps.toFixed(0)],['frame interval',frameInt.toFixed(2)+' ms'],['JS / frame',js.toFixed(2)+' ms'],
+    ['&nbsp;&nbsp;net+interp',g('net').toFixed(2)],['&nbsp;&nbsp;arena/bg',g('arena').toFixed(2)],['&nbsp;&nbsp;food',g('food').toFixed(2)],
+    ['&nbsp;&nbsp;snakes',g('snakes').toFixed(2)],['&nbsp;&nbsp;UI/minimap',g('ui').toFixed(2)],['&nbsp;&nbsp;other JS',other.toFixed(2)],
+    ['GPU/composite/idle',Math.max(0,frameInt-js).toFixed(2)+' ms'],['worst frame',_perf.dtMax.toFixed(1)+' ms'],['jank frames',''+_perf.jank],
+    ['snakes / segs',(_perf.snakes/f).toFixed(0)+' / '+(_perf.segs/f).toFixed(0)],['food',(_perf.food/f).toFixed(0)],['ping',_ping+' ms']];
+  if(performance.memory)rows.push(['JS heap',(performance.memory.usedJSHeapSize/1048576).toFixed(0)+' MB']);
+  const bound=js>frameInt*0.7?'CPU/JS-bound':'GPU/composite-bound';
+  _perf.dom.innerHTML=`<b style="color:#8cf">⚡ PERF</b> <span style="color:${js>frameInt*0.7?'#f66':'#6f6'}">${bound}</span> <span style="color:#555">(\` toggle)</span><table style="border-collapse:collapse;margin-top:3px">`
+    +rows.map(r=>`<tr><td style="padding:0 10px 0 0">${r[0]}</td><td style="text-align:right">${r[1]}</td></tr>`).join('')+'</table>';
+  _perf.b={};_perf.frames=0;_perf.jsSum=0;_perf.dtAcc=0;_perf.dtN=0;_perf.dtMax=0;_perf.lastUpdate=performance.now();
+}
+function togglePerf(){ _perf.on=!_perf.on;
+  if(!_perf.dom){const d=document.createElement('div');d.id='perfOverlay';d.style.cssText='position:fixed;top:8px;left:8px;z-index:99999;background:rgba(6,6,18,0.86);color:#ddd;font:11px/1.35 monospace;padding:8px 10px;border:1px solid #2a2a44;border-radius:8px;pointer-events:none;white-space:nowrap';document.body.appendChild(d);_perf.dom=d;}
+  _perf.dom.style.display=_perf.on?'block':'none';
+  if(_perf.on){_perf.lastUpdate=performance.now();_perf.b={};_perf.frames=0;_perf.jsSum=0;_perf.dtAcc=0;_perf.dtN=0;_perf.lastTs=0;_perf.jank=0;_perf.dom.innerHTML='profiling…';}
+  try{addToast('Perf overlay '+(_perf.on?'ON — reads timers only, no gameplay effect':'OFF'),'#8cf');}catch(_){}
+}
 let _fps=0,_fpsFrames=0,_fpsLast=0;
 let _myUsd=0; // my current in-round value (USD) — entry wager now; grows with wager-food winnings later
 let _moneyFx=[]; // floating $ pickup effects when collecting wager food
@@ -4141,6 +4171,7 @@ function onGameKey(e){
   // 'H' hitboxes stays hardcoded (dev tool, not in the remap list) unless the key is bound elsewhere.
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
+  if(!a && (e.code==='Backquote'||e.key==='`')){togglePerf();return;} // perf overlay (measurement only)
   if(!a)return;
   if(a==='boost')_mouseBoost=true;
   else if(a==='cashout'){
@@ -4723,6 +4754,7 @@ function rafDraw(ts){
   if(!canvas||!ctx){rafHandle=null;return;}
   rafHandle=requestAnimationFrame(rafDraw);
   _lastDrawTs=ts;
+  _perfFrameStart(ts); _pmk('net');
 
   if(_pendingState){applyRemoteState(_pendingState);_pendingState=null;}
 
@@ -4902,8 +4934,9 @@ function rafDraw(ts){
   ctx.scale(_camZoom,_camZoom);
   ctx.translate(-_camX,-_camY);
 
-  drawArena();
-  if(SG&&SG.food)drawFood();
+  _pmk('arena'); drawArena();
+  _pmk('food'); if(SG&&SG.food)drawFood();
+  _pmk('snakes');
   // Update pupil-tracking angle for own snake each frame
   {const _pS=SG&&SG.snakes.get(myPid);
   if(_pS&&_pS.alive&&_pS.path.length&&canvas){
@@ -4922,6 +4955,7 @@ function rafDraw(ts){
   if(SG)drawMoneyFx();
   ctx.restore();
 
+  _pmk('ui');
   if(SG)_voiceUpdateSpeaking();
   drawHUD(mySnake);
   drawKillFeedHUD();
@@ -4945,6 +4979,7 @@ function rafDraw(ts){
     ctx.fillStyle='rgba(255,255,255,0.95)';ctx.fill();
     ctx.restore();
   }
+  _perfFrameEnd();
 }
 
 function _spawnMoneyFx(x,y){_moneyFx.push({x:x+(Math.random()-.5)*22,y:y-8,t0:performance.now()});if(_moneyFx.length>50)_moneyFx.shift();}
@@ -5033,6 +5068,7 @@ function drawArena(){
 
 function drawFood(){
   const now=Date.now();
+  if(_perf.on&&SG&&SG.food)_perf.food+=SG.food.length;
   const vHW=canvas.width/(2*_camZoom)+30,vHH=canvas.height/(2*_camZoom)+30;
   // Batch glow pass
   ctx.globalAlpha=0.22;
@@ -5163,6 +5199,7 @@ function drawSnake(snake){
   const r=sectionRadius(snake); // damnbruh visual radius
   const col=snake.color;
   const n=bPts.length;
+  if(_perf.on){_perf.snakes++;_perf.segs+=n;}
   const now=performance.now();
 
   // Boost rainbow glow — polyline stroke so the glow is smooth, not per-circle rings
