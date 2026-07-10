@@ -5239,9 +5239,9 @@ function drawSnake(snake){
   // Hitbox overlay (H key) — drawn here so circles share z-level with body and
   // can never visually extend past the snake tail (same bPts array, same indices)
   if(_showHitboxes){
-    const bR=msThick(snake)*SS_HB*_tuning.hbs;
+    const bR=sectionRadius(snake); // NEW model: body hitbox = the DRAWN body surface (== the sprite), all lobbies
     ctx.lineWidth=1.5/_camZoom;
-    ctx.strokeStyle='rgba(255,255,0,0.70)';
+    ctx.strokeStyle='rgba(57,255,20,0.45)';
     ctx.beginPath();
     for(let k=1;k<bPts.length;k++){
       const bp=bPts[k];
@@ -5286,13 +5286,13 @@ function drawSnake(snake){
   //                 bring your head centre to just kiss this surface (≤ graze tol) to kill it; go deeper → you die.
   //   MAGENTA arc = THE NOSE: part of the OUTLINE itself — the arc of the head circle between the two eyes
   //                 (±20.1° of heading, exactly the gap the eyes leave on the face). Matches server SS_NOSE_ARC.
-  if(_showHitboxes && SG && _isTestLobby()){
+  if(_showHitboxes && SG){                                                       // NEW nose model overlay — ALL lobbies now
     const R=sectionRadius(snake), ang=snake.angle||0;
     const NOSE_ARC=20.1*Math.PI/180; // = server SS_NOSE_ARC (eyes at (0.52r,±0.37r) r=0.42r ⇒ face gap ±20.1°)
     ctx.save();
     ctx.strokeStyle='rgba(57,255,20,0.5)';ctx.lineWidth=1.6/_camZoom;            // body/head surface
     ctx.beginPath();ctx.arc(h.x,h.y,R,0,Math.PI*2);ctx.stroke();
-    if(snake.spinning){                                                          // circling → head grazeable
+    if(snake.spinning||snake.circleActive){                                      // circling → head grazeable (sp broadcast OR practice)
       ctx.strokeStyle='rgba(255,215,0,0.95)';ctx.lineWidth=2/_camZoom;ctx.shadowColor='#FFD700';ctx.shadowBlur=8;
       ctx.beginPath();ctx.arc(h.x,h.y,R,0,Math.PI*2);ctx.stroke();ctx.shadowBlur=0;
       ctx.fillStyle='rgba(255,215,0,0.95)';ctx.font=(9/_camZoom)+'px Orbitron,sans-serif';ctx.textAlign='center';

@@ -883,7 +883,7 @@ function ssBroadcastState(sg, lid, io) {
       angle: sn.angle, ns: sn.ns, boost: sn.boost, circle: !!sn.circling,
       score: sn.score || 0, usd: sn.usd || 0, cash: sn.cashing ? 1 : 0,
       color: sn.color, name: sn.name,
-      sp: (sg.testHitbox && sn.circleActive) ? 1 : 0 // test lobby: circle-active = head is grazeable (H-overlay)
+      sp: (sg.noseCollision && sn.circleActive) ? 1 : 0 // circle-active = head grazeable (H-overlay, all lobbies now)
     };
     // Option A body stream (only when flag ON and trail exists): keyframe `rk` (staggered/periodic
     // or first) else delta `rd`. Flat [x0,y0,...] head-first. OFF → neither field → client unchanged.
