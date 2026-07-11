@@ -2346,7 +2346,12 @@ async function pkConnect(roomId,gameToken,spectate){
         e.on('upgrade',()=>{_wsWarned=true;}); // upgraded to ws → all good, never warn
         setTimeout(()=>{ try{ const en=_eng(); const tn=en&&en.transport&&en.transport.name;
           if(!_wsWarned && tn && tn!=='websocket'){ _wsWarned=true;
-            addToast('⚠️ WebSocket blocked on your device — ping will be high. This is your antivirus/firewall "HTTPS scanning" or a VPN/proxy, not the game. Turn off HTTPS/SSL scanning (ESET/Kaspersky/Bitdefender/Avast) or try another network.','#FF4444',11000);
+            // NOTE: measured — the WS upgrade + server are healthy (upgrades in ~300ms, network RTT ~17ms).
+            // The in-game ping number is timed on the MAIN THREAD, so heavy render frames delay the pong_res
+            // handler and inflate it; that same jank can delay the upgrade past this check. So this is almost
+            // never a real transport block — quiet console note only, no user-facing antivirus toast (it was
+            // mis-attributing render jank to the player's firewall).
+            if(window._DBG)console.warn('[transport] still on '+tn+' 6s after connect (upgrade slow — usually main-thread jank, not a real WS block)');
           } }catch(_){} }, 6000);
       });
     }catch(_){}
@@ -2589,7 +2594,7 @@ async function pkConnect(roomId,gameToken,spectate){
         const buf=_ssBuf.get(sd.id);
         // -- TRACK B PROBE (logging only): does the RAW shared snapshot jump? Normalized by elapsed
         // time so dropped/reordered packets don't false-positive. Fires = authoritative-data discontinuity.
-        try{ if(buf.length){ const _pb=buf[buf.length-1];
+        try{ if(window._DBG&&buf.length){ const _pb=buf[buf.length-1];
           const _dpx=Math.hypot(sd.x-_pb.x,sd.y-_pb.y), _dtb=Math.max(1,pktT-_pb.t), _exp=(BOOST_SPD/TICK_MS)*_dtb;
           if(_dpx>_exp*1.6){ const _r={ev:'srvjump',pid:sd.id,dpx:+_dpx.toFixed(1),dtMs:_dtb,expPx:+_exp.toFixed(1),tickGap:(d.tick!=null&&_pb.tick!=null?d.tick-_pb.tick:null),self:sd.id===myPid,t:pktT};
             (window._teleLog=window._teleLog||[]).push(_r); if(window._teleLog.length>600)window._teleLog.shift();
@@ -5172,7 +5177,7 @@ function drawSnake(snake){
   // ── TEMP render/collision-sync diagnostic (≤1/s): the server collides `numSections` body segments,
   // so if we render FEWER than that the extra segments are an invisible hitbox on our screen. Logs the
   // rendered-vs-server segment gap + how much path history we have. Remove after field verification.
-  if(snake.id!==myPid&&window._SYNC_DIAG!==false){
+  if(snake.id!==myPid&&window._SYNC_DIAG===true){
     const _nowD=performance.now();
     if(!window._lastSyncDiag||_nowD-window._lastSyncDiag>1000){
       window._lastSyncDiag=_nowD;
