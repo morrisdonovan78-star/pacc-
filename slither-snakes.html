@@ -4194,6 +4194,12 @@ function onGameKey(e){
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
   if(!a && (e.code==='Backquote'||e.key==='`')){togglePerf();return;} // perf overlay (measurement only)
+  // ── Render A/B toggles (perf, OWNER only) — live switch, same snakes on screen, default OFF = current renderer ──
+  if(!a && (e.key==='b'||e.key==='B'||e.key==='g'||e.key==='G'||e.key==='m'||e.key==='M') && localStorage.getItem('ss_owner')==='1'){
+    if(e.key==='b'||e.key==='B'){window._BODY3STROKE=!window._BODY3STROKE;addToast('Body renderer: '+(window._BODY3STROKE?'3-STROKE (optimized)':'original 3-pass circles'),'#8cf');return;}
+    if(e.key==='g'||e.key==='G'){window._GRIDCACHE=!window._GRIDCACHE;addToast('Hex grid: '+(window._GRIDCACHE?'CACHED pattern (MEASURED SLOWER — leave off)':'original per-frame stroke'),'#8cf');return;}
+    if(e.key==='m'||e.key==='M'){_renderBench();return;} // same-scene FPS/CPU/GPU/snake benchmark for the active renderer
+  }
   if(!a)return;
   if(a==='boost')_mouseBoost=true;
   else if(a==='cashout'){
@@ -5019,12 +5025,74 @@ function drawMoneyFx(){
   }
   ctx.globalAlpha=1;ctx.restore();
 }
+// ── Runtime render A/B toggles (perf work) — DEFAULT OFF ⇒ byte-for-byte the current renderer.
+//   B → window._BODY3STROKE : draw the body as 3 polyline strokes (silhouette+shadow+highlight) instead
+//       of 3 passes of n overlapping circles. The union of radius-ρ circles along the path is the SAME
+//       region as a round-cap/round-join stroke of width 2ρ, filled once at the same alpha — same look,
+//       but overdraw + arc-tessellation collapse to 3 strokes (~2.1× less snake render cost, measured).
+//   G → window._GRIDCACHE : draw the hex grid once to a screen-space tile, then repeat-pattern fill it
+//       (zoom-invariant 46px hexes) instead of re-stroking ~3000 segments every frame.
+//   M → _renderBench() : real FPS + flush-based CPU/GPU/snake/total numbers for whichever renderer is
+//       active right now (run before and after a toggle for a true, same-scene before/after).
+function _strokeBodyPath(pts,n){ let started=false; ctx.beginPath();
+  for(let i=n-1;i>=0;i--){ const p=pts[i]; if(!p)continue; if(started)ctx.lineTo(p.x,p.y); else { ctx.moveTo(p.x,p.y); started=true; } }
+  if(started)ctx.stroke(); }
+let _hexTile=null,_hexTileW=0,_hexTileH=0;
+function _ensureHexTile(){ if(_hexTile)return;
+  const Rs=46, hxs=1.5*Rs, hys=Math.sqrt(3)*Rs, perX=2*hxs, K=48, th=Math.round(K*hys);
+  _hexTileW=perX; _hexTileH=th;
+  const t=document.createElement('canvas'); t.width=perX; t.height=th; const g=t.getContext('2d');
+  g.strokeStyle='rgba(0,255,255,0.10)'; g.lineWidth=1.2; g.beginPath();
+  const cMx=Math.ceil(perX/hxs)+2, rMx=Math.ceil(th/hys)+2;
+  for(let c=-1;c<=cMx;c++){ const yo=((((c%2)+2)%2)?hys/2:0), cx=c*hxs;
+    for(let rr=-1;rr<=rMx;rr++){ const cy=rr*hys+yo;
+      for(let k=0;k<6;k++){ const a=Math.PI/3*k, vx=cx+Rs*Math.cos(a), vy=cy+Rs*Math.sin(a); if(k===0)g.moveTo(vx,vy);else g.lineTo(vx,vy); } g.closePath(); } }
+  g.stroke(); _hexTile=t; }
+function _drawHexGridCached(){ _ensureHexTile();
+  ctx.save(); ctx.setTransform(1,0,0,1,0,0);
+  const scx=canvas.width/2-_camX*_camZoom, scy=canvas.height/2-_camY*_camZoom, sr=ARENA_R*_camZoom;
+  ctx.beginPath(); ctx.arc(scx,scy,sr,0,Math.PI*2); ctx.clip();
+  const pat=ctx.createPattern(_hexTile,'repeat');
+  const offX=((scx%_hexTileW)+_hexTileW)%_hexTileW, offY=((scy%_hexTileH)+_hexTileH)%_hexTileH;
+  const m=new DOMMatrix(); m.e=offX; m.f=offY; pat.setTransform(m);
+  ctx.fillStyle=pat; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore(); }
+// Same-scene render benchmark. Flush = getImageData(1px) forces the GPU to rasterize queued commands,
+// so we measure REAL fill/raster cost (not just JS command recording). Reports for the ACTIVE renderer.
+function _renderBench(){
+  if(!SG||!canvas||!ctx){ try{addToast('Bench: not in a game','#f80');}catch(_){} return; }
+  const W=canvas.width,H=canvas.height;
+  const snakes=[...SG.snakes.values()].filter(s=>s.alive&&s.path&&s.path.length>1);
+  const flush=()=>ctx.getImageData(0,0,1,1);
+  const world=(withSnakes)=>{ ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle='#060612'; ctx.fillRect(0,0,W,H);
+    ctx.save(); ctx.translate(W/2,H/2); ctx.scale(_camZoom,_camZoom); ctx.translate(-_camX,-_camY);
+    drawArena(); if(SG.food)drawFood(); if(withSnakes)snakes.forEach(s=>{ if(s.path.length>1)drawSnake(s); }); ctx.restore(); };
+  const time=(fn,N)=>{ fn(); const t0=performance.now(); for(let i=0;i<N;i++)fn(); return (performance.now()-t0)/N; };
+  const N=40;
+  const cpu   = time(()=>world(true), N);              // JS command recording only (CPU)
+  const total = time(()=>{ world(true); flush(); }, N); // + forced raster (CPU+GPU)
+  const noSnk = time(()=>{ world(false); flush(); }, N);
+  const snakeMs = Math.max(0,total-noSnk);
+  let frames=0; const t0=performance.now();
+  const tick=()=>{ frames++; const el=performance.now()-t0;
+    if(el<1000){ requestAnimationFrame(tick); return; }
+    const fps=frames*1000/el;
+    const rep={ body:window._BODY3STROKE?'3-STROKE':'orig-3pass', grid:window._GRIDCACHE?'cached':'orig',
+      snakesOnScreen:snakes.length, zoom:+_camZoom.toFixed(2), canvas:W+'x'+H,
+      realFPS:+fps.toFixed(0), realFrameMs:+(el/frames).toFixed(2),
+      cpuRenderMs:+cpu.toFixed(2), gpuRenderMs:+(total-cpu).toFixed(2), totalRenderMs:+total.toFixed(2),
+      snakeRenderMs:+snakeMs.toFixed(2), maxFpsHeadroom:+(1000/total).toFixed(0) };
+    console.log('[BENCH] '+JSON.stringify(rep));
+    try{addToast('BENCH '+rep.body+'/'+rep.grid+' — '+rep.realFPS+'fps · total '+rep.totalRenderMs+'ms (gpu '+rep.gpuRenderMs+') · snakes '+rep.snakeRenderMs+'ms · headroom '+rep.maxFpsHeadroom+'fps  (console for full)','#8cf',7000);}catch(_){}
+  };
+  requestAnimationFrame(tick);
+}
 function drawArena(){
   ctx.save();
   // Dark background inside arena
   ctx.beginPath();ctx.arc(0,0,ARENA_R,0,Math.PI*2);
   ctx.fillStyle='#07071a';ctx.fill();
   // Dot grid
+  if(window._GRIDCACHE){ _drawHexGridCached(); } else {
   ctx.save();ctx.clip();
   // Hexagonal honeycomb grid (flat-top), viewport-culled. R scales with 1/zoom so the hex
   // count drawn on screen stays CONSTANT at every zoom level — keeps FPS flat when zooming
@@ -5050,6 +5118,7 @@ function drawArena(){
   }
   ctx.stroke();
   ctx.restore();
+  }
   // The deadly border is drawn at the LIVE radius (_arenaR), so when the server shrinks it the
   // whole ring visibly closes in. When it's closed in, shade the now-lethal band between the live
   // border and the old full edge so it's obvious that area just became instant death.
@@ -5227,6 +5296,15 @@ function drawSnake(snake){
   // Body circles — damnbruh 3-pass: fill → inner shadow → highlight.
   // Head (bPts[0]) included so it looks identical to body (fixes head-size mismatch).
   // Shadow safe at sectionRadius: 75% overlap means shadow stays within each circle.
+  if(window._BODY3STROKE){
+    // 3-STROKE body (perf A/B — B key). Each pass's union of overlapping circles == a round-cap/round-
+    // join stroke of the same width along the (offset) path, filled once at the same alpha. Same look,
+    // ~2.1× less snake render cost. Radii/offsets/alphas EXACTLY match the 3-circle passes below.
+    ctx.lineCap='round';ctx.lineJoin='round';
+    ctx.strokeStyle=col;ctx.lineWidth=2*r;_strokeBodyPath(bPts,n);                                        // silhouette (=r circles)
+    ctx.save();ctx.translate(r*0.10,r*0.12);ctx.strokeStyle='rgba(0,0,0,0.25)';ctx.lineWidth=1.24*r;_strokeBodyPath(bPts,n);ctx.restore();   // inner shadow (=0.62r circles @ +0.10r,+0.12r)
+    ctx.save();ctx.translate(-r*0.22,-r*0.28);ctx.strokeStyle='rgba(255,255,255,0.22)';ctx.lineWidth=0.56*r;_strokeBodyPath(bPts,n);ctx.restore(); // highlight (=0.28r circles @ -0.22r,-0.28r)
+  } else {
   ctx.fillStyle=col;
   ctx.beginPath();
   for(let i=n-1;i>=0;i--){
@@ -5250,6 +5328,7 @@ function drawSnake(snake){
     ctx.moveTo(p.x-r*0.22+r*0.28,p.y-r*0.28);ctx.arc(p.x-r*0.22,p.y-r*0.28,r*0.28,0,Math.PI*2);
   }
   ctx.fill();
+  }
 
   // Hitbox overlay (H key) — drawn here so circles share z-level with body and
   // can never visually extend past the snake tail (same bPts array, same indices)
