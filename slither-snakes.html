@@ -5059,12 +5059,17 @@ function _hx2rgb(h){ if(h&&h.charCodeAt(0)===35&&h.length>=7) return [parseInt(h
 function _mixc(rgb,t,tg){ return 'rgb('+((rgb[0]+(tg-rgb[0])*t)|0)+','+((rgb[1]+(tg-rgb[1])*t)|0)+','+((rgb[2]+(tg-rgb[2])*t)|0)+')'; }
 const _bodySpriteCache=new Map();
 function _bodySprite(col,r){
-  const R=Math.max(2,Math.round(r/2)*2);                 // bucket to nearest 2px → few rebuilds as it grows
-  const key=col+'|'+R;
+  // Built at SCREEN resolution (radius bucketed in screen px): the camera zoom is ~2.0 at fullscreen,
+  // so a world-sized sprite was being UPSCALED 2× through the canvas transform on every stamp —
+  // per-stamp resampling cost and slightly blurry rings. A screen-res sprite stamped at a world size
+  // of exactly cv/zoom maps 1:1 to screen pixels: no resampling, crisper rings, same design.
+  const z=_camZoom>0?_camZoom:1;
+  const Rs=Math.max(3,Math.round(r*z/2)*2);              // screen-px radius, 2px buckets → few rebuilds
+  const key=col+'|'+Rs;
   let s=_bodySpriteCache.get(key); if(s)return s;
   if(_bodySpriteCache.size>256)_bodySpriteCache.clear();  // bound memory (colours × radius buckets)
-  const pad=Math.ceil(R*0.14), sz=2*R+2*pad, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
-  const q=cv.getContext('2d'), cx=sz/2, cy=sz/2, rgb=_hx2rgb(col);
+  const pad=Math.ceil(Rs*0.14), sz=2*Rs+2*pad, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
+  const q=cv.getContext('2d'), cx=sz/2, cy=sz/2, R=Rs, rgb=_hx2rgb(col);
   q.beginPath(); q.arc(cx,cy,R,0,Math.PI*2); q.clip();
   if(rgb){
     const gr=q.createRadialGradient(cx-R*0.35,cy-R*0.38,R*0.08, cx-R*0.05,cy-R*0.05,R*1.05);
@@ -5075,11 +5080,11 @@ function _bodySprite(col,r){
     q.fillStyle=gr;
   } else { q.fillStyle=col; }
   q.fillRect(0,0,sz,sz);
-  s={cv:cv,off:R+pad}; _bodySpriteCache.set(key,s); return s;
+  s={cv:cv,szScr:sz}; _bodySpriteCache.set(key,s); return s;
 }
-// (Segment shading note: a cached-sprite drawImage "shaded ball" approach was tried and MEASURED
-// 2-3× slower than the whole legacy renderer on software canvas — segment lines are drawn as one
-// batched vector stroke inside drawSnake instead. See commit history if revisiting.)
+// (A batched rim-arc alternative + on-device auto-pick was tried 2026-07-12 and REVERTED on owner
+// feedback: the arc look is visibly worse than the sprite rings. The sprite look is canonical —
+// any future perf work must keep it pixel-identical.)
 // Same-scene render benchmark. Flush = getImageData(1px) forces the GPU to rasterize queued commands,
 // so we measure REAL fill/raster cost (not just JS command recording). Reports for the ACTIVE renderer.
 function _renderBench(){
@@ -5332,8 +5337,14 @@ function drawSnake(snake){
     // native drawImage blit is GPU-cheap (this is the slither.io/Damnbruh technique).
     // Gated: below ~2.5 screen-px radius the rings are invisible → cheaper plain shaded tube instead.
     if(window._BODYSEGS && r*_camZoom>2.5){
-      const _sp=_bodySprite(col,r), _o=_sp.off;
-      for(let i=n-1;i>=0;i--){ const p=bPts[i]; if(p) ctx.drawImage(_sp.cv, p.x-_o, p.y-_o); }
+      const _sp=_bodySprite(col,r);
+      const _szW=_sp.szScr/_camZoom, _o=_szW/2;   // world-space dest size that lands EXACTLY 1:1 on screen px
+      // Per-point viewport cull: a long snake crossing the screen was stamping its whole OFF-SCREEN
+      // tail too. Skipping invisible stamps is pixel-identical and pure savings.
+      const _vw=canvas.width/(2*_camZoom)+_o, _vh=canvas.height/(2*_camZoom)+_o;
+      for(let i=n-1;i>=0;i--){ const p=bPts[i]; if(!p)continue;
+        if(Math.abs(p.x-_camX)>_vw||Math.abs(p.y-_camY)>_vh)continue;
+        ctx.drawImage(_sp.cv, p.x-_o, p.y-_o, _szW, _szW); }
     } else {
       // Plain shaded tube (rings too small to see): silhouette + soft shadow + highlight, 3 strokes.
       ctx.strokeStyle=col;ctx.lineWidth=2*r;_strokeBodyPath(bPts,n);                                      // silhouette (=r circles)
