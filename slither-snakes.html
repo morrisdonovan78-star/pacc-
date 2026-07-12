@@ -2595,24 +2595,27 @@ async function pkConnect(roomId,gameToken,spectate){
         SG.food=_mapServerFood(d.food);
       }
       if(d.tick!=null&&SG)SG.tick=d.tick; // keep SG.tick in sync so the elim dedup guard resets each server tick
-      const pktT=Date.now(); // client receive-time (kept for staleness bookkeeping)
-      // ── BODY/HEAD JITTER ROOT-CAUSE FIX: interpolate on SERVER time, not arrival time ────────────
-      // Snapshots were buffered with t=arrival. Network jitter makes arrival spacing 1..40ms while the
-      // server emits uniformly, so the interpolation's frac misestimates — worst on a late-packet+burst
-      // (two packets land ~1ms apart → tiny span → the 1.5-clamp overshoots by position-gap-sized px).
-      // Measured in the deterministic feed harness: 3.1px mean / 15px max rendered-head noise, 0.58px
-      // mean body wobble. d.t is the SERVER's send timestamp (uniform, jitter-free). Map it onto the
-      // client clock with a windowed-minimum offset (min transit is stable; only differences matter for
-      // interpolation — clock skew cancels). Kill switch: window._SRVTS_OFF=true → old arrival stamps.
+      const pktT=Date.now(); // client receive-time — the buffer timestamp by default (known-good feel)
+      // ── Optional server-time interpolation timeline (OPT-IN, default OFF) ─────────────────────────
+      // Buffering snapshots with t=arrival means network jitter makes their spacing 1..40ms while the
+      // server emits uniformly → the interpolation frac misestimates and the body samples swim slightly.
+      // Mapping d.t (server send time) onto the client clock gives a uniform timeline. The FIRST attempt
+      // used a windowed-MINIMUM transit offset, but min recomputes each 1s bucket and every time it
+      // changed the whole timeline STEPPED a few ms → a once-per-second HEAD LURCH (user-reported). This
+      // version instead SLEWS the offset smoothly (delay-locked loop: EMA toward the observed transit),
+      // so the mapping never jumps — no lurch — while still removing most arrival jitter. Kept OFF by
+      // default (window._SRVTS_ON=true to trial) until it's validated to beat arrival-stamping FEEL, not
+      // just harness numbers. Arrival-time stamping remains the shipped default.
       let _bufT=pktT;
-      if(!window._SRVTS_OFF && typeof d.t==='number' && isFinite(d.t)){
+      if(window._SRVTS_ON && typeof d.t==='number' && isFinite(d.t)){
         const _off=pktT-d.t;
         let E=window.__ssTsEst;
-        if(!E || Math.abs(_off-E.min)>5000){ E=window.__ssTsEst={min:_off,buk:[_off,_off,_off,_off,_off,_off],bi:0,sec:Math.floor(pktT/1000)}; } // init / clock-jump (reconnect) reset
-        const _sec=Math.floor(pktT/1000);
-        if(_sec!==E.sec){ E.sec=_sec; E.bi=(E.bi+1)%6; E.buk[E.bi]=_off; E.min=Math.min.apply(null,E.buk); } // rotate 6×1s window
-        else if(_off<E.buk[E.bi]){ E.buk[E.bi]=_off; if(_off<E.min)E.min=_off; }
-        _bufT=d.t+E.min;                        // server timeline shifted onto the client clock
+        if(!E || Math.abs(_off-E.off)>5000){ E=window.__ssTsEst={off:_off}; } // init / clock-jump (reconnect) reset
+        // Smooth slew: fast toward a FRESHER mapping (lower offset — never let playback fall behind the
+        // freshest data), gentle toward a later one (absorbs one-off late packets without a step).
+        const k=(_off<E.off)?0.20:0.03;
+        E.off+=(_off-E.off)*k;
+        _bufT=d.t+E.off;                        // server timeline slewed onto the client clock (no steps)
       }
       const seen=new Set();
       (d.snakes||[]).forEach(sd=>{
