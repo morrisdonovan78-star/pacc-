@@ -2794,20 +2794,32 @@ async function enterWatchMode(region,tier){
 // snake.numSections = number of visible body circles
 // snake.path        = dense array of head positions, head-first
 //
-function getBodyPoints(snake){
+// headAnchor (optional, RENDER ONLY): resample the body starting from this point instead of path[0].
+// The stored path[0] advances unevenly at 30Hz snapshot boundaries (the interp frac clamp), so a body
+// anchored to it stair-steps against the now-smooth head/camera = the "body shakiness". Passing the
+// smooth rendered head (s._exHead) as the anchor makes the WHOLE body ride the same continuous 60fps
+// reference: every sample sits at a fixed arc-length behind a smoothly-moving origin → smooth body.
+// Sub-pixel shift only (headAnchor is ≤~1px ahead of path[0]); NOT passed by the food/broadcast callers
+// so their geometry is byte-unchanged. No timing/collision/input change.
+function getBodyPoints(snake,headAnchor){
   const path=snake.path,target=snake.numSections;
   const r=sectionRadius(snake),spacing=r*SEGMENT_SPACING;
   const pts=[];
   if(!path.length)return pts;
-  pts.push(path[0]);
+  // Virtual polyline: [headAnchor, path[0], path[1], …] when an anchor is given, else the raw path.
+  const useA=!!headAnchor;
+  const vlen=useA?path.length+1:path.length;
+  const get=useA?(i=>i===0?headAnchor:path[i-1]):(i=>path[i]);
+  pts.push(get(0));
   let cum=0;
-  for(let o=0;o+1<path.length&&pts.length<target;o++){
-    const dx=path[o+1].x-path[o].x,dy=path[o+1].y-path[o].y;
+  for(let o=0;o+1<vlen&&pts.length<target;o++){
+    const pA=get(o),pB=get(o+1);
+    const dx=pB.x-pA.x,dy=pB.y-pA.y;
     const d=Math.hypot(dx,dy);
     if(d>0){
       while(pts.length<target&&cum+d>=spacing*pts.length){
         const frac=(spacing*pts.length-cum)/d;
-        pts.push({x:path[o].x+frac*dx,y:path[o].y+frac*dy});
+        pts.push({x:pA.x+frac*dx,y:pA.y+frac*dy});
       }
     }
     cum+=d;
@@ -5314,7 +5326,12 @@ function drawSnake(snake){
     const hd=snake._exHead||snake.path[0];
     if(Math.abs(hd.x-_camX)>vHW||Math.abs(hd.y-_camY)>vHH)return;
   }
-  const bPts=getBodyPoints(snake);
+  // Anchor the body resample at the SMOOTH rendered head so the body rides the same continuous 60fps
+  // reference as the head/camera (fixes body shakiness against the now-smooth head). Skip the anchor for
+  // the own snake in local-prediction/practice — there the interp loop is bypassed so s._exHead is stale
+  // and s.path[0] is already advanced smoothly by _ssPredictLocal each frame.
+  const _bodyAnchor=(snake.id===myPid&&(window._OWN_PRED_ON||_isPractice))?null:snake._exHead;
+  const bPts=getBodyPoints(snake,_bodyAnchor);
   if(bPts.length<2)return;
   // ── TEMP render/collision-sync diagnostic (≤1/s): the server collides `numSections` body segments,
   // so if we render FEWER than that the extra segments are an invisible hitbox on our screen. Logs the
@@ -5338,8 +5355,10 @@ function drawSnake(snake){
     if(!vis)return;
   }
   // Rendered head only: draw the head end at the extrapolated position (remote snakes).
-  // Replaces the transient array slot with s._exHead — does NOT mutate snake.path[0].
-  if(snake._exHead)bPts[0]=snake._exHead;
+  // Replaces the transient array slot with s._exHead — does NOT mutate snake.path[0]. When the body
+  // was resampled from the same anchor above bPts[0] already equals it; only overwrite for the same
+  // (non-stale) anchor so pred/practice (anchor=null) keeps its smooth predicted path[0] head.
+  if(_bodyAnchor)bPts[0]=_bodyAnchor;
   const r=sectionRadius(snake); // damnbruh visual radius
   const col=snake.color;
   const n=bPts.length;
