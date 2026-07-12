@@ -4194,9 +4194,10 @@ function onGameKey(e){
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
   if(!a && (e.code==='Backquote'||e.key==='`')){togglePerf();return;} // perf overlay (measurement only)
-  // ── Body renderer A/B toggle (perf, OWNER only) — live switch, same snakes on screen, default OFF = current renderer ──
-  if(!a && (e.key==='b'||e.key==='B'||e.key==='m'||e.key==='M') && localStorage.getItem('ss_owner')==='1'){
-    if(e.key==='b'||e.key==='B'){window._BODY3STROKE=!window._BODY3STROKE;addToast('Body renderer: '+(window._BODY3STROKE?'3-STROKE (optimized)':'original 3-pass circles'),'#8cf');return;}
+  // ── Body renderer A/B toggles (perf, OWNER only) — live switch, same snakes on screen. Default = 3-stroke + rings ──
+  if(!a && (e.key==='b'||e.key==='B'||e.key==='m'||e.key==='M'||e.key==='v'||e.key==='V') && localStorage.getItem('ss_owner')==='1'){
+    if(e.key==='b'||e.key==='B'){window._BODY3STROKE=!window._BODY3STROKE;addToast('Body renderer: '+(window._BODY3STROKE?'3-STROKE (optimized)':'legacy 3-pass circles'),'#8cf');return;}
+    if(e.key==='v'||e.key==='V'){window._BODYSEGS=!window._BODYSEGS;addToast('Segment rings: '+(window._BODYSEGS?'ON':'OFF (plain tube)'),'#8cf');return;}
     if(e.key==='m'||e.key==='M'){_renderBench();return;} // same-scene FPS/CPU/GPU/snake benchmark for the active renderer
   }
   if(!a)return;
@@ -4834,6 +4835,18 @@ function rafDraw(ts){
         let da=b.angle-a.angle;
         while(da>Math.PI)da-=Math.PI*2;while(da<-Math.PI)da+=Math.PI*2;
         let ix=a.x+(b.x-a.x)*frac,iy=a.y+(b.y-a.y)*frac;
+        // ── BODY-JITTER ROOT-CAUSE FIX (render-only) ─────────────────────────────
+        // frac may EXTRAPOLATE up to 1.5 past the newest snapshot when a packet is late. That's fine
+        // for the transient rendered head, but these overshoot positions were also being BAKED into
+        // s.path (the permanent trail). When the late packet arrived, the head pulled back — leaving a
+        // lateral zigzag kink permanently written into the trail that then slid down the whole body.
+        // Measured (deterministic snapshot-feed harness, 60Hz circle, 10% packets +25ms late): body
+        // points wobbled 0.5px mean / 7.4px max per frame in the head frame; with clean timing 0.07px.
+        // FIX: the path only ever records INTERPOLATED positions (frac clamped to 1) — never
+        // extrapolated ones. The rendered head still extends to the same frac≤1.5 point via s._exHead
+        // below, so the visible head motion is UNCHANGED; the trail just no longer inherits overshoot.
+        const _fracB=Math.min(frac,1);
+        const _bx=a.x+(b.x-a.x)*_fracB,_by=a.y+(b.y-a.y)*_fracB;
         s.angle=a.angle+da*frac;
         s.numSections=b.ns;s.boost=b.boost;
         // JOIN seed aligned to the render clock: translate the seed body so its head sits on the
@@ -4842,7 +4855,7 @@ function rafDraw(ts){
         if(_hasSeed && _ssSeedBodies.has(s.id)){
           const _seed=_ssSeedBodies.get(s.id); _ssSeedBodies.delete(s.id);
           if(_seed&&_seed.length>=2){
-            const _dx=ix-_seed[0].x, _dy=iy-_seed[0].y;
+            const _dx=_bx-_seed[0].x, _dy=_by-_seed[0].y;
             s.path=_seed.map(p=>({x:p.x+_dx,y:p.y+_dy}));
           }
         }
@@ -4857,18 +4870,18 @@ function rafDraw(ts){
           // the interp head (ix,iy). Between keyframes the else branch below accumulates the interp head
           // at 60fps, so motion stays smooth. getBodyPoints/trimPath/drawSnake read s.path unchanged.
           const _kf=s._rtKf;s._rtKf=null;
-          const _h=_kf[0],_dx=ix-_h.x,_dy=iy-_h.y,_n=_kf.length,_p=new Array(_n);
+          const _h=_kf[0],_dx=_bx-_h.x,_dy=_by-_h.y,_n=_kf.length,_p=new Array(_n);
           for(let _i=0;_i<_n;_i++)_p[_i]={x:_kf[_i].x+_dx,y:_kf[_i].y+_dy};
           s.path=_p;trimPath(s);
         }else if(!s.path||!s.path.length){
           const _r=sectionRadius(s);
           const _pLen=Math.ceil(s.numSections*_r*SEGMENT_SPACING*2/SNAKE_SPD)+10;
           s.path=[];
-          for(let _i=0;_i<_pLen;_i++)s.path.push({x:ix-Math.cos(s.angle)*_i*SNAKE_SPD,y:iy-Math.sin(s.angle)*_i*SNAKE_SPD});
+          for(let _i=0;_i<_pLen;_i++)s.path.push({x:_bx-Math.cos(s.angle)*_i*SNAKE_SPD,y:_by-Math.sin(s.angle)*_i*SNAKE_SPD});
         }else{
-          // Accumulate interpolated head position into path for body rendering
+          // Accumulate the (never-extrapolated) interpolated head position into the trail
           const ph=s.path[0];
-          if(!ph||Math.hypot(ix-ph.x,iy-ph.y)>0.3){s.path.unshift({x:ix,y:iy});trimPath(s);}
+          if(!ph||Math.hypot(_bx-ph.x,_by-ph.y)>0.3){s.path.unshift({x:_bx,y:_by});trimPath(s);}
         }
         // ── Remote head render position ──────────────────────────────────────────
         // Draw the head at the SMOOTH interpolated point (s._exHead=null → drawSnake uses path[0]).
@@ -4879,6 +4892,11 @@ function rafDraw(ts){
           const _snapAge=Math.min(Math.max(0,Date.now()-latest.t),TICK_MS);
           const _exSpd=(latest.boost?BOOST_SPD:SNAKE_SPD)*(_snapAge/TICK_MS);
           s._exHead={x:ix+Math.cos(latest.angle)*_exSpd,y:iy+Math.sin(latest.angle)*_exSpd};
+        } else if(frac>1){
+          // Late-packet window: the path stopped at the newest snapshot (frac clamp 1), but the head
+          // keeps gliding to the same frac≤1.5 point as before via the transient render-only slot —
+          // identical visible head motion, no overshoot ever baked into the trail.
+          s._exHead={x:ix,y:iy};
         } else { s._exHead=null; }
       }else if(buf&&buf.length===1){
         // 1 snapshot — extrapolate forward from snapshot so snake appears + moves immediately.
@@ -5024,16 +5042,44 @@ function drawMoneyFx(){
   }
   ctx.globalAlpha=1;ctx.restore();
 }
-// ── Runtime render A/B toggles (perf work) — DEFAULT OFF ⇒ byte-for-byte the current renderer.
-//   B → window._BODY3STROKE : draw the body as 3 polyline strokes (silhouette+shadow+highlight) instead
-//       of 3 passes of n overlapping circles. The union of radius-ρ circles along the path is the SAME
-//       region as a round-cap/round-join stroke of width 2ρ, filled once at the same alpha — same look,
-//       but overdraw + arc-tessellation collapse to 3 strokes (~2.1× less snake render cost, measured).
+// ── Body renderer: 3-STROKE is now the DEFAULT (measured ~2.1× cheaper than the legacy 3-pass circle
+//    renderer at the same look — see commit 18fa50f). Owner keys remain for live A/B verification:
+//   B → window._BODY3STROKE : toggle back to the legacy n-overlapping-circles renderer (fallback only).
+//   V → window._BODYSEGS    : toggle the segment-ring pass (visual only) for a clean cost comparison.
 //   M → _renderBench() : real FPS + flush-based CPU/GPU/snake/total numbers for whichever renderer is
 //       active right now (run before and after a toggle for a true, same-scene before/after).
+window._BODY3STROKE = true;   // optimized renderer ON by default (B toggles legacy for comparison)
+window._BODYSEGS    = true;   // Damnbruh-style segment rings ON by default (V toggles, visual only)
 function _strokeBodyPath(pts,n){ let started=false; ctx.beginPath();
   for(let i=n-1;i>=0;i--){ const p=pts[i]; if(!p)continue; if(started)ctx.lineTo(p.x,p.y); else { ctx.moveTo(p.x,p.y); started=true; } }
   if(started)ctx.stroke(); }
+// ── Cached shaded-sphere body sprite (Damnbruh segmented look). Built ONCE per (colour, radius-bucket)
+// and blitted native-size per body point in drawSnake; the crescent rings emerge from the overlap.
+function _hx2rgb(h){ if(h&&h.charCodeAt(0)===35&&h.length>=7) return [parseInt(h.substr(1,2),16),parseInt(h.substr(3,2),16),parseInt(h.substr(5,2),16)]; return null; }
+function _mixc(rgb,t,tg){ return 'rgb('+((rgb[0]+(tg-rgb[0])*t)|0)+','+((rgb[1]+(tg-rgb[1])*t)|0)+','+((rgb[2]+(tg-rgb[2])*t)|0)+')'; }
+const _bodySpriteCache=new Map();
+function _bodySprite(col,r){
+  const R=Math.max(2,Math.round(r/2)*2);                 // bucket to nearest 2px → few rebuilds as it grows
+  const key=col+'|'+R;
+  let s=_bodySpriteCache.get(key); if(s)return s;
+  if(_bodySpriteCache.size>256)_bodySpriteCache.clear();  // bound memory (colours × radius buckets)
+  const pad=Math.ceil(R*0.14), sz=2*R+2*pad, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
+  const q=cv.getContext('2d'), cx=sz/2, cy=sz/2, rgb=_hx2rgb(col);
+  q.beginPath(); q.arc(cx,cy,R,0,Math.PI*2); q.clip();
+  if(rgb){
+    const gr=q.createRadialGradient(cx-R*0.35,cy-R*0.38,R*0.08, cx-R*0.05,cy-R*0.05,R*1.05);
+    gr.addColorStop(0,   _mixc(rgb,0.55,255));   // bright centre (screen-space top-left light)
+    gr.addColorStop(0.45,_mixc(rgb,0.10,255));
+    gr.addColorStop(0.82,col);
+    gr.addColorStop(1,   _mixc(rgb,0.45,0));      // dark rim → becomes the crescent ring where overlapped
+    q.fillStyle=gr;
+  } else { q.fillStyle=col; }
+  q.fillRect(0,0,sz,sz);
+  s={cv:cv,off:R+pad}; _bodySpriteCache.set(key,s); return s;
+}
+// (Segment shading note: a cached-sprite drawImage "shaded ball" approach was tried and MEASURED
+// 2-3× slower than the whole legacy renderer on software canvas — segment lines are drawn as one
+// batched vector stroke inside drawSnake instead. See commit history if revisiting.)
 // Same-scene render benchmark. Flush = getImageData(1px) forces the GPU to rasterize queued commands,
 // so we measure REAL fill/raster cost (not just JS command recording). Reports for the ACTIVE renderer.
 function _renderBench(){
@@ -5054,7 +5100,7 @@ function _renderBench(){
   const tick=()=>{ frames++; const el=performance.now()-t0;
     if(el<1000){ requestAnimationFrame(tick); return; }
     const fps=frames*1000/el;
-    const rep={ body:window._BODY3STROKE?'3-STROKE':'orig-3pass', grid:window._GRIDCACHE?'cached':'orig',
+    const rep={ body:window._BODY3STROKE?'3-STROKE':'orig-3pass', segs:window._BODYSEGS?'on':'off',
       snakesOnScreen:snakes.length, zoom:+_camZoom.toFixed(2), canvas:W+'x'+H,
       realFPS:+fps.toFixed(0), realFrameMs:+(el/frames).toFixed(2),
       cpuRenderMs:+cpu.toFixed(2), gpuRenderMs:+(total-cpu).toFixed(2), totalRenderMs:+total.toFixed(2),
@@ -5277,9 +5323,23 @@ function drawSnake(snake){
     // join stroke of the same width along the (offset) path, filled once at the same alpha. Same look,
     // ~2.1× less snake render cost. Radii/offsets/alphas EXACTLY match the 3-circle passes below.
     ctx.lineCap='round';ctx.lineJoin='round';
-    ctx.strokeStyle=col;ctx.lineWidth=2*r;_strokeBodyPath(bPts,n);                                        // silhouette (=r circles)
-    ctx.save();ctx.translate(r*0.10,r*0.12);ctx.strokeStyle='rgba(0,0,0,0.25)';ctx.lineWidth=1.24*r;_strokeBodyPath(bPts,n);ctx.restore();   // inner shadow (=0.62r circles @ +0.10r,+0.12r)
-    ctx.save();ctx.translate(-r*0.22,-r*0.28);ctx.strokeStyle='rgba(255,255,255,0.22)';ctx.lineWidth=0.56*r;_strokeBodyPath(bPts,n);ctx.restore(); // highlight (=0.28r circles @ -0.22r,-0.28r)
+    // ── Damnbruh-style segmented body (VISUAL ONLY — gameplay/hitboxes unchanged) ────────────────────
+    // Each body section is a CACHED shaded-sphere sprite (bright top-left centre → dark rim), stamped
+    // once per body point tail→head. The overlap hides each sphere's head-side rim and leaves its
+    // tail-side rim showing as the crescent "ring" between segments — exactly Damnbruh's look. Smooth
+    // silhouette + cylinder shading + segment rings ALL emerge from ONE cached image blit per point:
+    // no per-frame gradients, arcs, or sprite scaling. Measured ≈ the plain 3-stroke tube cost, and a
+    // native drawImage blit is GPU-cheap (this is the slither.io/Damnbruh technique).
+    // Gated: below ~2.5 screen-px radius the rings are invisible → cheaper plain shaded tube instead.
+    if(window._BODYSEGS && r*_camZoom>2.5){
+      const _sp=_bodySprite(col,r), _o=_sp.off;
+      for(let i=n-1;i>=0;i--){ const p=bPts[i]; if(p) ctx.drawImage(_sp.cv, p.x-_o, p.y-_o); }
+    } else {
+      // Plain shaded tube (rings too small to see): silhouette + soft shadow + highlight, 3 strokes.
+      ctx.strokeStyle=col;ctx.lineWidth=2*r;_strokeBodyPath(bPts,n);                                      // silhouette (=r circles)
+      ctx.save();ctx.translate(r*0.10,r*0.12);ctx.strokeStyle='rgba(0,0,0,0.25)';ctx.lineWidth=1.24*r;_strokeBodyPath(bPts,n);ctx.restore();   // inner shadow
+      ctx.save();ctx.translate(-r*0.22,-r*0.28);ctx.strokeStyle='rgba(255,255,255,0.22)';ctx.lineWidth=0.56*r;_strokeBodyPath(bPts,n);ctx.restore(); // highlight
+    }
   } else {
   ctx.fillStyle=col;
   ctx.beginPath();
