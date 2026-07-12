@@ -2595,7 +2595,25 @@ async function pkConnect(roomId,gameToken,spectate){
         SG.food=_mapServerFood(d.food);
       }
       if(d.tick!=null&&SG)SG.tick=d.tick; // keep SG.tick in sync so the elim dedup guard resets each server tick
-      const pktT=Date.now(); // use client receive-time; server clock may differ
+      const pktT=Date.now(); // client receive-time (kept for staleness bookkeeping)
+      // ── BODY/HEAD JITTER ROOT-CAUSE FIX: interpolate on SERVER time, not arrival time ────────────
+      // Snapshots were buffered with t=arrival. Network jitter makes arrival spacing 1..40ms while the
+      // server emits uniformly, so the interpolation's frac misestimates — worst on a late-packet+burst
+      // (two packets land ~1ms apart → tiny span → the 1.5-clamp overshoots by position-gap-sized px).
+      // Measured in the deterministic feed harness: 3.1px mean / 15px max rendered-head noise, 0.58px
+      // mean body wobble. d.t is the SERVER's send timestamp (uniform, jitter-free). Map it onto the
+      // client clock with a windowed-minimum offset (min transit is stable; only differences matter for
+      // interpolation — clock skew cancels). Kill switch: window._SRVTS_OFF=true → old arrival stamps.
+      let _bufT=pktT;
+      if(!window._SRVTS_OFF && typeof d.t==='number' && isFinite(d.t)){
+        const _off=pktT-d.t;
+        let E=window.__ssTsEst;
+        if(!E || Math.abs(_off-E.min)>5000){ E=window.__ssTsEst={min:_off,buk:[_off,_off,_off,_off,_off,_off],bi:0,sec:Math.floor(pktT/1000)}; } // init / clock-jump (reconnect) reset
+        const _sec=Math.floor(pktT/1000);
+        if(_sec!==E.sec){ E.sec=_sec; E.bi=(E.bi+1)%6; E.buk[E.bi]=_off; E.min=Math.min.apply(null,E.buk); } // rotate 6×1s window
+        else if(_off<E.buk[E.bi]){ E.buk[E.bi]=_off; if(_off<E.min)E.min=_off; }
+        _bufT=d.t+E.min;                        // server timeline shifted onto the client clock
+      }
       const seen=new Set();
       (d.snakes||[]).forEach(sd=>{
         seen.add(sd.id);
@@ -2610,7 +2628,7 @@ async function pkConnect(roomId,gameToken,spectate){
             (window._teleLog=window._teleLog||[]).push(_r); if(window._teleLog.length>600)window._teleLog.shift();
             console.log('[TELE] srv-data jump',(''+_r.pid).slice(0,8),_r.dpx+'px in '+_r.dtMs+'ms (exp<='+_r.expPx+') tickGap='+_r.tickGap);
           } } }catch(_e){}
-        buf.push({x:sd.x,y:sd.y,angle:sd.angle,ns:sd.ns,boost:sd.boost,score:sd.score||0,usd:sd.usd||0,t:pktT,tick:(typeof d.tick==='number'?d.tick:null)});
+        buf.push({x:sd.x,y:sd.y,angle:sd.angle,ns:sd.ns,boost:sd.boost,score:sd.score||0,usd:sd.usd||0,t:_bufT,tick:(typeof d.tick==='number'?d.tick:null)});
         while(buf.length>12)buf.shift();
         _playerMeta.set(sd.id,{color:sd.color,name:sd.name});
         // Ensure local snake object exists
@@ -4826,8 +4844,15 @@ function rafDraw(ts){
         // ── Snapshot interpolation (server-authoritative live game) ──────────────
         const latest=buf[buf.length-1];
         if(Date.now()-latest.t>800){s.alive=false;s.path=[];s._rtKf=null;_ssBuf.delete(s.id);return;}
-        // Find two snapshots bracketing _renderT
-        let a=buf[0],b=latest;
+        // Find two snapshots bracketing _renderT.
+        // FALLBACK FIX (body/head jitter root cause #2, measured): when a packet is late, _renderT
+        // lies PAST the newest snapshot and this loop matches nothing. The old default was
+        // a=buf[0], b=latest — interpolating along the chord from the OLDEST buffered snapshot
+        // (~200ms back) to the newest, which on a turning snake points ACROSS the curve: the head
+        // overshot up to ~7px sideways, then snapped back when the packet arrived (harness: 0.59px
+        // mean / 7.4px max body wobble). Defaulting to the NEWEST segment (a=buf[len-2]) makes the
+        // starved case extrapolate along the snake's actual latest direction instead.
+        let a=buf[buf.length-2],b=latest;
         for(let bi=1;bi<buf.length;bi++){if(buf[bi].t>=_renderT){a=buf[bi-1];b=buf[bi];break;}}
         const span=b.t-a.t;
         const frac=span>0?Math.max(0,Math.min(1.5,(_renderT-a.t)/span)):1;
