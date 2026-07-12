@@ -4912,20 +4912,22 @@ function rafDraw(ts){
           if(!ph||Math.hypot(_bx-ph.x,_by-ph.y)>0.3){s.path.unshift({x:_bx,y:_by});trimPath(s);}
         }
         // ── Remote head render position ──────────────────────────────────────────
-        // Draw the head at the SMOOTH interpolated point (s._exHead=null → drawSnake uses path[0]).
-        // The old forward extrapolation advanced the head by the newest snapshot's age and RESET on
-        // every 30Hz packet → a sawtooth that made remote heads look shaky/jumpy. Disabled by default
-        // for smooth glide; opt back in for testing with window._EXTRAP_ON=true.
+        // JUMPY/BOXY HEAD FIX: draw the head at the CONTINUOUS interpolated point (ix,iy) EVERY frame.
+        // Previously frac≤1 set s._exHead=null, so drawSnake fell back to s.path[0] — but the trail only
+        // gains a new point when the head moves >0.3px (the accumulation gate a few lines up). At normal
+        // speed the head advances ~0.29px/60fps-frame, so the gate trips only every ~2nd frame and
+        // path[0] (hence the drawn head AND the own-snake camera glued to it) jumped in 0.58px/30Hz
+        // steps = the stair-stepped "jumpy/boxy" head. (ix,iy) is the true interp position (== the
+        // clamped trail point for frac≤1), so drawing the head there de-quantizes it to a smooth 60fps
+        // glide with NO timing change, NO added input delay, and NO collision change (trail/body still
+        // accumulate on the gated s.path; only the transient rendered head slot moves).
         if(window._EXTRAP_ON){
           const _snapAge=Math.min(Math.max(0,Date.now()-latest.t),TICK_MS);
           const _exSpd=(latest.boost?BOOST_SPD:SNAKE_SPD)*(_snapAge/TICK_MS);
           s._exHead={x:ix+Math.cos(latest.angle)*_exSpd,y:iy+Math.sin(latest.angle)*_exSpd};
-        } else if(frac>1){
-          // Late-packet window: the path stopped at the newest snapshot (frac clamp 1), but the head
-          // keeps gliding to the same frac≤1.5 point as before via the transient render-only slot —
-          // identical visible head motion, no overshoot ever baked into the trail.
+        } else {
           s._exHead={x:ix,y:iy};
-        } else { s._exHead=null; }
+        }
       }else if(buf&&buf.length===1){
         // 1 snapshot — extrapolate forward from snapshot so snake appears + moves immediately.
         // Without this, new snakes are frozen at their seed position until the 2nd packet.
@@ -4977,7 +4979,13 @@ function rafDraw(ts){
   // zoom = clamp(0.3, 2.0, min(w/1920, h/1080))  — same formula as damnbruh bundle
   const mySnake=SG&&SG.snakes.get(myPid);
   if(mySnake&&mySnake.path.length&&mySnake.alive){
-    const h=mySnake.path[0];
+    // Follow the SMOOTH interp head, not the 0.3px-gated trail point. In server-interp mode (default)
+    // s._exHead is the continuous per-frame head set just above; using path[0] made the camera step at
+    // 30Hz (same gate as the jumpy-head bug) → the whole view stuttered. In local-prediction/practice
+    // mode the interp loop is skipped so _exHead is stale — there path[0] is advanced smoothly every
+    // frame by _ssPredictLocal, so keep using it. Same position either way, just de-quantized.
+    const _useEx = mySnake._exHead && !window._OWN_PRED_ON && !_isPractice;
+    const h = _useEx ? mySnake._exHead : mySnake.path[0];
     _camX=h.x;
     _camY=h.y;
   }else if(isSpectating&&SG){
