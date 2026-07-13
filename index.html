@@ -1596,12 +1596,17 @@ async function pkConnect(roomId, gameToken, spectate){
       auth: spectate ? { spectate:true, lobbyId:roomId }
                      : { pid:myPid, lobbyId:roomId, gameToken:gameToken||null,
                          name:myName, color:_mySkin.color, wagerSol:ST.wagerSol||0 },
-      // Start on polling then UPGRADE to WebSocket in-session (Socket.IO default). A COLD websocket-first
-      // connection is silently blocked by some TLS-inspecting antivirus / proxies, trapping the client on
-      // slow long-polling (high ping). The in-session upgrade passes through those middleboxes; everyone
-      // else still ends up on WebSocket after ~1 RTT. Verified the upgrade works on NA + EU.
-      transports:['polling','websocket'],
+      // CONNECT WEBSOCKET-FIRST (was polling-first) — same fix as slither-snakes.html. Polling-first
+      // made every client start on slow HTTP long-polling and depend on a fragile in-session upgrade
+      // that leaves clients STUCK on polling = sustained high ping (and hammers the shared node with
+      // 1000s of polls). WS is verified working through nginx on both nodes (direct wss 101). The
+      // WS-capable majority now get low-ping WS immediately; genuinely WS-blocked networks fall back to
+      // polling via the connect_error handler below (retries WS, then flips to polling) + the 4s
+      // init-guard. timeout:7000 bounds a silent-block hang so fallback beats the 15s outer guard.
+      transports:['websocket','polling'],
       upgrade:true,
+      timeout:7000,
+      rememberUpgrade:true,
       reconnectionAttempts:Infinity,
       reconnectionDelay:1000,
       reconnectionDelayMax:5000,
@@ -1618,7 +1623,10 @@ async function pkConnect(roomId, gameToken, spectate){
         e.on('upgrade',()=>{_wsWarned=true;});
         setTimeout(()=>{ try{ const en=_eng(); const tn=en&&en.transport&&en.transport.name;
           if(!_wsWarned && tn && tn!=='websocket'){ _wsWarned=true;
-            addToast('⚠️ WebSocket blocked on your device — ping will be high. This is your antivirus/firewall "HTTPS scanning" or a VPN/proxy, not the game. Turn off HTTPS/SSL scanning or try another network.','#FF4444',11000);
+            // Quiet console note only — the old red "WebSocket blocked, it's your antivirus" toast was a
+            // FALSE ALARM that misdiagnosed users (the real cause was polling-first + a distrusted duckdns
+            // domain, now fixed by WS-first + the pac-arena.com subdomain migration).
+            if(window._DBG)console.warn('[transport] still on '+tn+' 6s after connect (WS-first; falls back to polling only if truly blocked)');
           } }catch(_){} }, 6000);
       });
     }catch(_){}
