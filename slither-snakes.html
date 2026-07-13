@@ -4240,9 +4240,6 @@ function onGameKey(e){
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
   if(!a && (e.code==='Backquote'||e.key==='`')){togglePerf();return;} // perf overlay (measurement only)
-  // Grid-cache toggle on the "0" key — available to everyone (perf/cosmetic only, no gameplay effect),
-  // so no ss_owner needed. Moved off G because that collided with the clip hotkey.
-  if(!a && e.key==='0'){window._GRIDMODE=(window._GRIDMODE==='on')?'off':'on';_hexMode=null;try{localStorage.setItem('ss_gridmode',window._GRIDMODE);}catch(_){}addToast(window._GRIDMODE==='on'?'⚡ Grid cache ON (faster)':'Grid cache OFF (original)','#8cf',2200);return;}
   // ── Body renderer A/B toggles (perf, OWNER only) — live switch, same snakes on screen. Default = 3-stroke + rings ──
   if(!a && (e.key==='b'||e.key==='B'||e.key==='m'||e.key==='M'||e.key==='v'||e.key==='V') && localStorage.getItem('ss_owner')==='1'){
     if(e.key==='b'||e.key==='B'){window._BODY3STROKE=!window._BODY3STROKE;addToast('Body renderer: '+(window._BODY3STROKE?'3-STROKE (optimized)':'legacy 3-pass circles'),'#8cf');return;}
@@ -5118,10 +5115,9 @@ window._BODYSEGS    = true;   // Damnbruh-style segment rings ON by default (V t
 // 'auto' = self-benchmark stroke-vs-cache per device and use the cache only if clearly faster (never
 // regresses); 'on' = force cache. Owner G key cycles off→auto→on and PERSISTS the choice, so you can
 // turn on the cache, confirm the FPS jump + that the grid looks identical while moving, then it sticks.
-// Default ON (owner said ship it): the GPU majority get the FPS boost immediately; press G to flip to
-// the original live stroke to compare/revert. (Rare software-rendering clients where the blit is slower
-// is the only downside; real-frame auto-detect to follow so those fall back automatically.)
-try{ window._GRIDMODE = localStorage.getItem('ss_gridmode') || 'on'; }catch(_){ window._GRIDMODE='on'; }
+// Grid cache ON for EVERYONE, always — uniform, no per-user toggle/state (owner: make it default).
+// (Console escape hatch only, no key bind: window._GRIDMODE='off' reverts to the live stroke.)
+window._GRIDMODE = 'on';
 function _strokeBodyPath(pts,n){ let started=false; ctx.beginPath();
   for(let i=n-1;i>=0;i--){ const p=pts[i]; if(!p)continue; if(started)ctx.lineTo(p.x,p.y); else { ctx.moveTo(p.x,p.y); started=true; } }
   if(started)ctx.stroke(); }
