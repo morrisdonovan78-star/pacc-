@@ -1525,8 +1525,8 @@ const PLAYER_COLORS=['#FFD700','#FF69B4','#00BFFF','#FF4500','#39FF14','#FF1493'
 function colorFromId(id){ let h=0; for(let i=0;i<id.length;i++) h=(h*31+id.charCodeAt(i))&0x7FFFFFFF; return PLAYER_COLORS[h%PLAYER_COLORS.length]; }
 
 const GAME_SERVERS={
-  NA:{url:'https://pac-arena.duckdns.org',    label:'🇺🇸 Chicago, US'},
-  EU:{url:'https://pac-arena-eu.duckdns.org', label:'🇩🇪 Frankfurt, EU'},
+  NA:{url:'https://us.pac-arena.com',    label:'🇺🇸 Chicago, US'},
+  EU:{url:'https://eu.pac-arena.com', label:'🇩🇪 Frankfurt, EU'},
 };
 let GAME_SERVER=localStorage.getItem('pa_server')||'NA';
 function getSioUrl(){return GAME_SERVERS[GAME_SERVER].url;}
