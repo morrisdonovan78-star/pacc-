@@ -5116,8 +5116,10 @@ window._BODYSEGS    = true;   // Damnbruh-style segment rings ON by default (V t
 // 'auto' = self-benchmark stroke-vs-cache per device and use the cache only if clearly faster (never
 // regresses); 'on' = force cache. Owner G key cycles off→auto→on and PERSISTS the choice, so you can
 // turn on the cache, confirm the FPS jump + that the grid looks identical while moving, then it sticks.
-// Rolls out default-off until the look is owner-verified, then we flip the default to 'auto'.
-try{ window._GRIDMODE = localStorage.getItem('ss_gridmode') || 'off'; }catch(_){ window._GRIDMODE='off'; }
+// Default ON (owner said ship it): the GPU majority get the FPS boost immediately; press G to flip to
+// the original live stroke to compare/revert. (Rare software-rendering clients where the blit is slower
+// is the only downside; real-frame auto-detect to follow so those fall back automatically.)
+try{ window._GRIDMODE = localStorage.getItem('ss_gridmode') || 'on'; }catch(_){ window._GRIDMODE='on'; }
 function _strokeBodyPath(pts,n){ let started=false; ctx.beginPath();
   for(let i=n-1;i>=0;i--){ const p=pts[i]; if(!p)continue; if(started)ctx.lineTo(p.x,p.y); else { ctx.moveTo(p.x,p.y); started=true; } }
   if(started)ctx.stroke(); }
