@@ -4240,11 +4240,13 @@ function onGameKey(e){
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
   if(!a && (e.code==='Backquote'||e.key==='`')){togglePerf();return;} // perf overlay (measurement only)
+  // Grid-cache toggle on the "0" key — available to everyone (perf/cosmetic only, no gameplay effect),
+  // so no ss_owner needed. Moved off G because that collided with the clip hotkey.
+  if(!a && e.key==='0'){window._GRIDMODE=(window._GRIDMODE==='on')?'off':'on';_hexMode=null;try{localStorage.setItem('ss_gridmode',window._GRIDMODE);}catch(_){}addToast(window._GRIDMODE==='on'?'⚡ Grid cache ON (faster)':'Grid cache OFF (original)','#8cf',2200);return;}
   // ── Body renderer A/B toggles (perf, OWNER only) — live switch, same snakes on screen. Default = 3-stroke + rings ──
-  if(!a && (e.key==='b'||e.key==='B'||e.key==='m'||e.key==='M'||e.key==='v'||e.key==='V'||e.key==='g'||e.key==='G') && localStorage.getItem('ss_owner')==='1'){
+  if(!a && (e.key==='b'||e.key==='B'||e.key==='m'||e.key==='M'||e.key==='v'||e.key==='V') && localStorage.getItem('ss_owner')==='1'){
     if(e.key==='b'||e.key==='B'){window._BODY3STROKE=!window._BODY3STROKE;addToast('Body renderer: '+(window._BODY3STROKE?'3-STROKE (optimized)':'legacy 3-pass circles'),'#8cf');return;}
     if(e.key==='v'||e.key==='V'){window._BODYSEGS=!window._BODYSEGS;addToast('Segment rings: '+(window._BODYSEGS?'ON':'OFF (plain tube)'),'#8cf');return;}
-    if(e.key==='g'||e.key==='G'){window._GRIDMODE=(window._GRIDMODE==='on')?'off':'on';_hexMode=null;try{localStorage.setItem('ss_gridmode',window._GRIDMODE);}catch(_){}addToast('Hex grid: '+(window._GRIDMODE==='on'?'CACHED blit (perf) — watch FPS + confirm it looks identical':'LIVE per-frame stroke (original)'),'#8cf',4000);return;}
     if(e.key==='m'||e.key==='M'){_renderBench();return;} // same-scene FPS/CPU/GPU/snake benchmark for the active renderer
   }
   if(!a)return;
