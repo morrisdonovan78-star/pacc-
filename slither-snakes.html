@@ -2322,14 +2322,27 @@ async function pkConnect(roomId,gameToken,spectate){
     _sio=io(getSioUrl(),{
       auth:spectate?{spectate:true,lobbyId:roomId}
                    :{pid:myPid,lobbyId:roomId,gameToken:gameToken||null,name:myName,color:_myCol,wagerSol:ST.wagerSol||0},
-      // Start on polling then UPGRADE to WebSocket in-session (Socket.IO default order). A COLD
-      // websocket-first connection is silently blocked by some TLS-inspecting antivirus / "web shield"
-      // / corporate proxies, which then trap the client on slow HTTP long-polling forever (high ping).
-      // The in-session upgrade rides an already-established HTTP session and passes through those
-      // middleboxes — verified it upgrades to WebSocket on both NA + EU. Everyone else still ends up on
-      // WebSocket after ~1 RTT.
-      transports:['polling','websocket'],
+      // CONNECT WEBSOCKET-FIRST (was polling-then-upgrade). Root cause of the long-standing "high
+      // ping / WebSocket error on join": polling-first makes EVERY client start on slow HTTP
+      // long-polling and then depend on an in-session polling→WS UPGRADE. That upgrade is fragile —
+      // main-thread jank, a busy single-vCPU node, or a middlebox that allows the HTTP handshake but
+      // stalls the upgrade probe leaves the client STUCK on polling = sustained high ping, and each
+      // stuck client hammers the shared node with 1000s of HTTP polls (load-amplifying it for
+      // everyone). WS works cleanly through nginx on both nodes (verified: direct wss connects in
+      // ~160ms NA / ~540ms EU, 101 upgrade). So try WebSocket directly first: the WS-capable majority
+      // get low-ping WS from packet one with no polling window and no fragile upgrade step. Genuinely
+      // WS-blocked networks (some TLS-inspecting AV / corporate proxies) cleanly fall back to polling
+      // via the connect_error handler below (it flips opts to ['polling','websocket'] and reconnects)
+      // and the 5s init-guard — same end state as before for them, but the majority stop getting
+      // trapped on polling. One-line revert if ever needed: swap the array back.
+      transports:['websocket','polling'],
       upgrade:true,
+      // Bound the per-attempt connect time so a SILENTLY-blocked WebSocket (middlebox that drops the
+      // handshake with no RST) can't hang: connect_error then fires at ~7s → the handler below flips
+      // to ['polling','websocket'] and reconnection retries on polling, well within the outer 15s
+      // guard. Legit WS/polling handshakes complete in well under 1s (measured), so this only trips
+      // on genuine failures.
+      timeout:7000,
       // rememberUpgrade: on a RECONNECT, skip the polling phase and reopen straight on WebSocket.
       // MEASURED root cause of the intermittent "ping spike + WebSocket-blocked toast mid-game":
       // real clients (mobile suspends, tab-switch, flaky Wi-Fi) drop and RECONNECT constantly — the
