@@ -4239,7 +4239,7 @@ function onGameKey(e){
   // 'H' hitboxes stays hardcoded (dev tool, not in the remap list) unless the key is bound elsewhere.
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
-  if(!a && (e.code==='Backquote'||e.key==='`')){togglePerf();return;} // perf overlay (measurement only)
+  if(!a && (e.code==='Backquote'||e.key==='`'||e.key==='9')){togglePerf();return;} // perf overlay (measurement only) — 9 or backtick
   // ── Body renderer A/B toggles (perf, OWNER only) — live switch, same snakes on screen. Default = 3-stroke + rings ──
   if(!a && (e.key==='b'||e.key==='B'||e.key==='m'||e.key==='M'||e.key==='v'||e.key==='V') && localStorage.getItem('ss_owner')==='1'){
     if(e.key==='b'||e.key==='B'){window._BODY3STROKE=!window._BODY3STROKE;addToast('Body renderer: '+(window._BODY3STROKE?'3-STROKE (optimized)':'legacy 3-pass circles'),'#8cf');return;}
