@@ -1221,7 +1221,10 @@ function addToast(msg,color,dur=3000){
 function colorFromId(id){let h=0;for(let i=0;i<id.length;i++)h=(h*31+id.charCodeAt(i))&0x7FFFFFFF;return SNAKE_COLORS[h%SNAKE_COLORS.length];}
 function getMyName(){
   const inp=(document.getElementById('name-input')?.value||'').trim().toUpperCase().slice(0,12);
-  return inp||(localStorage.getItem('ss_name_'+(ST.address||''))||'').trim()||'SNAKE';
+  // Fall back to the ACCOUNT-keyed name (by email) as well as the old address-keyed one — the name must
+  // survive a wallet/address change (that was the "SNAKE" regression: name was stored only under the old
+  // wallet address, and the account-wallet sync changed the address).
+  return inp||(localStorage.getItem('ss_name_'+(ST.address||''))||localStorage.getItem('ss_name_e_'+(ST.email||''))||'').trim()||'SNAKE';
 }
 // Was localStorage-only — the SAVE button showed a "Name saved!" confirmation but never told
 // the server at all. The ONLY thing that ever pushed a name server-side was joining a PAID
@@ -1234,6 +1237,7 @@ async function saveDisplayName(){
   const v=(document.getElementById('name-input').value||'').trim().toUpperCase().slice(0,12);
   if(!v){addToast('Enter a name first','#FF4444');return;}
   localStorage.setItem('ss_name_'+(ST.address||''),v);
+  if(ST.email)localStorage.setItem('ss_name_e_'+ST.email,v); // account-keyed too, survives wallet change
   if(!ST.address){addToast('Name saved: '+v,'#39FF14');return;} // not logged in yet — local only until they are
   try{
     const r=await fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1869,7 +1873,7 @@ async function finishLogin(kp){
   await fetchPrice();
   await refreshBal().catch(()=>{});
   // Load saved name
-  const savedName=localStorage.getItem('ss_name_'+ST.address)||'';
+  const savedName=localStorage.getItem('ss_name_'+ST.address)||localStorage.getItem('ss_name_e_'+ST.email)||'';
   const nameInput=document.getElementById('name-input');
   if(nameInput&&savedName) nameInput.value=savedName;
   document.getElementById('home-off').style.display='none';
@@ -1895,7 +1899,7 @@ async function checkSession(){
     _saveWalletToAccount(_keypair); // back-fill: make sure the account has this wallet for other devices
     ST.conn=makeConnection();
     await fetchPrice(); await refreshBal();
-    const savedName=localStorage.getItem('ss_name_'+ST.address)||'';
+    const savedName=localStorage.getItem('ss_name_'+ST.address)||localStorage.getItem('ss_name_e_'+ST.email)||'';
     const nameInput=document.getElementById('name-input');
     if(nameInput&&savedName) nameInput.value=savedName;
     document.getElementById('home-off').style.display='none';
@@ -1918,6 +1922,7 @@ function showWithdraw(){
   const maxUsd=ST.solPrice>0?(maxLamps/1e9*ST.solPrice).toFixed(2):'?';
   document.getElementById('wd-bal-line').textContent='Available: $'+balUsd+' (max send: $'+maxUsd+')';
   document.getElementById('wd-modal').style.display='flex';
+  setTimeout(()=>{const el=document.getElementById('wd-amt');if(el)el.focus();},60); // ready to type immediately
 }
 
 // Reuses the withdraw modal/transfer flow to send SOL straight to another player's
@@ -1935,6 +1940,7 @@ function openSendModal(addr,name){
   const maxUsd=ST.solPrice>0?(maxLamps/1e9*ST.solPrice).toFixed(2):'?';
   document.getElementById('wd-bal-line').textContent='Available: $'+balUsd+' (max send: $'+maxUsd+')';
   document.getElementById('wd-modal').style.display='flex';
+  setTimeout(()=>{const el=document.getElementById('wd-amt');if(el)el.focus();},60); // ready to type immediately
 }
 function wdMax(){
   const balLamps=Math.round(ST.balance*1e9);
@@ -2243,7 +2249,7 @@ function stopLobbyCountPoll(){clearInterval(_lobbyCountTimer);_lobbyCountTimer=n
 async function joinTestLobby(){
   if(!ST.address){alert('Log in first');return;}
   const _nin=document.getElementById('name-input');
-  if(_nin&&_nin.value.trim()){const _nv=_nin.value.trim().toUpperCase().slice(0,12);localStorage.setItem('ss_name_'+(ST.address||''),_nv);}
+  if(_nin&&_nin.value.trim()){const _nv=_nin.value.trim().toUpperCase().slice(0,12);localStorage.setItem('ss_name_'+(ST.address||''),_nv);if(ST.email)localStorage.setItem('ss_name_e_'+ST.email,_nv);}
   if(pkRoomId&&pkRoomId!=='ss-test-lobby'){ _joiningLobby=false; if(_sio){try{_sio.disconnect();}catch(_){}  _sio=null;} } // explicit switch — clear stale guard
   if(_joiningLobby&&!_sio&&(Date.now()-_joinStartedAt>120000))_joiningLobby=false;
   if(_joiningLobby)return;
@@ -2264,7 +2270,7 @@ async function joinLobby(usd){
   if(!ST.address){alert('Log in first');return;}
   // Auto-save whatever is in the name field so getMyName() always returns the latest
   const _nin=document.getElementById('name-input');
-  if(_nin&&_nin.value.trim()){const _nv=_nin.value.trim().toUpperCase().slice(0,12);localStorage.setItem('ss_name_'+(ST.address||''),_nv);}
+  if(_nin&&_nin.value.trim()){const _nv=_nin.value.trim().toUpperCase().slice(0,12);localStorage.setItem('ss_name_'+(ST.address||''),_nv);if(ST.email)localStorage.setItem('ss_name_e_'+ST.email,_nv);}
   // Explicit switch to a DIFFERENT lobby (e.g. leaving the test lobby to JOIN FREE): never let a
   // stale join-guard from the previous lobby block it — that's the "join free sends me to the test
   // lobby" bug (the guard early-returns and leaves you where you were). Only clears on a real switch.
@@ -4653,12 +4659,13 @@ function pollGamepad(){
     const modal=_topModal();
     const scope=modal||document;
     const ae=document.activeElement;
-    // Auto-redirect to first button if nothing focused, off-screen, stuck in a text input,
-    // or focused on something outside the currently-open modal (e.g. it was open when a
-    // modal appeared on top of it).
-    const stuckInInput=ae&&ae.tagName==='INPUT';
+    // Auto-redirect to first button ONLY if nothing is focused, off-screen, or focus escaped the
+    // current modal. Do NOT redirect away from a focused text INPUT every frame — that made the
+    // withdraw/send amount field un-typeable whenever a controller was connected (focus got yanked to
+    // a button on every rAF). A gamepad user who wants to leave the field presses the d-pad (handled
+    // below), which navigates off it on that press.
     const aeInScope=!!ae&&scope.contains(ae);
-    if(!ae||ae===document.body||stuckInInput||!aeInScope){gpadFocus(0);}
+    if(!ae||ae===document.body||!aeInScope){gpadFocus(0);}
     else{const rb=ae.getBoundingClientRect();if(!(rb.width>0&&rb.height>0&&rb.bottom>0&&rb.right>0&&rb.top<window.innerHeight&&rb.left<window.innerWidth))gpadFocus(0);}
     const sy=axes[1]||0,sx=axes[0]||0;
     const dUp=cur(12)||sy<-0.5,dDown=cur(13)||sy>0.5;
