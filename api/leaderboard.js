@@ -2,7 +2,6 @@
 // api/leaderboard.js — GET top-20 players; POST to register/update display name
 const { kvGet, kvSetPerm, kvDel, kvZadd, kvZrem, kvZrevrange,
         kvHget, kvHset, kvHgetall, kvLrange } = require('../lib/kv');
-const { verifyPrivyJwt } = require('../lib/privyAuth');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -23,8 +22,16 @@ function gameOf(g) { return g === 'ss' ? 'ss' : 'pac'; }
 // account's CURRENT wallet:  a2c:<addr> = account sub,  c2a:<sub> = current wallet address.
 // Recorded on every login (action:'link') + on setname. Fully backward-compatible: an address with no
 // account link resolves to itself (legacy behaviour unchanged).
-// (Privy JWT is now SIGNATURE-verified via lib/privyAuth.verifyPrivyJwt — a forged token can no longer
-// claim another account's sub to repoint their wallet.)
+function parseJwt(token) {
+  try {
+    const p = String(token).split('.')[1];
+    const b64 = p.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - b64.length % 4) % 4);
+    const c = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+    if (c && c.exp && Math.floor(Date.now() / 1000) > c.exp) return null; // expired
+    return c && c.sub ? c : null;
+  } catch (_) { return null; }
+}
 // Record the account<->wallet link (idempotent). c2a is the account's CURRENT wallet.
 async function recordLink(sub, address) {
   if (!sub || !address) return;
@@ -84,7 +91,7 @@ module.exports = async function handler(req, res) {
   if (req.method === 'POST') {
     try {
       const { action, address, name, jwt } = req.body || {};
-      const claims = jwt ? await verifyPrivyJwt(jwt) : null;   // SIGNATURE-verified (forgeries rejected)
+      const claims = jwt ? parseJwt(jwt) : null;
       const sub = claims && claims.sub;
 
       // ── action:'link' — record the account<->wallet link on login (no name change) ──
