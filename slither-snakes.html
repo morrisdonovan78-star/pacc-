@@ -1892,6 +1892,7 @@ async function checkSession(){
     try{new solanaWeb3.PublicKey(s.address);}catch(e){localStorage.removeItem('ss_last');return;}
     ST.email=s.email; ST.address=s.address; _jwt=s.token||'';
     _linkAccountWallet();
+    _saveWalletToAccount(_keypair); // back-fill: make sure the account has this wallet for other devices
     ST.conn=makeConnection();
     await fetchPrice(); await refreshBal();
     const savedName=localStorage.getItem('ss_name_'+ST.address)||'';
@@ -2103,20 +2104,21 @@ async function verifyCode(){
   }catch(e){showErr(e.message,'home-err2');}
 }
 async function loadOrOfferWallet(){
+  // 1) This game's local wallet. BACK-FILL it to the account (older wallets predate account-save, so
+  //    they were never uploaded → a new device found nothing → the create/import prompt). Saving it now
+  //    means every future login on any device just retrieves it — no key needed.
   const kpRaw=localStorage.getItem('ss_kp_'+ST.email);
   if(kpRaw){
     try{
       const kpData=JSON.parse(kpRaw);
       const bytes=Uint8Array.from(atob(kpData.sk),c=>c.charCodeAt(0));
       const kp=solanaWeb3.Keypair.fromSecretKey(bytes);
+      _saveWalletToAccount(kp);           // back-fill to account (idempotent, fire-and-forget)
       await finishLogin(kp); return;
     }catch(e){}
   }
-  // ── ACCOUNT WALLET SYNC (fixes the "second wallet on a new device" bug that leaves stale wallets on
-  // the leaderboard + friends sending to old addresses). Pull the ONE wallet saved to this ACCOUNT —
-  // AES-encrypted in the player's Privy metadata, shared across every device AND the Pac-Man game — via
-  // the same /api/wallet the Pac-Man client already uses. Only if the account genuinely has no wallet do
-  // we fall through to create one (which then saves itself to the account). Load-first never overwrites.
+  // 2) The ONE wallet saved to this ACCOUNT — AES-encrypted in Privy metadata, shared across every
+  //    device AND the Pac-Man game (same /api/wallet the Pac-Man client uses).
   if(_jwt){
     try{
       setWalletStatus('Syncing your account wallet…');
@@ -2133,6 +2135,20 @@ async function loadOrOfferWallet(){
       }
     }catch(e){ console.warn('[wallet] account sync failed:',e.message); }
   }
+  // 3) The PAC-MAN game's local wallet on THIS device (`pa_kp_<email>`). Most players made their wallet
+  //    in Pac-Man first; adopt it here (and back-fill to the account) so both games share ONE wallet
+  //    instead of the snake game forcing a second. This is the common "still asking me to create" case.
+  try{
+    const paRaw=localStorage.getItem('pa_kp_'+ST.email);
+    if(paRaw){
+      const paData=JSON.parse(paRaw);
+      const bytes=Uint8Array.from(atob(paData.sk),c=>c.charCodeAt(0));
+      const kp=solanaWeb3.Keypair.fromSecretKey(bytes);
+      localStorage.setItem('ss_kp_'+ST.email,JSON.stringify({sk:paData.sk,v:1}));
+      _saveWalletToAccount(kp);
+      await finishLogin(kp); return;
+    }
+  }catch(e){}
   document.getElementById('wallet-checking').style.display='none';
   document.getElementById('wallet-choice').style.display='block';
   await scanAndShowWallets();
