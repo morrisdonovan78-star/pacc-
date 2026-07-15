@@ -15,6 +15,42 @@ const CORS = {
 // else (or missing) falls back to 'pac' since that was this endpoint's original game.
 function gameOf(g) { return g === 'ss' ? 'ss' : 'pac'; }
 
+// ── ACCOUNT-KEYED IDENTITY (fixes "leaderboard/friends show an old wallet") ──────────────────────
+// Everything historically keyed on the wallet ADDRESS, so when a player's wallet changed (new device
+// minted a second wallet) their name/leaderboard entry stayed on the OLD address and friends sent money
+// there. We now map wallet <-> Privy ACCOUNT and always resolve the DISPLAYED/receive wallet to the
+// account's CURRENT wallet:  a2c:<addr> = account sub,  c2a:<sub> = current wallet address.
+// Recorded on every login (action:'link') + on setname. Fully backward-compatible: an address with no
+// account link resolves to itself (legacy behaviour unchanged).
+function parseJwt(token) {
+  try {
+    const p = String(token).split('.')[1];
+    const b64 = p.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - b64.length % 4) % 4);
+    const c = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+    if (c && c.exp && Math.floor(Date.now() / 1000) > c.exp) return null; // expired
+    return c && c.sub ? c : null;
+  } catch (_) { return null; }
+}
+// Record the account<->wallet link (idempotent). c2a is the account's CURRENT wallet.
+async function recordLink(sub, address) {
+  if (!sub || !address) return;
+  await Promise.all([
+    kvSetPerm('a2c:' + address, sub).catch(() => {}),
+    kvSetPerm('c2a:' + sub, address).catch(() => {}),
+  ]);
+}
+// Resolve ANY (possibly old) address to the account's current wallet. Falls back to the input.
+async function currentAddr(address) {
+  if (!address) return address;
+  try {
+    const sub = await kvGet('a2c:' + address);
+    if (!sub) return address;
+    const cur = await kvGet('c2a:' + sub);
+    return cur || address;
+  } catch (_) { return address; }
+}
+
 // Display name is account-level (shared identity across both games), stored unscoped.
 async function readStats(game, address) {
   const empty = { name:'', earned:0, wagered:0, games:0, kills:0, deaths:0, wins:0, losses:0 };
@@ -54,17 +90,37 @@ module.exports = async function handler(req, res) {
   // ── POST — register or update display name ──────────────────────────────────
   if (req.method === 'POST') {
     try {
-      const { action, address, name } = req.body || {};
+      const { action, address, name, jwt } = req.body || {};
+      const claims = jwt ? parseJwt(jwt) : null;
+      const sub = claims && claims.sub;
+
+      // ── action:'link' — record the account<->wallet link on login (no name change) ──
+      // This is what lets names/leaderboard resolve to the player's CURRENT wallet: every login
+      // stamps c2a:<sub> = the wallet they're using now, so a name registered on any old address
+      // (whose a2c points at this account) resolves forward to this current wallet.
+      if (action === 'link') {
+        if (!sub || !address) return res.status(400).json({ error: 'jwt and address required' });
+        await recordLink(sub, address);
+        return res.status(200).json({ ok: true });
+      }
+
       if (action !== 'setname' || !address || !name) {
         return res.status(400).json({ error: 'Bad request' });
       }
       const clean = String(name).replace(/[^A-Za-z0-9_\- ]/g, '').trim().slice(0, 14).toUpperCase();
       if (!clean) return res.status(400).json({ error: 'Invalid name' });
 
-      // Check if name is already taken by a different address
+      // Record the account<->wallet link so this name resolves to this wallet going forward.
+      if (sub) await recordLink(sub, address);
+
+      // Name-ownership check. If the name is registered to a DIFFERENT wallet, allow re-pointing it to
+      // `address` ONLY when that old wallet belongs to the SAME account (a2c[old] === sub) — i.e. the
+      // player reclaiming their own name onto their current wallet. Otherwise it's genuinely taken.
       const existingAddr = await kvGet('nameReg:' + clean);
       if (existingAddr && existingAddr !== address) {
-        return res.status(200).json({ error: 'taken' });
+        let ownsOld = false;
+        if (sub) { const oldSub = await kvGet('a2c:' + existingAddr); if (oldSub && oldSub === sub) ownsOld = true; }
+        if (!ownsOld) return res.status(200).json({ error: 'taken' });
       }
 
       // Clear old name registry entry if player is changing names (name is account-level,
@@ -93,6 +149,24 @@ module.exports = async function handler(req, res) {
 
   const game = gameOf(req.query && req.query.game);
 
+  // ── GET ?resolve=<exact name> — the CURRENT sendable wallet for a name. The friends book calls
+  // this right before copy/send so money always goes to the player's current wallet, never a stale
+  // one saved months ago. Returns the account's current wallet (or the registered address if there's
+  // no account link yet). ──────────────────────────────────────────────────────────────────────────
+  if (req.query && req.query.resolve) {
+    try {
+      const nm = String(req.query.resolve).trim().toUpperCase().slice(0, 14);
+      if (!nm) return res.status(200).json({ address: null });
+      const reg = await kvGet('nameReg:' + nm);
+      if (!reg) return res.status(200).json({ address: null });
+      const cur = await currentAddr(reg);
+      return res.status(200).json({ name: nm, address: cur });
+    } catch (err) {
+      console.error('[leaderboard/resolve]', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
   // ── GET ?search= — find any player by (partial) name, not just the top 20 ──────
   // Backed by nameIndex, a flat set of every registered name — there's no native
   // "search" in a KV store, so this is a substring scan over that list. Fine at
@@ -109,9 +183,9 @@ module.exports = async function handler(req, res) {
       const results = (await Promise.all(matches.map(async (name, idx) => {
         const address = addrs[idx];
         if (!address) return null;
-        const stats = await readStats(game, address);
+        const [stats, cur] = await Promise.all([ readStats(game, address), currentAddr(address) ]);
         return {
-          address, name,
+          address: cur, name,   // `cur` = the player's CURRENT wallet (what friends copy/send to)
           earned:  stats.earned  || 0,
           wagered: stats.wagered || 0,
           games:   stats.games   || 0,
@@ -159,8 +233,9 @@ module.exports = async function handler(req, res) {
       pairs.push({ address: raw[i], score: raw[i + 1] });
     }
 
-    const [playerResults, global] = await Promise.all([
+    const [playerResults, curAddrs, global] = await Promise.all([
       Promise.all(pairs.map(({ address }) => readStats(game, address))),
+      Promise.all(pairs.map(({ address }) => currentAddr(address))),  // resolve each to the player's CURRENT wallet
       readGlobal(game),
     ]);
 
@@ -168,7 +243,7 @@ module.exports = async function handler(req, res) {
       const stats = playerResults[idx];
       return {
         rank:    idx + 1,
-        address,
+        address: curAddrs[idx] || address,   // display/send the current wallet, not a stale old one
         name:    stats.name    || '',
         earned:  stats.earned  || 0,
         wagered: stats.wagered || 0,

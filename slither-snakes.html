@@ -1237,7 +1237,7 @@ async function saveDisplayName(){
   if(!ST.address){addToast('Name saved: '+v,'#39FF14');return;} // not logged in yet — local only until they are
   try{
     const r=await fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({action:'setname',address:ST.address,name:v})});
+      body:JSON.stringify({action:'setname',address:ST.address,name:v,jwt:_jwt})});
     const d=await r.json().catch(()=>({}));
     if(d.error==='taken'){addToast('That name is already taken — try another','#FF4444');return;}
     if(!r.ok||d.error){addToast('Saved locally, but server sync failed — will retry next game','#FFD700');return;}
@@ -1622,6 +1622,18 @@ function removeFriend(address){
   saveFriends(getFriends().filter(f=>f.address!==address));
   renderFriends();
 }
+// Re-resolve a friend's CURRENT wallet by their registered name right before copy/send, so money never
+// goes to a wallet they've since replaced. Falls back to the saved address (e.g. friend added by raw
+// address with no registered name). Also refreshes the saved copy when it changed.
+async function _frCurrentAddr(name,fallback){
+  try{ if(name){ const r=await fetch('/api/leaderboard?resolve='+encodeURIComponent(name));
+    const d=await r.json(); if(d&&d.address){
+      if(d.address!==fallback){ const list=getFriends(); const f=list.find(x=>x.address===fallback); if(f){f.address=d.address;saveFriends(list);} }
+      return d.address; } } }catch(_){}
+  return fallback;
+}
+async function _frCopy(name,fallback){ copyAddress(await _frCurrentAddr(name,fallback)); }
+async function _frSend(name,fallback){ openSendModal(await _frCurrentAddr(name,fallback),name); }
 function renderFriends(){
   const list=getFriends();
   const listEl=document.getElementById('fr-list');
@@ -1630,12 +1642,13 @@ function renderFriends(){
   emptyEl.style.display='none';
   listEl.innerHTML=list.map(f=>{
     const name=String(f.name||'').replace(/[<>&]/g,'').slice(0,20);
+    const jsName=name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     return '<div class="fr-row">'+
       '<div><div style="font-weight:600;font-size:12px;">'+name+'</div>'+
       '<div style="font-family:\'Press Start 2P\',monospace;font-size:6px;color:var(--muted);margin-top:3px;">'+_lbShortAddr(f.address)+'</div></div>'+
       '<div style="display:flex;gap:4px;">'+
-        '<button class="lb-icon-btn" onclick="copyAddress(\''+f.address+'\')" title="Copy wallet">📋</button>'+
-        '<button class="lb-icon-btn" onclick="openSendModal(\''+f.address+'\',\''+name.replace(/'/g,"\\'")+'\')" title="Send SOL">💸</button>'+
+        '<button class="lb-icon-btn" onclick="_frCopy(\''+jsName+'\',\''+f.address+'\')" title="Copy current wallet">📋</button>'+
+        '<button class="lb-icon-btn" onclick="_frSend(\''+jsName+'\',\''+f.address+'\')" title="Send SOL to current wallet">💸</button>'+
         '<button class="lb-icon-btn" onclick="removeFriend(\''+f.address+'\')" title="Remove" style="color:var(--r);">✕</button>'+
       '</div>'+
     '</div>';
@@ -1851,6 +1864,7 @@ async function finishLogin(kp){
   ST.address=kp.publicKey.toString();
   localStorage.setItem('ss_'+ST.email,JSON.stringify({email:ST.email,address:ST.address,token:_jwt}));
   localStorage.setItem('ss_last',ST.email);
+  _linkAccountWallet();
   ST.conn=makeConnection();
   await fetchPrice();
   await refreshBal().catch(()=>{});
@@ -1877,6 +1891,7 @@ async function checkSession(){
     _keypair=solanaWeb3.Keypair.fromSecretKey(bytes);
     try{new solanaWeb3.PublicKey(s.address);}catch(e){localStorage.removeItem('ss_last');return;}
     ST.email=s.email; ST.address=s.address; _jwt=s.token||'';
+    _linkAccountWallet();
     ST.conn=makeConnection();
     await fetchPrice(); await refreshBal();
     const savedName=localStorage.getItem('ss_name_'+ST.address)||'';
@@ -2131,6 +2146,13 @@ function _saveWalletToAccount(kp){
     fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action:'save',email:ST.email,jwt:_jwt,secretKeyB64:sk})}).catch(e=>console.warn('[wallet] account save:',e.message));
   }catch(e){ console.warn('[wallet] account save:',e.message); }
+}
+// Stamp this account's CURRENT wallet so the leaderboard/friends always resolve to it (never a stale
+// old wallet). Fire-and-forget on every login. Complements _saveWalletToAccount (which stores the key).
+function _linkAccountWallet(){
+  if(!_jwt||!ST.address)return;
+  try{ fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'link',jwt:_jwt,address:ST.address})}).catch(()=>{}); }catch(_){}
 }
 async function scanAndShowWallets(){
   const section=document.getElementById('found-wallets-section');

@@ -1381,11 +1381,19 @@ async function useFoundWallet(storageKey){
   }catch(e){ alert('Could not load wallet: '+e.message); }
 }
 
+// Stamp this account's CURRENT wallet so the leaderboard/friends resolve to it, never a stale old
+// wallet (matches slither-snakes.html). Fire-and-forget on every login.
+function _linkAccountWallet(){
+  if(!_jwt||!ST.address)return;
+  try{ fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'link',jwt:_jwt,address:ST.address})}).catch(()=>{}); }catch(_){}
+}
 async function finishLogin(kp){
   _keypair=kp;
   ST.address=kp.publicKey.toString();
   localStorage.setItem('pa_'+ST.email,JSON.stringify({email:ST.email,address:ST.address,token:_jwt}));
   localStorage.setItem('pa_last',ST.email);
+  _linkAccountWallet();
   ST.conn=makeConnection();
   await fetchPrice();
   await refreshBal().catch(e=>console.warn('[finishLogin] bal:',e.message));
@@ -1423,6 +1431,7 @@ async function checkSession(){
     // Validate address
     try{ new solanaWeb3.PublicKey(s.address); }catch(e){ localStorage.removeItem('pa_last'); return; }
     ST.email=s.email; ST.address=s.address; _jwt=s.token||'';
+    _linkAccountWallet();
     ST.conn=makeConnection();
     await fetchPrice(); await refreshBal();
     const _nkcs='pa_name_'+s.address;
@@ -2456,7 +2465,7 @@ async function saveDisplayName(){
   if(ST.address){
     if(btn) btn.disabled=true;
     try{
-      const r=await fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setname',address:ST.address,name:raw})});
+      const r=await fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setname',address:ST.address,name:raw,jwt:_jwt})});
       const d=await r.json();
       if(d.error==='taken'){
         if(msg){ msg.style.color='#FF4444'; msg.textContent='❌ Name already in use — choose another'; msg.style.display='block'; setTimeout(()=>{ msg.style.display='none'; msg.style.color='#39FF14'; msg.textContent='✓ Saved! Shows in-game & leaderboard.'; },3500); }
