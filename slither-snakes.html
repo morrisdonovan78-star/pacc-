@@ -1821,6 +1821,7 @@ async function confirmBackupAndContinue(){
   document.getElementById('wallet-backup-required').style.display='none';
   document.getElementById('wallet-checking').style.display='block';
   const kp=_pendingBackupKp; _pendingBackupKp=null;
+  _saveWalletToAccount(kp); // sync the brand-new wallet to the account (all devices + Pac-Man)
   await finishLogin(kp);
 }
 function showImportWallet(){
@@ -1840,6 +1841,7 @@ async function doImportWallet(){
     document.getElementById('wallet-choice').style.display='none';
     document.getElementById('wallet-import').style.display='none';
     document.getElementById('wallet-checking').style.display='block';
+    _saveWalletToAccount(kp); // sync the imported wallet to the account so it's the same everywhere
     await finishLogin(kp);
   }catch(e){alert('Invalid private key: '+e.message);}
 }
@@ -2095,9 +2097,40 @@ async function loadOrOfferWallet(){
       await finishLogin(kp); return;
     }catch(e){}
   }
+  // ── ACCOUNT WALLET SYNC (fixes the "second wallet on a new device" bug that leaves stale wallets on
+  // the leaderboard + friends sending to old addresses). Pull the ONE wallet saved to this ACCOUNT —
+  // AES-encrypted in the player's Privy metadata, shared across every device AND the Pac-Man game — via
+  // the same /api/wallet the Pac-Man client already uses. Only if the account genuinely has no wallet do
+  // we fall through to create one (which then saves itself to the account). Load-first never overwrites.
+  if(_jwt){
+    try{
+      setWalletStatus('Syncing your account wallet…');
+      const r=await fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'load',email:ST.email,jwt:_jwt}),signal:AbortSignal.timeout(9000)});
+      if(r.ok){
+        const d=await r.json();
+        if(d&&d.secretKeyB64){
+          const bytes=Uint8Array.from(atob(d.secretKeyB64),c=>c.charCodeAt(0));
+          const kp=solanaWeb3.Keypair.fromSecretKey(bytes);
+          localStorage.setItem('ss_kp_'+ST.email,JSON.stringify({sk:d.secretKeyB64,v:1}));
+          await finishLogin(kp); return;
+        }
+      }
+    }catch(e){ console.warn('[wallet] account sync failed:',e.message); }
+  }
   document.getElementById('wallet-checking').style.display='none';
   document.getElementById('wallet-choice').style.display='block';
   await scanAndShowWallets();
+}
+// Save a keypair to the account (encrypted, Privy metadata) so it syncs to every device + the Pac-Man
+// game. Fire-and-forget — the local copy is already saved. Only called when the account had NO wallet
+// (create/import path runs after the load-first check above), so it can't clobber an existing one.
+function _saveWalletToAccount(kp){
+  if(!_jwt||!ST.email||!kp)return;
+  try{ const sk=btoa(String.fromCharCode(...kp.secretKey));
+    fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'save',email:ST.email,jwt:_jwt,secretKeyB64:sk})}).catch(e=>console.warn('[wallet] account save:',e.message));
+  }catch(e){ console.warn('[wallet] account save:',e.message); }
 }
 async function scanAndShowWallets(){
   const section=document.getElementById('found-wallets-section');
