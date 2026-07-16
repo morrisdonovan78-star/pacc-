@@ -450,6 +450,11 @@ const SS_ARENA_R       = 3000;
 
 // Dynamic border: each death-to-the-border briefly shrinks the arena, then it eases back out.
 
+// Practice bots — FREE/test lobbies ONLY (paid can never spawn them; see ss-spawn-bot). Anyone in the
+// free lobby may spawn them. Caps are per-LOBBY, not per player.
+const SS_MAX_CIRCLE_BOTS = 5;   // circle bots = the graze/cashout practice targets (owner: max 5)
+const SS_MAX_BOTS        = 6;   // total backstop so fighters can't push past the circle cap
+
 const SS_BORDER_SHRINK_STEP  = 0.05;   // shrink 5% per border death
 
 const SS_BORDER_SHRINK_MAX   = 0.10;   // never shrink more than 10% total
@@ -4023,18 +4028,46 @@ io.on('connection', socket => {
   // fighting bots. (Gated to owner on the client; server allows it anywhere in the free lobby.)
 
   socket.on('ss-spawn-bot', (d) => {
-
-    if (lobbyId !== 'ss-free-lobby' && lobbyId !== 'free-lobby' && lobbyId !== SS_TEST_LOBBY) return;
+   try {
+    // ── PAID LOBBIES CAN NEVER SPAWN BOTS ────────────────────────────────────────────────────────
+    // `lobbyId` is THIS socket's own joined lobby, taken from the handshake and (for paid rooms)
+    // gated by validateGameToken/entry-token above — it is not read from `d`. The bot is only ever
+    // inserted into ssGames.get(lobbyId), so a client cannot aim a bot at a room it isn't in, and a
+    // socket sitting in a paid room is rejected outright here. Belt-and-braces: reject anything with
+    // 'paid' in the id too, so adding a new free-lobby id later can never accidentally open paid up.
+    const BOT_LOBBIES = ['ss-free-lobby', 'free-lobby', SS_TEST_LOBBY];
+    if (BOT_LOBBIES.indexOf(lobbyId) === -1 || String(lobbyId || '').indexOf('paid') !== -1) {
+      socket.emit('ss-notice', 'Bots are only available in the free lobby');
+      return;
+    }
 
     const sg = ssGames.get(lobbyId);
 
-    if (!sg) return;
+    if (!sg) { socket.emit('ss-notice', 'No game running yet — try again in a second'); return; }
 
-    let botN = 0; sg.snakes.forEach(s => { if (s.bot) botN++; });
-
-    if (botN >= 6) { socket.emit('err', 'Bot limit reached (6)'); return; }
+    // Spam guard: spam-clicking SPAWN used to hammer the tick with spawn work every click. Per-socket,
+    // non-fatal, silent (the button is just briefly inert rather than throwing toasts at the player).
+    const _bnow = Date.now();
+    if (_bnow - (socket._lastBotSpawn || 0) < 350) return;
+    socket._lastBotSpawn = _bnow;
 
     const mode = (d && d.mode === 'fight') ? 'fight' : 'circle';
+
+    // Caps. Circle bots are the graze/cashout practice targets, so they get their own limit of 5 at a
+    // time IN THE LOBBY (not per player). The total cap is the backstop so fighters can't push past it.
+    let botN = 0, circleN = 0;
+    sg.snakes.forEach(s => { if (s.bot) { botN++; if (s.botMode !== 'fight') circleN++; } });
+
+    if (mode !== 'fight' && circleN >= SS_MAX_CIRCLE_BOTS) {
+      socket.emit('ss-notice', 'Circle bot limit reached (' + SS_MAX_CIRCLE_BOTS + ') — kill some first');
+      return;
+    }
+
+    // NOTE: this used to be `socket.emit('err', ...)`, and the client's global 'err' handler is FATAL —
+    // it disconnects the socket and boots you back to the lobby screen. So hitting the bot limit
+    // literally kicked the player out of the game ("it crashes when I click spawn"). Bot limits are
+    // not fatal; they use the non-fatal 'ss-notice' channel, which just shows a toast.
+    if (botN >= SS_MAX_BOTS) { socket.emit('ss-notice', 'Bot limit reached (' + SS_MAX_BOTS + ')'); return; }
 
     let a = Math.random() * Math.PI * 2, r = SS_ARENA_R * (0.2 + Math.random() * 0.35);
 
@@ -4096,6 +4129,26 @@ io.on('connection', socket => {
 
     console.log(`[${lobbyId}] spawned ${mode} bot ${id} (immune 2.5s)`);
 
+   } catch (e) {
+    // Never let a bot spawn take down the socket/tick — worst case the click does nothing.
+    console.warn('[ss-spawn-bot] ' + (e && e.message));
+    try { socket.emit('ss-notice', 'Could not spawn bot'); } catch (_) {}
+   }
+  });
+
+  // Clear bots — same lobby gating as spawning. Without this the "✕ BOTS" button is dead for anyone
+  // who isn't the local host, which is everyone in a server-authoritative free lobby.
+  socket.on('ss-clear-bots', () => {
+   try {
+    const BOT_LOBBIES = ['ss-free-lobby', 'free-lobby', SS_TEST_LOBBY];
+    if (BOT_LOBBIES.indexOf(lobbyId) === -1 || String(lobbyId || '').indexOf('paid') !== -1) return;
+    const sg = ssGames.get(lobbyId);
+    if (!sg) return;
+    let n = 0;
+    sg.snakes.forEach((s, id) => { if (s.bot) { sg.snakes.delete(id); io.to(lobbyId).emit('leave', { id }); n++; } });
+    if (n) console.log(`[${lobbyId}] cleared ${n} bot(s)`);
+    socket.emit('ss-notice', n ? ('Removed ' + n + ' bot(s)') : 'No bots active');
+   } catch (e) { console.warn('[ss-clear-bots] ' + (e && e.message)); }
   });
 
   socket.on('ss-tune', () => { /* LOCKED: hardcoded tuning; ignore all ss-tune, incl. DevTools cheats */ });

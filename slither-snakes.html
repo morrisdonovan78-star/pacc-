@@ -2556,12 +2556,19 @@ async function pkConnect(roomId,gameToken,spectate){
     _sio.off('connect_error');
     ablyChannel={publish:(type,data,cb)=>{if(_sio)_sio.emit(type,data);if(cb)cb();}};
 
+    // 'err' is FATAL — it disconnects and boots the player back to the lobby. Only join failures
+    // (bad entry token, eliminated, misconfigured server) may use it. Anything recoverable must use
+    // 'ss-notice' below, or it will kick players mid-game (this is exactly what the bot-limit reply
+    // used to do: hitting the cap disconnected you).
     _sio.on('err',(msg)=>{
       lg('mm-log','❌ '+(msg||'Server rejected'),'lerr');
       if(_sio){try{_sio.disconnect();}catch(_){}} _sio=null;
       ablyChannel=null; _joiningLobby=false; _lobbyIsPaid=false;
       setTimeout(()=>{try{go('scr-lobby');}catch(_){}},3000);
     });
+
+    // Non-fatal server message (bot limits, etc.) — toast only, never touches the connection.
+    _sio.on('ss-notice',(msg)=>{ try{ addToast(String(msg||''),'#FF6600'); }catch(_){} });
 
     // Voice chat — relay-based PCM (server forwards voice-audio to the room)
     _sio.on('voice-audio',(d)=>{
@@ -4097,8 +4104,12 @@ function launchSnakeGame(){
   }else{
     _showMobileCtl(false);
   }
+  // Bot bar: FREE/test lobbies are open to EVERYONE (practice targets for the graze/cashout kill) —
+  // no owner gate. Practice mode is already owner-only via launchPractice. Paid lobbies never show it,
+  // and the SERVER independently refuses to spawn bots outside free/test, so hiding it is only cosmetic
+  // — a console emit still can't put a bot in a paid room.
   const _bbFree=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
-  const _bb=document.getElementById('bot-bar');if(_bb)_bb.style.display=((_isPractice||_bbFree)&&localStorage.getItem('ss_owner')==='1'&&!isSpectating)?'flex':'none';
+  const _bb=document.getElementById('bot-bar');if(_bb)_bb.style.display=((_isPractice||_bbFree)&&!isSpectating)?'flex':'none';
   if(_firstRemoteSync){const _jo=document.getElementById('join-sync');if(_jo)_jo.style.display='flex';}
   _clipStart(); // begin rolling clip buffer (PC + enabled only; no-op otherwise)
 }
@@ -4316,8 +4327,11 @@ function spawnBotSnake(mode){
   // owner is alone so isHost is true; check the lobby type FIRST.
   const _srvLobby=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
   if(_srvLobby){
-    if(localStorage.getItem('ss_owner')==='1' && _sio){ _sio.emit('ss-spawn-bot',{mode}); addToast('Spawning '+mode+' bot…','#FF6600'); }
-    else addToast('Only the owner can spawn bots here','#FF4444');
+    // Open to everyone in free/test lobbies. The SERVER is the authority: it refuses any lobby that
+    // isn't free/test (so paid can't be reached even from the console), enforces the 5-circle cap, and
+    // rate-limits spam. Limits come back on 'ss-notice' as a toast — NEVER on 'err', which is fatal.
+    if(_sio){ _sio.emit('ss-spawn-bot',{mode}); }
+    else addToast('Not connected','#FF4444');
     return;
   }
   if(!isHost){ addToast('Only host can spawn bots','#FF4444');return; }
@@ -4340,6 +4354,11 @@ function spawnBotSnake(mode){
   addToast('Bot '+_botCount+' ('+mode+') spawned','#FF6600');
 }
 function clearBotSnakes(){
+  // Server-authoritative free/test lobbies: the bots live on the SERVER, so ask it to clear them.
+  // Locally deleting them would just get them re-added by the next ss-state packet, and the old
+  // isHost check made this button dead for everyone in a free lobby (nobody is the host there).
+  const _srvLobby=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
+  if(_srvLobby){ if(_sio)_sio.emit('ss-clear-bots'); else addToast('Not connected','#FF4444'); return; }
   if(!SG||!isHost){addToast(!SG?'No game active':'Only host can clear bots','#FF4444');return;}
   let n=0;
   SG.snakes.forEach((s,id)=>{if(id.startsWith('bot-')&&s.alive){eliminateSnake(id,null);n++;}});
