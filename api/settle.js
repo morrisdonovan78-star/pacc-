@@ -289,13 +289,27 @@ module.exports = async function handler(req, res) {
 
     // ── elim-lock: game server calls this immediately on kill to block victim cashout ──
     if (action === 'elim-lock') {
+      const { victimAddress } = body;
+      // Auth: EITHER the admin secret, OR — for the game server, which has GAME_SECRET but not
+      // ADMIN_SECRET — a GAME_SECRET-HMAC proof over victim+timestamp (same secret that signs kill
+      // proofs). Either proves the caller is our own infrastructure. Without this the dead-flag silently
+      // 403'd (game server had no ADMIN_SECRET), so killed players were never blocked from cashing out
+      // → double-spend / escrow shortfall. Fail-closed if neither credential validates.
       const adminSec  = (req.headers['x-admin-secret'] || '').trim();
       const serverSec = (process.env.ADMIN_SECRET || '').trim();
-      if (!adminSec || !serverSec || adminSec !== serverSec) {
+      let authed = !!(adminSec && serverSec && adminSec === serverSec);
+      if (!authed && GAME_SECRET && victimAddress) {
+        const gp  = (req.headers['x-game-proof'] || '').trim();
+        const gts = Number(req.headers['x-game-ts'] || 0);
+        if (gp && gts && Math.abs(Date.now() - gts) < 300000) {
+          const expected = crypto.createHmac('sha256', GAME_SECRET).update('elim-lock:' + victimAddress + ':' + gts).digest('hex');
+          try { authed = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(gp)); } catch (_) {}
+        }
+      }
+      if (!authed) {
         clearTimeout(guard); done = true;
         return res.status(403).json({ error: 'Forbidden' });
       }
-      const { victimAddress } = body;
       if (!victimAddress || typeof victimAddress !== 'string' || victimAddress.length < 20) {
         clearTimeout(guard); done = true;
         return res.status(400).json({ error: 'victimAddress required' });
