@@ -5227,12 +5227,19 @@ function drawMoneyFx(){
 //       active right now (run before and after a toggle for a true, same-scene before/after).
 window._BODY3STROKE = true;   // optimized renderer ON by default (B toggles legacy for comparison)
 window._BODYSEGS    = true;   // Damnbruh-style segment rings ON by default (V toggles, visual only)
-// hex-grid background renderer: 'off' = current live per-frame stroke (default, byte-identical to today);
-// 'auto' = self-benchmark stroke-vs-cache per device and use the cache only if clearly faster (never
-// regresses); 'on' = force cache. Owner G key cycles off→auto→on and PERSISTS the choice, so you can
-// turn on the cache, confirm the FPS jump + that the grid looks identical while moving, then it sticks.
-// Grid cache ON for EVERYONE, always — uniform, no per-user toggle/state (owner: make it default).
-// (Console escape hatch only, no key bind: window._GRIDMODE='off' reverts to the live stroke.)
+// Hex-grid background renderer. 'on' (default, everyone) = cached blit; 'off' = live per-frame stroke.
+// Those are the ONLY two values; console escape hatch `window._GRIDMODE='off'` reverts to the stroke.
+// The cache is the right default on real hardware, measured on 19,364 REAL frames of play (RTX 4070,
+// ~240Hz): with the border on screen the live stroke missed vsync on 8.86% of frames (220 eff fps) vs
+// 0.83% cached (237.6 eff fps) — 10x fewer dropped frames, and better than the 1.86% interior baseline.
+// (There used to be an 'auto' mode + a G key that self-benchmarked stroke-vs-cache per device and was
+// documented here as "never regresses". Both were dead: no G handler existed and _GRIDMODE was pinned
+// to 'on' at load, so the bench was unreachable and that safety net NEVER once ran. It was also built
+// on a scratch-canvas + 1px-flush timer, which measures JS submission rather than GPU rasterisation —
+// the same trap that made a synthetic bench here call the cache 60x faster and a sync loop call it
+// 1.85x slower, both wrong. Rather than keep a safety net that is both dead and unsound, it's removed.
+// If a slow/software-canvas device ever turns up, the honest fix is a RUNTIME check on real presented
+// frames — compare missed-vsync rate per path over a few hundred frames — not a startup micro-bench.)
 window._GRIDMODE = 'on';
 function _strokeBodyPath(pts,n){ let started=false; ctx.beginPath();
   for(let i=n-1;i>=0;i--){ const p=pts[i]; if(!p)continue; if(started)ctx.lineTo(p.x,p.y); else { ctx.moveTo(p.x,p.y); started=true; } }
@@ -5302,12 +5309,12 @@ function _renderBench(){
 // ── Hex-grid background cache (perf) ──────────────────────────────────────────────────────────────
 // The honeycomb grid is SCREEN-CONSTANT size (R=46/zoom → always 46px on screen at any zoom), so it's
 // a static texture that only PANS as the camera moves. Re-stroking its ~2,600 hex edges every frame is
-// the dominant frame cost (measured ~87% of the JS frame on a real GPU). Cache it once into a
-// viewport+margin buffer and BLIT it each frame instead. PIXEL-IDENTICAL: the SAME _paintHexStrokes
-// draws both the live path and the buffer, and the true arena-edge clip is applied LIVE on the blit,
-// so the border is never approximated. ADAPTIVE + SAFE: a one-time flush-timed self-bench (_hexBench)
-// picks stroke-vs-blit on THIS device — a software-canvas machine (where a big blit is slower than the
-// sparse stroke) keeps the live renderer and never regresses; a GPU machine gets the big win.
+// the dominant frame cost (~87% of the JS frame). Cache it once into a viewport+margin buffer and BLIT
+// it each frame instead. PIXEL-IDENTICAL: the SAME _paintHexStrokes draws both the live path and the
+// buffer, and the true arena-edge clip is applied LIVE on the blit, so the border is never approximated.
+// NOTE the "87% of the JS frame" above is a JS-SUBMISSION measurement, which is NOT frame cost — canvas
+// ops rasterise later. It happens to point the right way, confirmed on real frames (see _GRIDMODE), but
+// do not reason about renderer cost from JS timers or from draw loops that never present a frame.
 function _paintHexStrokes(g,camX,camY,zoom,W,H){
   const R=46/zoom, hx=1.5*R, hy=Math.sqrt(3)*R;
   const halfW=W/(2*zoom)+R, halfH=H/(2*zoom)+R;
@@ -5340,35 +5347,7 @@ function _hexEnsure(force){
     c.g.restore();
   }
 }
-let _hexMode=null; // 'cache' | 'live' | null (undecided → bench on first use)
-function _hexUseCache(){
-  const m=window._GRIDMODE;
-  if(m==='on')return true;
-  if(m==='off')return false;
-  if(_hexMode===null)_hexBench();
-  return _hexMode==='cache';
-}
-function _hexBench(){
-  // Time the EXACT real drawArena path (clip + fractional-offset blit vs live stroke) on a scratch
-  // canvas of the same size, so the verdict matches what the visible canvas will actually do. Cache
-  // must be CLEARLY faster (<0.7×) to be chosen, so software-rendering machines (where the big blit is
-  // slower) correctly stay on the live stroke and never regress.
-  const _rc=ctx,_rv=canvas,_rm=window._GRIDMODE,_hm=_hexMode;
-  try{
-    const W=(_rv&&_rv.width)||1600, H=(_rv&&_rv.height)||900;
-    const sc=document.createElement('canvas'); sc.width=W; sc.height=H;
-    canvas=sc; ctx=sc.getContext('2d');
-    const flush=()=>ctx.getImageData(0,0,1,1);
-    const one=()=>{ ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle='#060612'; ctx.fillRect(0,0,W,H);
-      ctx.save(); ctx.translate(W/2,H/2); ctx.scale(_camZoom,_camZoom); ctx.translate(-_camX,-_camY); drawArena(); ctx.restore(); };
-    const K=18;
-    window._GRIDMODE='off'; one();flush(); let t=performance.now(); for(let i=0;i<K;i++)one(); flush(); const tl=performance.now()-t;
-    window._GRIDMODE='on'; _hexMode='cache'; _hexEnsure(true); one();flush(); t=performance.now(); for(let i=0;i<K;i++)one(); flush(); const tb=performance.now()-t;
-    _hexMode=(tb<tl*0.70)?'cache':'live';
-    try{console.log('[HEXBENCH] live '+tl.toFixed(1)+'ms vs cache '+tb.toFixed(1)+'ms /'+K+' → '+_hexMode);}catch(_){}
-  }catch(e){ _hexMode=(_hm==='cache'?'cache':'live'); }
-  finally{ ctx=_rc; canvas=_rv; window._GRIDMODE=_rm; _hexCache.cv=null; /* force clean rebuild for real canvas size */ }
-}
+function _hexUseCache(){ return window._GRIDMODE!=='off'; }
 function drawArena(){
   ctx.save();
   // Dark background inside arena
