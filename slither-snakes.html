@@ -608,9 +608,9 @@ body.mctl #voice-speakers{left:150px;}
     <span class="m-zlab">−</span>
   </div>
   <div id="bot-bar" style="display:none;position:fixed;bottom:72px;left:12px;z-index:200;flex-direction:column;gap:5px;">
-    <button onclick="spawnBotSnake('circle')" style="padding:7px 10px;background:#0055AA;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">⭕ CIRCLE</button>
+    <button onclick="spawnBotSnake('circle')" style="padding:7px 10px;background:#0055AA;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">⭕ CIRCLE (N)</button>
     <button onclick="spawnBotSnake('fight')" style="padding:7px 10px;background:#AA3300;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">⚔ FIGHTER</button>
-    <button onclick="clearBotSnakes()" style="padding:7px 10px;background:#1a0000;border:1px solid #FF4444;color:#FF4444;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">✕ BOTS</button>
+    <button onclick="clearBotSnakes()" style="padding:7px 10px;background:#1a0000;border:1px solid #FF4444;color:#FF4444;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">✕ BOTS (C)</button>
   </div>
   <!-- Column wrapper: spectate-bar + watch-switch stack via normal flow, so a wrapped/taller
        bar (long "WATCHING LIVE" label on narrow screens) can never overlap the buttons below it. -->
@@ -718,11 +718,11 @@ body.mctl #voice-speakers{left:150px;}
     <label style="cursor:pointer;" title="Enables server-side CIRCLE-DIAG logging. Off by default for performance — only turn on while actively debugging."><input type="checkbox" id="tun-dbgChk" onchange="_onTuning()" style="vertical-align:middle;"> 🐞 Server debug log</label>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:5px;">
-    <button onclick="spawnBotSnake('circle')" style="padding:7px 4px;background:#0055AA;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">⭕ CIRCLE</button>
+    <button onclick="spawnBotSnake('circle')" style="padding:7px 4px;background:#0055AA;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">⭕ CIRCLE (N)</button>
     <button onclick="spawnBotSnake('fight')" style="padding:7px 4px;background:#AA3300;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">⚔ FIGHTER</button>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:9px;">
-    <button onclick="clearBotSnakes()" style="padding:7px 4px;background:#1a0000;border:1px solid #FF4444;color:#FF4444;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">✕ BOTS</button>
+    <button onclick="clearBotSnakes()" style="padding:7px 4px;background:#1a0000;border:1px solid #FF4444;color:#FF4444;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">✕ BOTS (C)</button>
     <button onclick="_resetTuning()" style="padding:7px 4px;background:#111;border:1px solid #555;color:#888;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">RESET</button>
   </div>
 
@@ -4459,6 +4459,15 @@ function onGameKey(e){
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
   if(!a && (e.code==='Backquote'||e.key==='`'||e.key==='9')){togglePerf();return;} // perf overlay (measurement only) — 9 or backtick
+  // Bots on the keyboard (N = spawn circle, Shift+N = clear). The bot bar lives INSIDE #scr-game, so
+  // while the pointer is locked its buttons can't be clicked — without a key you'd have to Esc out
+  // mid-game just to spawn a practice target. Same gating as the buttons; the server still enforces
+  // free/test-only and the 5-circle cap, so this is not a way into paid lobbies.
+  // NOTE: not Shift+N — Shift is the BOOST key, so a Shift combo would boost at the same time.
+  if(!a && (e.key==='n'||e.key==='N'||e.key==='c'||e.key==='C')){
+    const _kbFree=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
+    if(_isPractice||_kbFree){ if(e.key==='c'||e.key==='C')clearBotSnakes(); else spawnBotSnake('circle'); return; }
+  }
   // ── Body renderer A/B toggles (perf, OWNER only) — live switch, same snakes on screen. Default = 3-stroke + rings ──
   if(!a && (e.key==='b'||e.key==='B'||e.key==='m'||e.key==='M'||e.key==='v'||e.key==='V') && localStorage.getItem('ss_owner')==='1'){
     if(e.key==='b'||e.key==='B'){window._BODY3STROKE=!window._BODY3STROKE;addToast('Body renderer: '+(window._BODY3STROKE?'3-STROKE (optimized)':'legacy 3-pass circles'),'#8cf');return;}
@@ -5041,6 +5050,11 @@ function rafDraw(ts){
   if(!canvas||!ctx){rafHandle=null;return;}
   rafHandle=requestAnimationFrame(rafDraw);
   _lastDrawTs=ts;
+  // AUTO-RELEASE the pointer lock the instant the game stops owning the mouse — death, game over,
+  // cashed out, spectating, screen left. _plWant() only gated NEW locks, so an existing one survived
+  // your death and made the REJOIN / PLAY AGAIN buttons (which live inside #scr-game) unclickable
+  // until you pressed Esc. You should NEVER have to press Esc to use the UI or rejoin.
+  if(_plActive() && !_plWant()) _plRelease();
   _perfFrameStart(ts); _pmk('net');
 
   if(_pendingState){applyRemoteState(_pendingState);_pendingState=null;}
