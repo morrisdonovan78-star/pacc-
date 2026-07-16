@@ -783,7 +783,20 @@ const INIT_SECTIONS= 17;    // starting section count (join length)
 // Eye size grows at half the rate of head radius past spawn size (eyes were scaling 1:1
 // with head radius and looked oversized on big/long snakes) — see _drawHeadCircle's eR.
 const EYE_BASE_R   = BASE_RADIUS+Math.pow(INIT_SECTIONS*SIZE_PER_SEGMENT,RADIUS_GROWTH)*RADIUS_SCALE;
-const MAX_SECTIONS = 300;   // absolute hard cap; effective cap = floor(usd*70) per paid lobby
+const MAX_SECTIONS = 300;   // absolute hard cap for remote snakes; MY cap = ssCapFromRatio (below)
+// Wager-scaled growth cap. r = value carried / entry wager: 1x => 30, 2x => 45, 3x => 50, and 50
+// is the hard ceiling past 3x. The two legs slope differently on purpose (+15/wager to double,
+// then +5/wager to triple). MUST match SS_CAP_* / ssCapFromRatio in _server_na.js — the server is
+// authoritative and will clamp anyway; a mismatch just makes your own snake stutter at the cap.
+const SS_CAP_BASE  = 30;    // carrying just your entry wager (1x)
+const SS_CAP_DOUBLE= 45;    // double the entry wager (2x)
+const SS_CAP_MAX   = 50;    // triple (3x) and the hard ceiling beyond it; also the free-lobby cap
+function ssCapFromRatio(r){
+  if(!isFinite(r)||r<=1)return SS_CAP_BASE;
+  if(r<=2)return Math.round(SS_CAP_BASE+15*(r-1));
+  if(r<=3)return Math.round(SS_CAP_DOUBLE+5*(r-2));
+  return SS_CAP_MAX;
+}
 const MAX_TURN     = 0.274; // rad/tick
 const BOOST_DRAIN  = 8;     // ticks between boost drain events
 const BOOST_DRAIN_AMT = 5.2734375;  // drain accumulator per tick = AMT/DRAIN = 0.659 sections/tick (25% faster than 4.21875)
@@ -3414,14 +3427,14 @@ function snakeTick(){
     // can't boost at or below starting length
     if(snake.boost&&snake.numSections<=BOOST_MIN)snake.boost=false;
 
-    // Grow: cap by wager — join at 17, +30 sections per entry-wager carried above entry (so
-    // double the entry wager => cap 70). Free/no-wager => 70. Server ssGrowCap is authoritative;
-    // this predicts the local player only (remote snakes are server-driven, no client clamp).
+    // Grow: cap by wager — join at 17 and grow to ssCapFromRatio(carried / entry wager).
+    // Server ssGrowCap is authoritative; this predicts the local player only (remote snakes are
+    // server-driven, no client clamp).
     if(snake.growQueue>0){
       let _cap;
       if(snake.id===myPid){
         const _base=ST.lobbyUsd||0;
-        _cap=_base>0?Math.max(40,Math.min(MAX_SECTIONS,Math.round(40+30*((_myUsd||0)/_base-1)))):70;
+        _cap=_base>0?ssCapFromRatio((_myUsd||0)/_base):SS_CAP_MAX;
       }else{ _cap=MAX_SECTIONS; }
       snake.growQueue--;
       snake.numSections=Math.min(_cap,snake.numSections+1);

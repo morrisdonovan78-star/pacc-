@@ -237,6 +237,11 @@ const SS_BOOST_DRAIN_T = 8;      // client BOOST_DRAIN
 const SS_INIT_NS       = 17;     // client INIT_SECTIONS
 const SS_MIN_NS        = 8;      // client MIN_SECTIONS
 const SS_MAX_NS        = 300;    // client MAX_SECTIONS
+// Wager-scaled growth cap breakpoints — see ssCapFromRatio. Keep in sync with the client's
+// SS_CAP_* in slither-snakes.html; the server is authoritative, the client only predicts.
+const SS_CAP_BASE      = 30;     // cap while carrying just your entry wager (1x)
+const SS_CAP_DOUBLE    = 45;     // cap at double the entry wager (2x)
+const SS_CAP_MAX       = 50;     // cap at triple (3x) and the hard ceiling beyond it
 
 // ── MoneySlither-exact 60-TPS simulation (ported verbatim from client.js) ─────
 // The authoritative sim now runs at 60 Hz via SS_SUBSTEPS sub-steps per 30 Hz ssTick;
@@ -520,8 +525,11 @@ function ssHandleInput(lid, pid, d, io) {
   if (!sn || (!sn.alive && (!sn._killedAt || Date.now() - sn._killedAt > 2000))) {
     // First input OR dead snake rejoin (2s cooldown prevents revival from in-flight packets)
     sn = ssSpawnSnake(pid, (sn && sn.color) || d.color || '#FFD700', (sn && sn.name) || d.name || 'SNAKE', sg);
-    if (d.ns && d.ns > SS_INIT_NS) { sn.ns = Math.min(SS_MAX_NS, d.ns); sn.size = ssSizeFromNs(sn.ns); sn.thick = ssThick(sn.ns); }
+    // usd/baseUsd FIRST: the declared-length clamp below is the wager cap, so it needs the wager.
     if (d.usd != null && typeof d.usd === 'number' && sn.usd === 0) { sn.usd = Math.max(0, d.usd); sn.baseUsd = sn.usd; }
+    // A client declaring its own length must still respect its wager cap, or the cap is bypassable
+    // by simply rejoining with a big d.ns.
+    if (d.ns && d.ns > SS_INIT_NS) { sn.ns = Math.min(ssGrowCap(sn), d.ns); sn.size = ssSizeFromNs(sn.ns); sn.thick = ssThick(sn.ns); }
     sg.snakes.set(pid, sn);
     console.log('respawn', pid, sn.ns, sn.x, sn.y, Date.now());
     if (!sg.food || !sg.food.length) ssReconcileFood(sg);
@@ -585,10 +593,20 @@ function ssForfeitNow(lid, pid, io) {
 
 // ── MoneySlither stepMovement port — ONE 60 Hz sub-step (verbatim from client.js) ──
 // Continuous `size` is authoritative; ns/thickness derived. Chord-based path sampling.
+// Growth cap by how many ENTRY WAGERS you are carrying (r = usd / entry wager).
+// r<=1 (just your entry) => 30; 2x => 45; 3x => 50; beyond 3x => still 50 (hard ceiling).
+// The two legs have different slopes on purpose: +15/wager up to double, then +5/wager to triple.
+// Free / no-wager lobbies get the same 50 ceiling so they can never out-grow a paid snake.
+function ssCapFromRatio(r) {
+  if (!isFinite(r) || r <= 1) return SS_CAP_BASE;
+  if (r <= 2) return Math.round(SS_CAP_BASE + 15 * (r - 1));
+  if (r <= 3) return Math.round(SS_CAP_DOUBLE + 5 * (r - 2));
+  return SS_CAP_MAX;
+}
 function ssGrowCap(sn) {
   const base = sn.baseUsd || 0, usd = sn.usd || 0;
-  if (base <= 0) return 70;
-  return Math.max(40, Math.min(SS_MAX_NS, Math.round(40 + 30 * (usd / base - 1))));
+  if (base <= 0) return SS_CAP_MAX;
+  return ssCapFromRatio(usd / base);
 }
 
 function ssStepMovement(sn, sg, lid, io, now) {
