@@ -4147,17 +4147,11 @@ function launchSnakeGame(){
 
 // ── Combat Tuning Suite ──────────────────────────────────────
 function _toggleTuning(){
-  // OWNER-ONLY (re-enabled by owner request): live circle-graze tuning so the owner can retune circle
-  // kills in-game and pick new defaults. The REAL gate is server-side — ss-tune only applies from the
-  // owner's WALLET — so a DevTools ss_owner=1 forge opens a panel whose sliders do nothing.
-  if(localStorage.getItem('ss_owner')!=='1'){ _showTuning=false; const _q=document.getElementById('tuning-panel'); if(_q)_q.style.display='none'; return; }
-  _showTuning=!_showTuning;
-  const _p=document.getElementById('tuning-panel'); if(_p)_p.style.display=_showTuning?'block':'none';
-  if(_showTuning){
-    // Outside the test lobby, seed the knobs ONCE with the CURRENT LIVE settings (what all lobbies run).
-    if(!_isTestLobby()&&!_ownerTuneSeeded){ Object.assign(_tuningTest,_LIVE_TUNING_DEFAULTS); _ownerTuneSeeded=true; }
-    _syncTuningUI();
-  }
+  // RE-LOCKED (owner request 2026-07-16): the panel is disabled again now that the harder circle/graze
+  // hitboxes (grazePx 3.5 / grazeHead 1.20) are hardcoded everywhere. No key/button/DevTools ss_owner
+  // trick opens it, and the server ignores ss-tune. Always force hidden and bail.
+  // To re-enable: restore the owner-gated branch (git history around commit 919e76b) + un-noop server ss-tune.
+  _showTuning=false; const _p=document.getElementById('tuning-panel'); if(_p)_p.style.display='none';
 }
 function _onTuning(){
   // Owner uses the circle-graze knobs EVERYWHERE (the live model IS the promoted test-lobby model);
