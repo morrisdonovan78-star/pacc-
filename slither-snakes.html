@@ -1270,6 +1270,12 @@ async function _loadAccountName(){
     }
   }catch(_){}
 }
+// Owner auto-detect: logging in with the OWNER wallet grants the owner UI (T = combat tuning panel,
+// owner toggles) on ANY device — previously ss_owner had to be set by hand in DevTools, so a fresh
+// browser never got it ("panel not popping up on T"). Safe: this flag only unlocks UI; every owner
+// ACTION (ss-tune etc.) is separately gated SERVER-side by the wallet address, so forging it does nothing.
+const OWNER_WALLET='CVW1EsXZ4HqNp2oyF9ZbFqLVxMC5o6RoUb69cgLjPRAk';
+function _ownerCheck(){ try{ if(ST.address===OWNER_WALLET)localStorage.setItem('ss_owner','1'); }catch(_){} }
 // Was localStorage-only — the SAVE button showed a "Name saved!" confirmation but never told
 // the server at all. The ONLY thing that ever pushed a name server-side was joining a PAID
 // lobby (api/join.js), which meant fixing a wrong/stuck name required spending real money on
@@ -1924,6 +1930,7 @@ async function finishLogin(kp){
   localStorage.setItem('ss_'+ST.email,JSON.stringify({email:ST.email,address:ST.address,token:_jwt}));
   localStorage.setItem('ss_last',ST.email);
   _linkAccountWallet();
+  _ownerCheck(); // owner wallet → unlock owner UI (T = tuning panel) on this device
   ST.conn=makeConnection();
   await fetchPrice();
   await refreshBal().catch(()=>{});
@@ -1952,6 +1959,7 @@ async function checkSession(){
     try{new solanaWeb3.PublicKey(s.address);}catch(e){localStorage.removeItem('ss_last');return;}
     ST.email=s.email; ST.address=s.address; _jwt=s.token||'';
     _linkAccountWallet();
+    _ownerCheck(); // owner wallet → unlock owner UI (T = tuning panel) on this device
     _saveWalletToAccount(_keypair); // back-fill: make sure the account has this wallet for other devices
     ST.conn=makeConnection();
     await fetchPrice(); await refreshBal();
