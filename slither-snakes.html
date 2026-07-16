@@ -2745,7 +2745,7 @@ async function pkConnect(roomId,gameToken,spectate){
         if(sd.id===myPid&&_cashedOut){s.alive=false;if(s.path&&s.path.length)s.path=[];return;}
         // Don't reanimate a recently-killed snake (stale packet from before kill)
         if(!s.alive&&_snakeDeathTs.has(sd.id)&&Date.now()-(_snakeDeathTs.get(sd.id)||0)<2000){_ssBuf.delete(sd.id);return;}
-        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;s.cashing=!!sd.cash;s.spinning=!!sd.sp;
+        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;s.cashing=!!sd.cash;s._cashMs=sd.cashMs||0;s.spinning=!!sd.sp;
         s.numSections=sd.ns||s.numSections;s.color=sd.color||s.color;s.name=sd.name||s.name;
         // ── Option A body-sync: adopt the server's authoritative body via its periodic KEYFRAME
         // (rk = full trail, flat head-first [x0,y0,...]; sent on spawn + every ~5s). Stash it here;
@@ -3696,7 +3696,7 @@ function applyRemoteState(d){
         else{s.alive=false;return;}
       }
       s._tAngle=sd.angle; s._lastSeen=Date.now(); s.botCircle=!!sd.circle; // lerp toward server angle; timestamp for timeout
-      s.alive=true; s.score=sd.score||0; s.boost=sd.boost||false; s.usd=sd.usd||0; s.cashing=!!sd.cash; s.spinning=!!sd.sp;
+      s.alive=true; s.score=sd.score||0; s.boost=sd.boost||false; s.usd=sd.usd||0; s.cashing=!!sd.cash;s._cashMs=sd.cashMs||0; s.spinning=!!sd.sp;
       s.numSections=sd.ns||(sd.segs&&sd.segs.length)||s.numSections;
       s.color=sd.color||s.color; s.name=sd.name||s.name;
       if(sd.segs&&sd.segs.length>1){
@@ -5612,17 +5612,17 @@ function drawSnake(snake){
   const h=bPts[0]; if(!h)return;
   _drawHeadCircle(snake,r);
 
-  // Cash-out ring — a gold arc that FILLS like a timer over the ~1s hold (not a blink) so EVERYONE
-  // can see who's cashing out and how close they are. Own snake uses the local hold start (instant
-  // feedback); others estimate progress from when the broadcast `cashing` flag first went true.
+  // Cash-out ring — a gold arc that FILLS like a timer over the 6s so EVERYONE can see who's cashing
+  // out and how close they are. Own snake uses the local start (instant feedback); OTHER snakes use the
+  // SERVER's authoritative elapsed time (broadcast cashMs) so every watcher's ring is in lockstep with
+  // the server timer — the snake vanishes exactly as its ring completes (no "got out before the ring").
   {
     let _cp=null; // cash-out progress 0..1, or null when not cashing
     if(snake.id===myPid && _cashoutActive && _cashoutStart){
       _cp=Math.min(1,(Date.now()-_cashoutStart)/SS_CASHOUT_MS);
     } else if(snake.cashing){
-      if(!snake._cashStartT) snake._cashStartT=Date.now();
-      _cp=Math.min(1,(Date.now()-snake._cashStartT)/SS_CASHOUT_MS);
-    } else if(snake._cashStartT){ snake._cashStartT=0; }
+      _cp=Math.min(1,(snake._cashMs||0)/SS_CASHOUT_MS);
+    }
     if(_cp!=null){
       const rr=r*1.25;                                   // hugs the head — much smaller than before
       ctx.save();
