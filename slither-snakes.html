@@ -3220,7 +3220,7 @@ function _bgSimStep(){
   if(!_localDead){
     const my=SG.snakes.get(myPid);
     if(my&&my.alive&&my.path.length){
-      if(_autoCircle){my.angle+=MAX_TURN;}else if(!document.hidden){const da=angleDiff(targetAngleToMouse(my),my.angle);my.angle+=Math.max(-MAX_TURN,Math.min(MAX_TURN,da));}
+      if(_autoCircle||_cashoutActive){my.angle+=MAX_TURN;}else if(!document.hidden){const da=angleDiff(targetAngleToMouse(my),my.angle);my.angle+=Math.max(-MAX_TURN,Math.min(MAX_TURN,da));}
       my.boost=(_mouseBoost||_padBoost)&&my.numSections>BOOST_MIN;
       const spd=my.boost?BOOST_SPD:SNAKE_SPD;
       const h=my.path[0];
@@ -3782,7 +3782,7 @@ function startGuestLoop(){
     // never expecting an already-smoothed heading. Decoupling this from my.angle (now a
     // render-only value once own-snake rendering follows server truth, see rafDraw) means
     // steering responsiveness is unaffected by how the snake is drawn.
-    _sio.emit('ssin',{id:myPid,angle:targetAngleToMouse(my),circle:!!_autoCircle,
+    _sio.emit('ssin',{id:myPid,angle:targetAngleToMouse(my),circle:!!(_autoCircle||_cashoutActive),
       boost:canBoost,x:Math.round(h.x),y:Math.round(h.y),ns:my.numSections||26,
       color:my.color||colorFromId(myPid),usd:_myUsd||0,seed:1,cash:_cashoutActive?1:0});
   },33); // match server tick rate
@@ -4355,6 +4355,11 @@ function startCashout(){
   if(!SG||SG.over||_localDead||_cashoutActive)return;
   _cashoutActive=true; _cashoutStart=Date.now();
   addToast('💰 CASHING OUT — hold on 6s… (cannot cancel)','#FFD700');
+  // Fallback completion: the SERVER normally pays at 6s via ss-cashout-done (removing our snake with no
+  // food). This client timer is a safety net for practice mode / a missed signal — it fires slightly
+  // later so the server path wins normally, and is skipped if we died first (endSnakeGame guards _localDead).
+  if(_cashoutTimer)clearTimeout(_cashoutTimer);
+  _cashoutTimer=setTimeout(()=>{ _cashoutTimer=null; if(_cashoutActive&&!_localDead&&SG&&!SG.over)endSnakeGame('cashout',null); }, SS_CASHOUT_MS+500);
 }
 
 function toggleAutoCircle(){
@@ -4830,7 +4835,7 @@ function _ssPredictLocal(my, dtMs){
   let _sub = 0;
   while(my._pAcc60 >= stepMs && _sub < 5){
     my._pAcc60 -= stepMs; _sub++;
-    if(_autoCircle){ my.angle += _MS_TURN * DT; }
+    if(_autoCircle||_cashoutActive){ my.angle += _MS_TURN * DT; }
     else { const d = angleDiff(targetAngleToMouse(my), my.angle); my.angle += Math.sign(d) * Math.min(Math.abs(d), _MS_TURN * DT); }
     while(my.angle >  Math.PI) my.angle -= 2*Math.PI;
     while(my.angle < -Math.PI) my.angle += 2*Math.PI;
