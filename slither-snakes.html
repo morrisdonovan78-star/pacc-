@@ -5376,12 +5376,21 @@ function drawArena(){
   ctx.fillStyle='#07071a';ctx.fill();
   // Hex grid — adaptive cached blit or live stroke; both pixel-identical (shared _paintHexStrokes +
   // the live arena-circle clip below). ctx.clip() here uses the arena-arc path built just above.
-  // BORDER GUARD: the only place the cached blit isn't byte-identical is a thin AA seam along the
-  // arena boundary CURVE (grid clipped by an image-blit vs a stroke differ by a couple px there). So
-  // whenever the border is on screen (player near the edge — rare), draw the grid LIVE = pixel-perfect
-  // there too. The interior (where ~all play happens) stays cached. Verified 0% pixels >8/255 both ways.
+  // BORDER GUARD — REMOVED (perf, measured). It used to force the LIVE stroke whenever the border was
+  // on screen, to avoid a thin AA seam along the arena boundary curve. Two measurements killed it:
+  //   1) COST: the live stroke is ~5.6ms/frame vs ~0.09-0.6ms for the blit — a 9x cliff the moment the
+  //      border comes into view, and a 75x cliff when zoomed out (at zoom<=0.3 `reach` exceeds ARENA_R,
+  //      so the guard tripped even at DEAD CENTRE — this was also the "FPS changes when zooming" bug).
+  //      Hex count is screen-constant (493 tested at EVERY zoom), so none of that cost was real work.
+  //   2) BENEFIT: the seam it bought is a difference the interior ALREADY ships. The blit lands at
+  //      fractional offsets everywhere, so cache-vs-live differs at centre by mean 0.17 / max 12/255
+  //      (0.036% of px >8) — versus mean 0.25 / max 26/255 (0.02% of px >16) at the border. The guard
+  //      spent 9-75x frame time to avoid, near the edge, what it already accepts in the middle.
+  // The true arena-edge clip is still applied LIVE on the blit below, so the BOUNDARY ITSELF stays
+  // exact; only the decorative grid texture inside it is resampled, exactly as in the interior today.
+  // window._HEXBORDERGUARD===true restores the old guard (kill switch).
   const _gridReach=Math.hypot(canvas.width,canvas.height)/(2*_camZoom);
-  const _borderInView=Math.hypot(_camX,_camY)+_gridReach>=ARENA_R-2;
+  const _borderInView=(window._HEXBORDERGUARD===true)&&(Math.hypot(_camX,_camY)+_gridReach>=ARENA_R-2);
   if(_hexUseCache() && !_borderInView){
     _hexEnsure(false);
     const c=_hexCache;
