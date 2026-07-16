@@ -1088,8 +1088,9 @@ let _camX=0,_camY=0,_camZoom=0.6,_zoomOffset=0;
 let _specPanX=0,_specPanY=0,_specPanInit=false,_specDrag=null; // free-roam spectate camera for an empty lobby (e.g. after cashing out as the last player)
 const _eatenLocalTTL=8000,_eatenLocal=new Map(); // guest predictive pebble pickup: keys of regular food we already drove through, so the next server snapshot can't re-add it (flicker)
 let _mouseX=0,_mouseY=0,_mouseBoost=false,_padBoost=false,_cashoutTimer=null,_showHitboxes=false,_myEyeAngle=null;
-let _cashoutStart=0;          // ms timestamp the current cash-out hold began (drives the timer ring)
-const SS_CASHOUT_MS=1000;     // cash-out hold duration (must match the setTimeout below)
+let _cashoutStart=0;          // ms timestamp the current cash-out began (drives the timer ring)
+let _cashoutActive=false;     // server-authoritative cash-out in progress (locked once started — cannot cancel)
+const SS_CASHOUT_MS=6000;     // cash-out DURATION — server-authoritative forced auto-circle (server.js ssTick uses 6000 too)
 let _mobileCtl=false,_joyTouchId=null,_mobileWired=false;
 let _pendingState=null;
 let _gpadLastBtn=[],_gpadNavTs=0;
@@ -2662,6 +2663,13 @@ async function pkConnect(roomId,gameToken,spectate){
       eliminateSnake(data.id,data.killerId||null);
     });
 
+    // Server's authoritative 6s cash-out timer finished for a player. If it's US, the snake was already
+    // removed server-side with NO food drop, so run the signed payout via the normal cashout end-game.
+    _sio.on('ss-cashout-done',(d)=>{
+      if(!d||d.id!==myPid||_localDead)return;
+      endSnakeGame('cashout',null);
+    });
+
     // ── JOIN body seed consumer ─────────────────────────────────────────────────────────────
     // Server sends each OTHER alive snake's authoritative body (head→tail, decimated) ONCE on join
     // (in response to seed:1 on our first ssin). Stash it; the render loop adopts it in place of the
@@ -3776,7 +3784,7 @@ function startGuestLoop(){
     // steering responsiveness is unaffected by how the snake is drawn.
     _sio.emit('ssin',{id:myPid,angle:targetAngleToMouse(my),circle:!!_autoCircle,
       boost:canBoost,x:Math.round(h.x),y:Math.round(h.y),ns:my.numSections||26,
-      color:my.color||colorFromId(myPid),usd:_myUsd||0,seed:1,cash:_cashoutTimer?1:0});
+      color:my.color||colorFromId(myPid),usd:_myUsd||0,seed:1,cash:_cashoutActive?1:0});
   },33); // match server tick rate
 }
 
@@ -3794,7 +3802,7 @@ const SS_CLIP_WEBHOOK = 'https://discord.com/api/webhooks/1523452307268833333/zE
 // action → default keys (first is the primary shown in Settings). Boost keeps Space+Shift.
 const SS_BIND_DEFS = [
   {act:'boost',      label:'Boost',            keys:[' ','Shift']},
-  {act:'cashout',    label:'Cash Out (hold)',  keys:['q']},
+  {act:'cashout',    label:'Cash Out',  keys:['q']},
   {act:'clip',       label:'Save 20s Clip',    keys:['g']},
   {act:'zoomIn',     label:'Zoom In',          keys:['=','+']},
   {act:'zoomOut',    label:'Zoom Out',         keys:['-','_']},
@@ -4325,13 +4333,7 @@ function onGameKey(e){
   }
   if(!a)return;
   if(a==='boost')_mouseBoost=true;
-  else if(a==='cashout'){
-    if(SG&&!SG.over&&!_localDead&&!_cashoutTimer){
-      addToast('HOLD to cash out… release to cancel','#FFD700');
-      _cashoutStart=Date.now();
-      _cashoutTimer=setTimeout(()=>{_cashoutTimer=null;endSnakeGame('cashout',null);},SS_CASHOUT_MS);
-    }
-  }
+  else if(a==='cashout'){ startCashout(); }
   else if(a==='zoomIn')_zoomOffset=Math.min(2.0,_zoomOffset+0.12);   // rafDraw re-clamps to visible range
   else if(a==='zoomOut')_zoomOffset=Math.max(-2.0,_zoomOffset-0.12);
   else if(a==='voice')voiceToggle();
@@ -4341,9 +4343,18 @@ function onGameKey(e){
 function onGameKeyUp(e){
   const a=_ssKeyAction(e.key);
   if(a==='boost')_mouseBoost=false;
-  else if(a==='cashout'){
-    if(_cashoutTimer){clearTimeout(_cashoutTimer);_cashoutTimer=null;addToast('Cashout cancelled','#888');}
-  }
+  // cashout is server-locked once started — releasing the key does NOT cancel it (see startCashout)
+}
+
+// ── Server-authoritative cash-out. Pressing 9 (or B / on-screen button) starts a FORCED auto-circle
+// that CANNOT be cancelled. The game SERVER runs the 6s timer and decides the outcome:
+//   • survive the full 6s  → server emits 'ss-cashout-done' → we run the signed payout (settle).
+//   • killed before 6s     → no payout; our money drops as food (normal death) — no done event fires.
+// We just flag it locally (drives the ring + sends cash:1 each input tick); the server is the truth.
+function startCashout(){
+  if(!SG||SG.over||_localDead||_cashoutActive)return;
+  _cashoutActive=true; _cashoutStart=Date.now();
+  addToast('💰 CASHING OUT — hold on 6s… (cannot cancel)','#FFD700');
 }
 
 function toggleAutoCircle(){
@@ -4393,19 +4404,9 @@ function _wireMobileCtl(){
   // Cashout: hold 1s, release to cancel — same timer and guards as the Q key / gamepad B
   co.addEventListener('touchstart',e=>{
     e.preventDefault();
-    if(SG&&!SG.over&&!_localDead&&!_cashoutTimer){
-      co.classList.add('holding');
-      addToast('HOLD to cash out… release to cancel','#FFD700');
-      _cashoutStart=Date.now();
-      _cashoutTimer=setTimeout(()=>{_cashoutTimer=null;co.classList.remove('holding');endSnakeGame('cashout',null);},SS_CASHOUT_MS);
-    }
+    if(SG&&!SG.over&&!_localDead&&!_cashoutActive){ co.classList.add('holding'); startCashout(); }
   },{passive:false});
-  const coEnd=e=>{
-    e.preventDefault();co.classList.remove('holding');
-    if(_cashoutTimer){clearTimeout(_cashoutTimer);_cashoutTimer=null;addToast('Cashout cancelled','#888');}
-  };
-  co.addEventListener('touchend',coEnd,{passive:false});
-  co.addEventListener('touchcancel',coEnd,{passive:false});
+  // No release handler — cash-out is server-locked once started and cannot be cancelled.
   // Zoom slider → _zoomOffset; rafDraw re-clamps to the visible range
   zs.addEventListener('input',()=>{_zoomOffset=parseFloat(zs.value)||0;});
 }
@@ -4416,7 +4417,7 @@ async function endSnakeGame(reason,killerId){
   if(_localDead&&reason!=='over')return;
   _localDead=true;
   _autoCircle=false; // clear auto-circle on death/cashout
-  if(_cashoutTimer){clearTimeout(_cashoutTimer);_cashoutTimer=null;}
+  if(_cashoutTimer){clearTimeout(_cashoutTimer);_cashoutTimer=null;} _cashoutActive=false;
   document.removeEventListener('keydown',onGameKey);
   document.removeEventListener('keyup',onGameKeyUp);
 
@@ -4643,15 +4644,8 @@ function pollGamepad(){
     if(pressed(10)) toggleAutoCircle();
     // R3 (right stick click, index 11) — save a 20s clip
     if(pressed(11)) _clipSave();
-    // B button (index 1) — hold 1s to cashout
-    if(pressed(1)&&!_cashoutTimer&&!_localDead){
-      addToast('HOLD B to cash out…','#FFD700');
-      _cashoutStart=Date.now();
-      _cashoutTimer=setTimeout(()=>{_cashoutTimer=null;endSnakeGame('cashout',null);},SS_CASHOUT_MS);
-    }
-    if(released(1)&&_cashoutTimer){
-      clearTimeout(_cashoutTimer);_cashoutTimer=null;addToast('Cashout cancelled','#888');
-    }
+    // B button (index 1) — start server-authoritative cash-out (6s forced circle, cannot cancel)
+    if(pressed(1)&&!_cashoutActive&&!_localDead){ startCashout(); }
   } else {
     // Menu: stick/d-pad to navigate, A to confirm, B to back
     // When a modal (leaderboard/profile/friends/withdraw) is open, scope navigation to it —
@@ -5618,7 +5612,7 @@ function drawSnake(snake){
   // feedback); others estimate progress from when the broadcast `cashing` flag first went true.
   {
     let _cp=null; // cash-out progress 0..1, or null when not cashing
-    if(snake.id===myPid && _cashoutTimer && _cashoutStart){
+    if(snake.id===myPid && _cashoutActive && _cashoutStart){
       _cp=Math.min(1,(Date.now()-_cashoutStart)/SS_CASHOUT_MS);
     } else if(snake.cashing){
       if(!snake._cashStartT) snake._cashStartT=Date.now();
