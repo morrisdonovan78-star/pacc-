@@ -1091,6 +1091,7 @@ let _mouseX=0,_mouseY=0,_mouseBoost=false,_padBoost=false,_cashoutTimer=null,_sh
 let _cashoutStart=0;          // ms timestamp the current cash-out began (drives the timer ring)
 let _cashoutActive=false;     // server-authoritative cash-out in progress (locked once started — cannot cancel)
 let _myCashMs=0;              // server-authoritative elapsed on MY cash-out timer (0 until my body is wound in)
+let _myCashW=0;               // server-authoritative wind-in progress 0..1 for MY snake (1 = fully curled, timer running)
 const SS_CASHOUT_MS=4000;     // cash-out timer DURATION (server.js uses 4000) — only starts once the body is fully wound into the circle
 let _mobileCtl=false,_joyTouchId=null,_mobileWired=false;
 let _pendingState=null;
@@ -2768,7 +2769,7 @@ async function pkConnect(roomId,gameToken,spectate){
         if(sd.id===myPid&&_cashedOut){s.alive=false;if(s.path&&s.path.length)s.path=[];return;}
         // Don't reanimate a recently-killed snake (stale packet from before kill)
         if(!s.alive&&_snakeDeathTs.has(sd.id)&&Date.now()-(_snakeDeathTs.get(sd.id)||0)<2000){_ssBuf.delete(sd.id);return;}
-        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;s.usd=sd.usd||0;s.cashing=!!sd.cash;s._cashMs=sd.cashMs||0;s.spinning=!!sd.sp;
+        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;s.usd=sd.usd||0;s.cashing=!!sd.cash;s._cashMs=sd.cashMs||0;s._cashW=sd.cashW||0;s.spinning=!!sd.sp;
         s.numSections=sd.ns||s.numSections;s.color=sd.color||s.color;s.name=sd.name||s.name;
         // ── Option A body-sync: adopt the server's authoritative body via its periodic KEYFRAME
         // (rk = full trail, flat head-first [x0,y0,...]; sent on spawn + every ~5s). Stash it here;
@@ -2812,6 +2813,7 @@ async function pkConnect(roomId,gameToken,spectate){
               _myUsd=sd.usd;
             }
             if(sd.cashMs!=null)_myCashMs=sd.cashMs; // server-authoritative cash-out elapsed (0 until wound in)
+            if(sd.cashW!=null)_myCashW=sd.cashW;   // server-authoritative wind-in progress (1 = curled, timer running)
           }
         }
       });
@@ -3720,7 +3722,7 @@ function applyRemoteState(d){
         else{s.alive=false;return;}
       }
       s._tAngle=sd.angle; s._lastSeen=Date.now(); s.botCircle=!!sd.circle; // lerp toward server angle; timestamp for timeout
-      s.alive=true; s.score=sd.score||0; s.boost=sd.boost||false; s.usd=sd.usd||0; s.cashing=!!sd.cash;s._cashMs=sd.cashMs||0; s.spinning=!!sd.sp;
+      s.alive=true; s.score=sd.score||0; s.boost=sd.boost||false; s.usd=sd.usd||0; s.cashing=!!sd.cash;s._cashMs=sd.cashMs||0;s._cashW=sd.cashW||0; s.spinning=!!sd.sp;
       s.numSections=sd.ns||(sd.segs&&sd.segs.length)||s.numSections;
       s.color=sd.color||s.color; s.name=sd.name||s.name;
       if(sd.segs&&sd.segs.length>1){
@@ -5641,23 +5643,30 @@ function drawSnake(snake){
   // SERVER's authoritative elapsed time (broadcast cashMs) so every watcher's ring is in lockstep with
   // the server timer — the snake vanishes exactly as its ring completes (no "got out before the ring").
   {
-    let _cp=null; // cash-out progress 0..1, or null when not cashing
+    // Two phases, both visible so it never looks "off": (1) CYAN winding ring fills as the body curls into
+    // the circle (timer hasn't started); (2) GOLD countdown ring fills over the 4s once fully wound in.
+    let _cp=null;  // gold countdown progress 0..1
+    let _cw=null;  // cyan wind-in progress 0..1 (timer not started yet)
     if(snake.id===myPid && _cashoutActive && _cashoutStart){
-      // Live: server-authoritative elapsed (_myCashMs stays 0 until my body is wound in). Practice: local.
-      const _ms=_isPractice?(Date.now()-_cashoutStart):(_myCashMs||0);
-      _cp=Math.min(1,_ms/SS_CASHOUT_MS);
+      if(_isPractice){ _cp=Math.min(1,(Date.now()-_cashoutStart)/SS_CASHOUT_MS); } // practice: no wind-in gate
+      else if((_myCashW||0)<1){ _cw=_myCashW||0; }                                  // live: still winding in
+      else { _cp=Math.min(1,(_myCashMs||0)/SS_CASHOUT_MS); }                        // live: counting down
     } else if(snake.cashing){
-      _cp=Math.min(1,(snake._cashMs||0)/SS_CASHOUT_MS);
+      if((snake._cashW||0)<1){ _cw=snake._cashW||0; }
+      else { _cp=Math.min(1,(snake._cashMs||0)/SS_CASHOUT_MS); }
     }
-    if(_cp!=null){
-      const rr=r*1.25;                                   // hugs the head — much smaller than before
+    if(_cw!=null || _cp!=null){
+      const rr=r*1.25;                                   // hugs the head
+      const winding=_cw!=null;
+      const frac=winding?_cw:_cp;
+      const col=winding?'0,220,255':'255,215,0';         // cyan while winding, gold while counting down
       ctx.save();
       ctx.lineCap='round'; ctx.lineWidth=Math.max(2.5,r*0.16);
-      ctx.strokeStyle='rgba(255,215,0,0.18)';            // faint full track
+      ctx.strokeStyle='rgba('+col+',0.18)';              // faint full track
       ctx.beginPath(); ctx.arc(h.x,h.y,rr,0,Math.PI*2); ctx.stroke();
-      ctx.strokeStyle='rgba(255,215,0,0.95)';            // filling arc: right → left (anticlockwise) like a timer
-      ctx.shadowColor='#FFD700'; ctx.shadowBlur=12;
-      ctx.beginPath(); ctx.arc(h.x,h.y,rr, 0, -_cp*Math.PI*2, true); ctx.stroke();
+      ctx.strokeStyle='rgba('+col+',0.95)';              // filling arc (from top, clockwise)
+      ctx.shadowColor=winding?'#00DCFF':'#FFD700'; ctx.shadowBlur=12;
+      ctx.beginPath(); ctx.arc(h.x,h.y,rr, -Math.PI/2, -Math.PI/2+frac*Math.PI*2, false); ctx.stroke();
       ctx.restore();
     }
   }
