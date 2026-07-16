@@ -5975,11 +5975,34 @@ function _showPracticeBtn(){
   const _pb=document.getElementById('practice-btn');
   if(_pb)_pb.style.display=localStorage.getItem('ss_owner')==='1'?'flex':'none';
 }
+// ── Auto-update: stale cached tabs keep running old JS for hours (they never re-fetch the HTML), so
+// players who don't manually refresh miss every deploy — e.g. an un-refreshed player still cashes out
+// on the OLD 1s timer and vanishes almost instantly on everyone else's screen. We watch the page's own
+// content ETag (Vercel changes it on every deploy) and reload ONCE when it changes — but ONLY while the
+// player is idle on a menu (never mid-game/mid-join/mid-spectate), so play is never interrupted.
+let _buildETag=null;
+async function _checkBuild(){
+  try{
+    const r=await fetch(location.pathname+'?v='+Date.now(),{method:'HEAD',cache:'no-store'});
+    const tag=r.headers.get('etag')||r.headers.get('last-modified')||'';
+    if(!tag)return;
+    if(_buildETag===null){_buildETag=tag;return;}          // baseline captured just after load
+    if(tag===_buildETag)return;                            // same build — nothing to do
+    const busy=(typeof SG!=='undefined'&&SG&&!SG.over)||_joiningLobby||isSpectating; // in a game/join/watch
+    if(busy)return;                                         // wait until they're back on a menu
+    if(sessionStorage.getItem('_bReload_'+tag))return;      // already reloaded for this build — no loops
+    sessionStorage.setItem('_bReload_'+tag,'1');
+    location.reload();
+  }catch(_){}
+}
+
 document.addEventListener('DOMContentLoaded',async ()=>{
   setupOtp();
   syncServerBtns();
   _showPracticeBtn();
   _loadSnakeColorPick();
+  setTimeout(_checkBuild,4000);              // capture the current build's ETag shortly after load
+  setInterval(_checkBuild,90000);            // then poll for a new deploy every 90s (reloads only when idle)
   await checkSession();
   // Public "watch live" links (Discord etc.): /slither-snakes.html?watch=1&region=NA&tier=1
   // Takes priority over whatever checkSession() just restored — a spectator link should always
