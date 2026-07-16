@@ -329,8 +329,23 @@ body.mctl #voice-speakers{left:150px;}
     <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:1.1rem;">
       Records the last 20 seconds in your browser. Press <b>G</b> (keyboard) or click the <b>right stick</b> (controller) to save a clip. <b>PC only</b> — off on phones. Runs on your device, never on the game server.
     </div>
+    <!-- Graphics preset -->
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">GRAPHICS</div>
+    <div id="gfx-row" style="display:flex;gap:6px;margin-bottom:6px;">
+      <button class="copy-btn gfx-opt" data-gfx="low"  style="flex:1;" onclick="_setGfx('low')">PERFORMANCE</button>
+      <button class="copy-btn gfx-opt" data-gfx="med"  style="flex:1;" onclick="_setGfx('med')">BALANCED</button>
+      <button class="copy-btn gfx-opt" data-gfx="high" style="flex:1;" onclick="_setGfx('high')">BEST LOOK</button>
+    </div>
+    <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:1.1rem;">Same game either way — everything is drawn in the same place. Lower settings just drop the extra polish (glowing rings, pickup sparkles, segment shading) for more FPS.</div>
+    <!-- Controller binds -->
+    <div id="gp-section" style="display:none;">
+      <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">🎮 CONTROLLER</div>
+      <div id="gpbind-list"></div>
+      <div style="font-size:10px;color:var(--muted);margin:8px 0 10px;">Click a button, then press the controller button you want.</div>
+      <button class="copy-btn" onclick="_resetGpBinds()" style="width:100%;margin-bottom:1rem;">RESET CONTROLLER</button>
+    </div>
     <!-- Keybinds -->
-    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">KEYBINDS</div>
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">⌨ KEYBOARD</div>
     <div id="keybind-list"></div>
     <div style="font-size:10px;color:var(--muted);margin:8px 0 1rem;">Click a key, then press the key you want. Steering is your mouse.</div>
     <div style="display:flex;gap:8px;">
@@ -3916,6 +3931,36 @@ function _ssBindKey(act){
   const d=SS_BIND_DEFS.find(x=>x.act===act); return d?d.keys[0]:'';
 }
 
+// ── Controller (gamepad) keybinds — remappable in Settings ────────────────────────
+// Standard-gamepad button indices; def = the original hardcoded mapping. The poll loop reads _gpBtn(act)
+// instead of literals, so a user can move any action to any button (see Settings). Stored per-device.
+const GP_DEFS = [
+  {act:'boost',      label:'Boost',       def:0},   // A
+  {act:'cashout',    label:'Cash Out',    def:1},   // B
+  {act:'voice',      label:'Voice Chat',  def:2},   // X
+  {act:'autoCircle', label:'Auto-Circle', def:10},  // L3
+  {act:'clip',       label:'Save Clip',   def:11},  // R3
+];
+let _gpBinds = {};
+try{ _gpBinds = JSON.parse(localStorage.getItem('ss_gpbinds')||'{}') || {}; }catch(_){ _gpBinds = {}; }
+function _gpBtn(act){ const v=_gpBinds[act]; if(v!=null)return v; const d=GP_DEFS.find(x=>x.act===act); return d?d.def:-1; }
+const GP_BTN_NAMES={0:'A',1:'B',2:'X',3:'Y',4:'LB',5:'RB',6:'LT',7:'RT',8:'Back',9:'Start',10:'L3',11:'R3',12:'D-Up',13:'D-Down',14:'D-Left',15:'D-Right'};
+function _gpBtnLabel(i){ return i==null||i<0?'—':(GP_BTN_NAMES[i]||('Btn '+i)); }
+let _gpCapAct=null; // action currently being rebound to a controller button (set from Settings)
+
+// ── Graphics quality preset — same scene, less visual polish for more FPS ─────────
+// 'high' = all effects; 'low' = drop the FPS-costly extras (segment rings, money particles, glow) WITHOUT
+// changing what's drawn (same snakes/food/positions, just plainer). 'med' = middle. Never changes layout.
+let _gfx = localStorage.getItem('ss_gfx') || 'high';
+let _gfxParticles=true, _gfxGlow=true;
+function _applyGfx(){
+  _gfx=(_gfx==='low'||_gfx==='med')?_gfx:'high';
+  window._BODYSEGS = _gfx!=='low';      // segment rings: a real per-body-point cost — off on 'low'
+  _gfxParticles    = _gfx==='high';     // money pickup sparkles
+  _gfxGlow         = _gfx!=='low';      // shadowBlur glow on rings/badges
+}
+_applyGfx();
+
 // ── Rolling clip buffer (lightweight) ────────────────────────────────────────────
 // ONE encoder recording a FIXED 1280x720 downscale of the game — not the full window. Encoding the
 // raw window (often 1440p/4K) with TWO recorders was the heavy part that tanked FPS/ping for players
@@ -4019,7 +4064,7 @@ function _keyLabel(k){
   return String(k||'').toUpperCase();
 }
 function _openSettings(){ _renderSettings(); document.getElementById('settings-modal').style.display='flex'; }
-function _closeSettings(){ _cancelRebind(); document.getElementById('settings-modal').style.display='none'; }
+function _closeSettings(){ _cancelRebind(); _gpCapAct=null; document.getElementById('settings-modal').style.display='none'; }
 function _renderSettings(){
   const on = SS_IS_PC && localStorage.getItem('ss_clip_on')==='1';
   const tb=document.getElementById('clip-toggle-btn');
@@ -4035,7 +4080,25 @@ function _renderSettings(){
       +'<button class="copy-btn" style="min-width:64px;" onclick="_startRebind(\''+d.act+'\',this)">'+_keyLabel(_ssBindKey(d.act))+'</button>'
       +'</div>').join('');
   }
+  // Graphics preset — highlight the active option
+  document.querySelectorAll('.gfx-opt').forEach(b=>{ const on=b.getAttribute('data-gfx')===_gfx;
+    b.style.background=on?'var(--g)':''; b.style.color=on?'#000':''; b.style.fontWeight=on?'700':''; });
+  // Controller binds — only show the section when a gamepad is (or has been) connected
+  const gpSec=document.getElementById('gp-section');
+  let gpConnected=false; try{ const ps=navigator.getGamepads?navigator.getGamepads():[]; for(const p of ps){ if(p&&p.connected){gpConnected=true;break;} } }catch(_){}
+  if(gpSec) gpSec.style.display=(gpConnected||Object.keys(_gpBinds).length)?'block':'none';
+  const gl=document.getElementById('gpbind-list');
+  if(gl){
+    gl.innerHTML = GP_DEFS.map(d=>
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.08);">'
+      +'<span style="font-family:\'Press Start 2P\',monospace;font-size:8px;color:#ccc;">'+d.label+'</span>'
+      +'<button class="copy-btn" style="min-width:64px;'+(_gpCapAct===d.act?'color:#FFD700;':'')+'" onclick="_startGpRebind(\''+d.act+'\')">'+(_gpCapAct===d.act?'PRESS…':_gpBtnLabel(_gpBtn(d.act)))+'</button>'
+      +'</div>').join('');
+  }
 }
+function _setGfx(v){ _gfx=v; try{localStorage.setItem('ss_gfx',v);}catch(_){} _applyGfx(); _renderSettings(); addToast('Graphics: '+(v==='low'?'Performance':v==='med'?'Balanced':'Best Look'),'#8cf'); }
+function _startGpRebind(act){ _gpCapAct=act; _renderSettings(); }
+function _resetGpBinds(){ _gpBinds={}; _gpCapAct=null; try{localStorage.removeItem('ss_gpbinds');}catch(_){} _renderSettings(); }
 function _startRebind(act, btn){ _cancelRebind(); _kbCapturing=true; _kbCapAct=act; _kbCapBtn=btn; btn.textContent='PRESS…'; btn.style.color='#FFD700'; }
 function _cancelRebind(){ if(_kbCapBtn) _kbCapBtn.style.color=''; _kbCapturing=false; _kbCapAct=null; _kbCapBtn=null; }
 function _resetBinds(){ _ssBinds={}; try{localStorage.removeItem('ss_keybinds');}catch(_){}; _renderSettings(); }
@@ -4822,6 +4885,19 @@ function pollGamepad(){
   function pressed(i){return cur(i)&&!(_gpadLastBtn[i]||false);}
   function released(i){return !cur(i)&&(_gpadLastBtn[i]||false);}
 
+  // Controller REBIND capture: Settings armed a rebind → the next button press becomes that binding.
+  if(_gpCapAct){
+    for(let i=0;i<btns.length;i++){ if(pressed(i)){
+      for(const a in _gpBinds){ if(_gpBinds[a]===i) delete _gpBinds[a]; } // a button maps to one action
+      _gpBinds[_gpCapAct]=i;
+      try{ localStorage.setItem('ss_gpbinds', JSON.stringify(_gpBinds)); }catch(_){}
+      _gpCapAct=null; if(typeof _renderSettings==='function')_renderSettings();
+      break;
+    } }
+    for(let i=0;i<btns.length;i++)_gpadLastBtn[i]=cur(i);
+    return; // swallow this frame's input while binding
+  }
+
   if(SG&&!SG.over&&canvas&&!_localDead){
     // In-game: left stick → aim direction, A → boost, Y → cashout (hold)
     const ax=axes[0]||0,ay=axes[1]||0;
@@ -4830,18 +4906,15 @@ function pollGamepad(){
       const r=Math.min(cx,cy)*0.8;
       _mouseX=cx+ax*r; _mouseY=cy+ay*r;
     }
-    _padBoost=cur(0); // A button — stored separately so keyboard boost isn't overridden
+    _padBoost=cur(_gpBtn('boost')); // remappable (default A) — stored separately so keyboard boost isn't overridden
     // Right stick X (axes[2]) — zoom in/out
     const rsx=axes[2]||0;
     if(Math.abs(rsx)>GPAD_DEADZONE) _zoomOffset=Math.max(-2.0,Math.min(2.0,_zoomOffset-rsx*0.004));
-    // X button (index 2) — toggle voice chat (controller)
-    if(pressed(2)) voiceToggle();
-    // L3 (left stick click, index 10) — toggle auto-circle
-    if(pressed(10)) toggleAutoCircle();
-    // R3 (right stick click, index 11) — save a 20s clip
-    if(pressed(11)) _clipSave();
-    // B button (index 1) — start server-authoritative cash-out (6s forced circle, cannot cancel)
-    if(pressed(1)&&!_cashoutActive&&!_localDead){ startCashout(); }
+    // Remappable controller actions (defaults: X=voice, L3=auto-circle, R3=clip, B=cashout)
+    if(pressed(_gpBtn('voice'))) voiceToggle();
+    if(pressed(_gpBtn('autoCircle'))) toggleAutoCircle();
+    if(pressed(_gpBtn('clip'))) _clipSave();
+    if(pressed(_gpBtn('cashout'))&&!_cashoutActive&&!_localDead){ startCashout(); }
   } else {
     // Menu: stick/d-pad to navigate, A to confirm, B to back
     // When a modal (leaderboard/profile/friends/withdraw) is open, scope navigation to it —
@@ -5361,7 +5434,7 @@ function rafDraw(ts){
   _perfFrameEnd();
 }
 
-function _spawnMoneyFx(x,y){_moneyFx.push({x:x+(Math.random()-.5)*22,y:y-8,t0:performance.now()});if(_moneyFx.length>50)_moneyFx.shift();}
+function _spawnMoneyFx(x,y){if(!_gfxParticles)return;_moneyFx.push({x:x+(Math.random()-.5)*22,y:y-8,t0:performance.now()});if(_moneyFx.length>50)_moneyFx.shift();}
 function drawMoneyFx(){
   if(!_moneyFx.length)return;
   const now=performance.now();
@@ -5823,7 +5896,7 @@ function drawSnake(snake){
       ctx.strokeStyle='rgba('+col+',0.18)';              // faint full track
       ctx.beginPath(); ctx.arc(h.x,h.y,rr,0,Math.PI*2); ctx.stroke();
       ctx.strokeStyle='rgba('+col+',0.95)';              // filling arc (from top, clockwise)
-      ctx.shadowColor=winding?'#00DCFF':'#FFD700'; ctx.shadowBlur=12;
+      if(_gfxGlow){ ctx.shadowColor=winding?'#00DCFF':'#FFD700'; ctx.shadowBlur=12; } // glow off on 'low' preset
       ctx.beginPath(); ctx.arc(h.x,h.y,rr, -Math.PI/2, -Math.PI/2+frac*Math.PI*2, false); ctx.stroke();
       ctx.restore();
     }
@@ -6172,6 +6245,7 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   syncServerBtns();
   _showPracticeBtn();
   _loadSnakeColorPick();
+  _applyGfx(); // re-apply the saved graphics preset AFTER the window._BODYSEGS default runs, so the preset wins
   setTimeout(_checkBuild,4000);              // capture the current build's ETag shortly after load
   setInterval(_checkBuild,90000);            // then poll for a new deploy every 90s (reloads only when idle)
   await checkSession();
