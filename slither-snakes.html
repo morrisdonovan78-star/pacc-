@@ -5569,6 +5569,10 @@ function _paintHexStrokes(g,camX,camY,zoom,W,H){
   g.stroke();
 }
 const _hexCache={cv:null,g:null,camX:0,camY:0,zoom:0,margin:340};
+// Zoom-settle tracking for the grid cache (see drawArena). A rebuild costs ~3.64ms of blocking JS —
+// most of a 240Hz frame — so it must never run on a frame where the zoom is still moving.
+const HEX_ZOOM_SETTLE_MS=90;      // hold-still time before we spend one rebuild and return to blitting
+let _hexZoomLast=0,_hexZoomStillAt=0;
 function _hexEnsure(force){
   const M=_hexCache.margin, bw=canvas.width+2*M, bh=canvas.height+2*M, c=_hexCache;
   const dxpx=Math.abs(_camX-c.camX)*_camZoom, dypx=Math.abs(_camY-c.camY)*_camZoom;
@@ -5602,9 +5606,23 @@ function drawArena(){
   // The true arena-edge clip is still applied LIVE on the blit below, so the BOUNDARY ITSELF stays
   // exact; only the decorative grid texture inside it is resampled, exactly as in the interior today.
   // window._HEXBORDERGUARD===true restores the old guard (kill switch).
+  // ── ZOOM: never rebuild the cache mid-gesture (measured root cause of "fps halves while zooming") ──
+  // _hexEnsure invalidates on `c.zoom!==_camZoom`, and the wheel moves _camZoom EVERY frame — so every
+  // zooming frame paid a full rebuild: clearRect over the 1960x1400 (2.74M px) buffer + re-stroking 759
+  // hexes into it + the blit. Measured 3.64ms of BLOCKING JS, vs a 4.17ms budget at 240Hz — so each
+  // zooming frame missed exactly one vsync: 240 -> 120, the exact halving. (And when you're pinned at a
+  // zoom limit _camZoom stops changing, nothing invalidates, and you barely drop — the "sometimes" part.)
+  // While the zoom is still moving, draw the grid LIVE instead: 0.72ms, 5x cheaper than the rebuild, and
+  // it is the PIXEL-EXACT REFERENCE the cache is built from (same _paintHexStrokes, same live clip), so
+  // the grid looks identical — if anything more exact, since a live stroke isn't resampled.
+  // Once the zoom holds still for a moment we rebuild ONCE and go back to the ~free blit.
+  const _tNow=performance.now();
+  if(_camZoom!==_hexZoomLast){ _hexZoomLast=_camZoom; _hexZoomStillAt=_tNow; }
+  const _zoomSettled=(_tNow-_hexZoomStillAt)>=HEX_ZOOM_SETTLE_MS;
+  const _cacheZoomOk=(_hexCache.zoom===_camZoom)||_zoomSettled;
   const _gridReach=Math.hypot(canvas.width,canvas.height)/(2*_camZoom);
   const _borderInView=(window._HEXBORDERGUARD===true)&&(Math.hypot(_camX,_camY)+_gridReach>=ARENA_R-2);
-  if(_hexUseCache() && !_borderInView){
+  if(_hexUseCache() && !_borderInView && _cacheZoomOk){
     _hexEnsure(false);
     const c=_hexCache;
     ctx.save();
