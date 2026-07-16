@@ -2767,7 +2767,7 @@ async function pkConnect(roomId,gameToken,spectate){
         if(sd.id===myPid&&_cashedOut){s.alive=false;if(s.path&&s.path.length)s.path=[];return;}
         // Don't reanimate a recently-killed snake (stale packet from before kill)
         if(!s.alive&&_snakeDeathTs.has(sd.id)&&Date.now()-(_snakeDeathTs.get(sd.id)||0)<2000){_ssBuf.delete(sd.id);return;}
-        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;s.cashing=!!sd.cash;s._cashMs=sd.cashMs||0;s.spinning=!!sd.sp;
+        s.alive=true;s.score=sd.score||0;s.boost=sd.boost||false;s.usd=sd.usd||0;s.cashing=!!sd.cash;s._cashMs=sd.cashMs||0;s.spinning=!!sd.sp;
         s.numSections=sd.ns||s.numSections;s.color=sd.color||s.color;s.name=sd.name||s.name;
         // ── Option A body-sync: adopt the server's authoritative body via its periodic KEYFRAME
         // (rk = full trail, flat head-first [x0,y0,...]; sent on spawn + every ~5s). Stash it here;
