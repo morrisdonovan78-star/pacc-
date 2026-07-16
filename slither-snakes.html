@@ -1092,7 +1092,7 @@ let _cashoutStart=0;          // ms timestamp the current cash-out began (drives
 let _cashoutActive=false;     // server-authoritative cash-out in progress (locked once started — cannot cancel)
 let _myCashMs=0;              // server-authoritative elapsed on MY cash-out timer (0 until my body is wound in)
 let _myCashW=0;               // server-authoritative wind-in progress 0..1 for MY snake (1 = fully curled, timer running)
-const SS_CASHOUT_MS=4000;     // cash-out timer DURATION (server.js uses 4000) — only starts once the body is fully wound into the circle
+const SS_CASHOUT_MS=5500;     // cash-out timer DURATION (server.js uses 5500) — only starts once the body is fully wound into the circle
 let _mobileCtl=false,_joyTouchId=null,_mobileWired=false;
 let _pendingState=null;
 let _gpadLastBtn=[],_gpadNavTs=0;
