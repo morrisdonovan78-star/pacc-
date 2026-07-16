@@ -1105,7 +1105,7 @@ let _cashoutStart=0;          // ms timestamp the current cash-out began (drives
 let _cashoutActive=false;     // server-authoritative cash-out in progress (locked once started — cannot cancel)
 let _myCashMs=0;              // server-authoritative elapsed on MY cash-out timer (0 until my body is wound in)
 let _myCashW=0;               // server-authoritative wind-in progress 0..1 for MY snake (1 = fully curled, timer running)
-const SS_CASHOUT_MS=5500;     // cash-out timer DURATION (server.js uses 5500) — only starts once the body is fully wound into the circle
+const SS_CASHOUT_MS=4000;     // cash-out timer DURATION (server.js uses 4000) — only starts once the body is fully wound into the circle
 let _mobileCtl=false,_joyTouchId=null,_mobileWired=false;
 let _pendingState=null;
 let _gpadLastBtn=[],_gpadNavTs=0;
@@ -4181,6 +4181,7 @@ function _onTuning(){
     g('tun-faceT-val').textContent    =_tuningTest.faceDeg+'°';
     if(_isTestLobby()){try{localStorage.setItem('ss_tuning_test8',JSON.stringify(_tuningTest));}catch(_){}} // don't contaminate saved test-lobby values from live tuning
     if(_sio)_sio.emit('ss-tune',_tuningTest);
+    _drawTuningPreview(); // two-snakes H2H preview + stats (was only drawn in the legacy branch → black box)
     return;
   }
   _tuning.hbs    =+document.getElementById('tun-hbs').value;
@@ -4211,6 +4212,7 @@ function _syncTuningUI(){
     if(e('tun-dbgChk'))e('tun-dbgChk').checked=!!_tuningTest.dbg;
     if(e('tun-vizChk'))e('tun-vizChk').checked=!!_grazeViz;
     e('tun-rule').value=_tuningTest.rule||'biggest_wins';
+    _drawTuningPreview(); // two-snakes H2H preview + stats (was legacy-branch-only → black box on open)
     return;
   }
   e('tun-hbs').value=_tuning.hbs;       e('tun-hbs-val').textContent  =_tuning.hbs.toFixed(2)+'×';
@@ -4228,6 +4230,14 @@ function _resetTuning(){
     _syncTuningUI();
     if(_sio)_sio.emit('ss-tune',_tuningTest);
     addToast('Test tuning reset to current defaults','#888');
+    return;
+  }
+  if(localStorage.getItem('ss_owner')==='1'){
+    // Owner panel outside the test lobby: reset to the LIVE locked defaults (what every lobby runs).
+    Object.assign(_tuningTest,_LIVE_TUNING_DEFAULTS);
+    _syncTuningUI();
+    if(_sio)_sio.emit('ss-tune',_tuningTest);
+    addToast('Tuning reset to LIVE locked defaults','#888');
     return;
   }
   _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
