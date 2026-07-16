@@ -3874,7 +3874,13 @@ function startGuestLoop(){
 // Everything here is client-side only — recording happens in this browser off the game
 // canvas and (if a webhook is set) uploads straight to Discord. The game servers are never
 // involved, so this can't affect match performance for anyone but the recording player.
-const SS_IS_PC = !(('ontouchstart' in window) || (navigator.maxTouchPoints||0) > 0);
+// "PC" = has a real mouse/trackpad. The old test (no touch events / maxTouchPoints===0) FALSELY flagged
+// touchscreen laptops & Windows PCs as mobile (they report touch AND a mouse) → "Clips are PC-only" on a
+// PC. A fine pointer or hover capability is present on every desktop-class device (incl. touchscreen ones)
+// and absent on phones/tablets, so this correctly allows clips on any PC.
+const SS_IS_PC = !!(window.matchMedia
+  ? (matchMedia('(any-pointer:fine)').matches || matchMedia('(any-hover:hover)').matches)
+  : !('ontouchstart' in window));
 
 // Discord webhook for auto-posting clips to your #clips channel. Empty string = clips just
 // download to the player's device instead. Exposed in client code by necessity (browser →
