@@ -4387,10 +4387,61 @@ function clearBotSnakes(){
 }
 
 function onResize(){if(canvas){canvas.width=window.innerWidth;canvas.height=window.innerHeight;}}
-function onMouseMove(e){_mouseX=e.clientX;_mouseY=e.clientY; if(_specDrag&&_camZoom){_specPanX=_specDrag.px-(e.clientX-_specDrag.x)/_camZoom;_specPanY=_specDrag.py-(e.clientY-_specDrag.y)/_camZoom;}}
+function onMouseMove(e){
+  if(_plActive()){
+    // LOCKED: clientX/clientY are frozen/meaningless — integrate raw deltas into a virtual cursor.
+    // Clamp to the viewport: the aim angle is taken from the head (screen centre) to this point, so
+    // keeping it in-bounds makes the locked feel IDENTICAL to the unlocked feel. Letting it run away
+    // to +/-100000 would make small mouse moves barely change the angle (sluggish aim) and would
+    // re-create the dead zone we're fixing. movementX/Y can be huge on one event — clamp per axis.
+    const W=(canvas&&canvas.width)||window.innerWidth, H=(canvas&&canvas.height)||window.innerHeight;
+    _mouseX=Math.max(0,Math.min(W,_mouseX+(e.movementX||0)));
+    _mouseY=Math.max(0,Math.min(H,_mouseY+(e.movementY||0)));
+    return; // no _specDrag while locked — spectators are never locked (see _plWant)
+  }
+  _mouseX=e.clientX;_mouseY=e.clientY;
+  if(_specDrag&&_camZoom){_specPanX=_specDrag.px-(e.clientX-_specDrag.x)/_camZoom;_specPanY=_specDrag.py-(e.clientY-_specDrag.y)/_camZoom;}
+}
 // NAMED so they can be removed on cleanup — previously anonymous arrows re-added on every rejoin and
 // never removed, stacking duplicate handlers each session (a listener leak). Behavior unchanged.
-function onGameMouseDown(e){if(e.button===0){_mouseBoost=true; if(isSpectating)_specDrag={x:e.clientX,y:e.clientY,px:_specPanX,py:_specPanY};}}
+// ══ POINTER LOCK — so aim never dies at the window edge ═══════════════════════════════════════
+// A web page CANNOT read the mouse once it leaves its window: no event reports a cursor sitting on
+// the Windows taskbar, the browser chrome, or a second monitor. Unlocked, _mouseX/_mouseY simply
+// FREEZE at the last in-window position — and because the cursor is hidden in game (cursor:none)
+// you can't see it drift away. Worse, to bring it back you must first travel all the distance it
+// silently wandered, so aim feels stuck and then snaps.
+// Locking captures the pointer: it can never leave, and mousemove keeps delivering movementX/Y
+// deltas forever. We integrate those into a VIRTUAL cursor, so aim tracks in every direction with
+// no edge and no dead zone. The virtual cursor is clamped to the viewport so aiming stays exactly
+// as responsive as it is unlocked — angle/turn feel is unchanged, only the off-window case is fixed.
+// Esc releases (browser-enforced); clicking the canvas re-locks.
+let _plToastShown=false, _plCooldown=0;
+function _plTarget(){ return document.getElementById('gc')||canvas; }
+function _plActive(){ const t=_plTarget(); return !!t && document.pointerLockElement===t; }
+function _plWant(){
+  // Only while actually playing. Spectators pan by dragging with real clientX/clientY, so locking
+  // them would break spectate; menus obviously must keep a usable cursor.
+  return !!(SG && !SG.over && !isSpectating && !_localDead &&
+            document.getElementById('scr-game') && document.getElementById('scr-game').classList.contains('on'));
+}
+function _plRequest(){
+  if(!_plWant() || _plActive()) return;
+  if(Date.now()<_plCooldown) return;           // Chrome rejects a re-lock right after an Esc exit
+  const t=_plTarget(); if(!t||!t.requestPointerLock) return;
+  try{ const p=t.requestPointerLock(); if(p&&p.catch)p.catch(()=>{}); }catch(_){}
+}
+function _plRelease(){ try{ if(document.pointerLockElement) document.exitPointerLock(); }catch(_){} }
+document.addEventListener('pointerlockchange',()=>{
+  if(_plActive()){
+    if(!_plToastShown){ _plToastShown=true; try{ addToast('Mouse locked to game — Esc to free it','#8cf'); }catch(_){} }
+  }else{
+    // Esc (or focus loss) released it. Brief cooldown: Chrome throws if we re-request immediately.
+    _plCooldown=Date.now()+1500;
+  }
+});
+document.addEventListener('pointerlockerror',()=>{ _plCooldown=Date.now()+1500; });
+
+function onGameMouseDown(e){if(e.button===0){_mouseBoost=true; if(isSpectating)_specDrag={x:e.clientX,y:e.clientY,px:_specPanX,py:_specPanY}; else _plRequest();}}
 function onGameMouseUp(e){if(e.button===0){_mouseBoost=false; _specDrag=null;}}
 // Scroll wheel / trackpad zoom — up = zoom in, down = zoom out. Per-event step is capped so
 // high-resolution trackpads don't jump. rafDraw re-clamps _zoomOffset to the visible range.
@@ -4550,6 +4601,7 @@ async function endSnakeGame(reason,killerId){
     stopHostLoop();
     clearInterval(_guestInputLoop);_guestInputLoop=null;
     if(rafHandle){cancelAnimationFrame(rafHandle);rafHandle=null;}
+    _plRelease(); // never leave the pointer captured once we're back on the menus
     document.removeEventListener('mousemove',onMouseMove);
     document.removeEventListener('mousedown',onGameMouseDown);
     document.removeEventListener('mouseup',onGameMouseUp);
@@ -4673,6 +4725,7 @@ function goHome(){
   // Blur any focused input so the gamepad doesn't get trapped in a text field
   if(document.activeElement&&document.activeElement!==document.body)document.activeElement.blur();
   if(rafHandle){cancelAnimationFrame(rafHandle);rafHandle=null;}
+  _plRelease(); // never leave the pointer captured once we're back on the menus
   document.removeEventListener('mousemove',onMouseMove);
   document.removeEventListener('mousedown',onGameMouseDown);
   document.removeEventListener('mouseup',onGameMouseUp);
