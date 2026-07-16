@@ -58,6 +58,10 @@
 :root{--y:#FFD700;--c:#00FFFF;--g:#39FF14;--r:#FF3333;--pk:#FF69B4;--dark:#07070f;--panel:#0e0e1c;--border:#1c1c38;--txt:#e0e0ff;--muted:#555588;}
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{background:#07070f;color:var(--txt);font-family:'Exo 2',sans-serif;min-height:100vh;overflow-x:hidden;touch-action:manipulation;}
+/* Game UI is not text — clicking buttons (mode presets etc.) must never leave a stuck blue text
+   highlight in the background. Disable selection everywhere EXCEPT real inputs so names/amounts still type. */
+body{-webkit-user-select:none;-moz-user-select:none;user-select:none;}
+input,textarea,[contenteditable="true"]{-webkit-user-select:text;-moz-user-select:text;user-select:text;}
 #menu-bg{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none;display:block;}
 .scr{position:relative;z-index:1;display:none;min-height:100vh;flex-direction:column;align-items:center;justify-content:center;padding:1.5rem 1rem;}
 .scr.on{display:flex;}
@@ -4096,7 +4100,7 @@ function _renderSettings(){
       +'</div>').join('');
   }
 }
-function _setGfx(v){ _gfx=v; try{localStorage.setItem('ss_gfx',v);}catch(_){} _applyGfx(); _renderSettings(); addToast('Graphics: '+(v==='low'?'Performance':v==='med'?'Balanced':'Best Look'),'#8cf'); }
+function _setGfx(v){ _gfx=v; try{localStorage.setItem('ss_gfx',v);}catch(_){} _applyGfx(); _renderSettings(); try{window.getSelection&&window.getSelection().removeAllRanges();}catch(_){} addToast('Graphics: '+(v==='low'?'Performance':v==='med'?'Balanced':'Best Look'),'#8cf'); }
 function _startGpRebind(act){ _gpCapAct=act; _renderSettings(); }
 function _resetGpBinds(){ _gpBinds={}; _gpCapAct=null; try{localStorage.removeItem('ss_gpbinds');}catch(_){} _renderSettings(); }
 function _startRebind(act, btn){ _cancelRebind(); _kbCapturing=true; _kbCapAct=act; _kbCapBtn=btn; btn.textContent='PRESS…'; btn.style.color='#FFD700'; }
