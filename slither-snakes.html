@@ -1137,7 +1137,11 @@ function _perfUpdate(){
     ['&nbsp;&nbsp;net+interp',g('net').toFixed(2)],['&nbsp;&nbsp;arena/bg',g('arena').toFixed(2)],['&nbsp;&nbsp;food',g('food').toFixed(2)],
     ['&nbsp;&nbsp;snakes',g('snakes').toFixed(2)],['&nbsp;&nbsp;UI/minimap',g('ui').toFixed(2)],['&nbsp;&nbsp;other JS',other.toFixed(2)],
     ['GPU/composite/idle',Math.max(0,frameInt-js).toFixed(2)+' ms'],['worst frame',_perf.dtMax.toFixed(1)+' ms'],['jank frames',''+_perf.jank],
-    ['snakes / segs',(_perf.snakes/f).toFixed(0)+' / '+(_perf.segs/f).toFixed(0)],['food',(_perf.food/f).toFixed(0)],['ping',_ping+' ms']];
+    // snakes/segs/food are per-FRAME counters (reset to 0 by _perfFrameStart, re-accumulated during
+    // each frame's draw). _perfUpdate only ever runs at frame-end, so they already hold THIS frame's
+    // scene snapshot — show them as-is. (They used to be divided by the frame count f, which is wrong:
+    // that mixed a single frame's count with a multi-frame denominator and under-reported ~30-60x.)
+    ['snakes / segs',_perf.snakes.toFixed(0)+' / '+_perf.segs.toFixed(0)],['food',_perf.food.toFixed(0)],['ping',_ping+' ms']];
   if(performance.memory)rows.push(['JS heap',(performance.memory.usedJSHeapSize/1048576).toFixed(0)+' MB']);
   const bound=js>frameInt*0.7?'CPU/JS-bound':'GPU/composite-bound';
   _perf.dom.innerHTML=`<b style="color:#8cf">⚡ PERF</b> <span style="color:${js>frameInt*0.7?'#f66':'#6f6'}">${bound}</span> <span style="color:#555">(\` toggle)</span><table style="border-collapse:collapse;margin-top:3px">`
