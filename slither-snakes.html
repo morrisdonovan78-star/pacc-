@@ -1090,7 +1090,8 @@ const _eatenLocalTTL=8000,_eatenLocal=new Map(); // guest predictive pebble pick
 let _mouseX=0,_mouseY=0,_mouseBoost=false,_padBoost=false,_cashoutTimer=null,_showHitboxes=false,_myEyeAngle=null;
 let _cashoutStart=0;          // ms timestamp the current cash-out began (drives the timer ring)
 let _cashoutActive=false;     // server-authoritative cash-out in progress (locked once started — cannot cancel)
-const SS_CASHOUT_MS=6000;     // cash-out DURATION — server-authoritative forced auto-circle (server.js ssTick uses 6000 too)
+let _myCashMs=0;              // server-authoritative elapsed on MY cash-out timer (0 until my body is wound in)
+const SS_CASHOUT_MS=4000;     // cash-out timer DURATION (server.js uses 4000) — only starts once the body is fully wound into the circle
 let _mobileCtl=false,_joyTouchId=null,_mobileWired=false;
 let _pendingState=null;
 let _gpadLastBtn=[],_gpadNavTs=0;
@@ -2810,6 +2811,7 @@ async function pkConnect(roomId,gameToken,spectate){
               if(sd.usd>_myUsd+0.0001){const _oh=own.path&&own.path[0];if(_oh)_spawnMoneyFx(_oh.x,_oh.y);}
               _myUsd=sd.usd;
             }
+            if(sd.cashMs!=null)_myCashMs=sd.cashMs; // server-authoritative cash-out elapsed (0 until wound in)
           }
         }
       });
@@ -4375,13 +4377,13 @@ function onGameKeyUp(e){
 // We just flag it locally (drives the ring + sends cash:1 each input tick); the server is the truth.
 function startCashout(){
   if(!SG||SG.over||_localDead||_cashoutActive)return;
-  _cashoutActive=true; _cashoutStart=Date.now();
-  addToast('💰 CASHING OUT — hold on 6s… (cannot cancel)','#FFD700');
-  // Fallback completion: the SERVER normally pays at 6s via ss-cashout-done (removing our snake with no
-  // food). This client timer is a safety net for practice mode / a missed signal — it fires slightly
-  // later so the server path wins normally, and is skipped if we died first (endSnakeGame guards _localDead).
+  _cashoutActive=true; _cashoutStart=Date.now(); _myCashMs=0;
+  addToast('💰 CASHING OUT — circle up fully, then hold on!','#FFD700');
+  // Live rooms: the SERVER runs the wind-in gate (timer only starts once the whole body is curled into the
+  // circle) + 4s timer, then signals ss-cashout-done. NO local timer there or we'd pay before the body is
+  // wound in. Practice has no server sim, so complete locally after 4s (winding not enforced — it's free).
   if(_cashoutTimer)clearTimeout(_cashoutTimer);
-  _cashoutTimer=setTimeout(()=>{ _cashoutTimer=null; if(_cashoutActive&&!_localDead&&SG&&!SG.over)endSnakeGame('cashout',null); }, SS_CASHOUT_MS+500);
+  if(_isPractice)_cashoutTimer=setTimeout(()=>{ _cashoutTimer=null; if(_cashoutActive&&!_localDead&&SG&&!SG.over)endSnakeGame('cashout',null); }, SS_CASHOUT_MS);
 }
 
 function toggleAutoCircle(){
@@ -5641,7 +5643,9 @@ function drawSnake(snake){
   {
     let _cp=null; // cash-out progress 0..1, or null when not cashing
     if(snake.id===myPid && _cashoutActive && _cashoutStart){
-      _cp=Math.min(1,(Date.now()-_cashoutStart)/SS_CASHOUT_MS);
+      // Live: server-authoritative elapsed (_myCashMs stays 0 until my body is wound in). Practice: local.
+      const _ms=_isPractice?(Date.now()-_cashoutStart):(_myCashMs||0);
+      _cp=Math.min(1,_ms/SS_CASHOUT_MS);
     } else if(snake.cashing){
       _cp=Math.min(1,(snake._cashMs||0)/SS_CASHOUT_MS);
     }
