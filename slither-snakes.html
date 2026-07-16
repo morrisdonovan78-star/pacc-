@@ -4457,7 +4457,7 @@ function _plRequest(){
 function _plRelease(){ try{ if(document.pointerLockElement) document.exitPointerLock(); }catch(_){} }
 document.addEventListener('pointerlockchange',()=>{
   if(_plActive()){
-    if(!_plToastShown){ _plToastShown=true; try{ addToast('Mouse locked to game — Esc to free it','#8cf'); }catch(_){} }
+    if(!_plToastShown){ _plToastShown=true; try{ addToast('Mouse locked for aim — click buttons with the crosshair; Esc/Win to free','#8cf'); }catch(_){} }
   }else{
     // Esc (or focus loss) released it. Brief cooldown: Chrome throws if we re-request immediately.
     _plCooldown=Date.now()+1500;
@@ -4465,7 +4465,23 @@ document.addEventListener('pointerlockchange',()=>{
 });
 document.addEventListener('pointerlockerror',()=>{ _plCooldown=Date.now()+1500; });
 
-function onGameMouseDown(e){if(e.button===0){_mouseBoost=true; if(isSpectating)_specDrag={x:e.clientX,y:e.clientY,px:_specPanX,py:_specPanY}; else _plRequest();}}
+function onGameMouseDown(e){
+  if(e.button!==0)return;
+  // While the pointer is locked the mouse is captured, so in-game DOM buttons (bot bar, etc.) can't
+  // receive real clicks — THAT is why you had to press Esc first to spawn bots. Fix: if the on-screen
+  // crosshair (the virtual cursor you aim with) is sitting over an in-game button, fire that button's
+  // click right here. So you click bots/UI normally and the mouse STAYS locked for aim — no Esc. The
+  // lock still only frees on Esc or switching apps (Win/Alt-Tab). Canvas.width==innerWidth so
+  // _mouseX/_mouseY are client px → elementFromPoint hits the right element.
+  if(_plActive()){
+    const _el=document.elementFromPoint(_mouseX,_mouseY);
+    const _btn=_el&&_el.closest&&_el.closest('button');
+    if(_btn){ try{_btn.click();}catch(_){} return; }   // clicked a UI button — no boost, stay locked
+  }
+  _mouseBoost=true;
+  if(isSpectating)_specDrag={x:e.clientX,y:e.clientY,px:_specPanX,py:_specPanY};
+  else _plRequest();
+}
 function onGameMouseUp(e){if(e.button===0){_mouseBoost=false; _specDrag=null;}}
 // Scroll wheel / trackpad zoom — up = zoom in, down = zoom out. Per-event step is capped so
 // high-resolution trackpads don't jump. rafDraw re-clamps _zoomOffset to the visible range.
