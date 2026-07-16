@@ -1193,6 +1193,10 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
 // bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
 const _TEST_DEFAULTS={grazePx:1.0,grazeHead:1.0,bodyScale:1.0,grazeReach:1.0,circDeg:360,faceDeg:60,rule:'biggest_wins',dbg:false};
+// The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
+// panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
+const _LIVE_TUNING_DEFAULTS={grazePx:6.5,grazeHead:1.25,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,rule:'biggest_wins',dbg:false};
+let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
 try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv&&localStorage.getItem('ss_owner')==='1')Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
@@ -4103,10 +4107,9 @@ function launchSnakeGame(){
     if(_isTestLobby()){
       try{const _sv=localStorage.getItem('ss_tuning_test8');if(_sv)Object.assign(_tuningTest,JSON.parse(_sv));}catch(_){}
       if(_sio)_sio.emit('ss-tune',_tuningTest); // separate nose/body tuning — test lobby only
-    }else{
-      try{const _sv=localStorage.getItem('ss_tuning_v4');if(_sv)Object.assign(_tuning,JSON.parse(_sv));}catch(_){}
-      if(_sio)_sio.emit('ss-tune',_tuning);
     }
+    // LIVE lobbies: deliberately NO auto-push on join — collision starts on the locked defaults every
+    // room, and only changes when the owner explicitly moves a panel slider (_onTuning emits then).
   }
   rafHandle=requestAnimationFrame(rafDraw);
   if(_hostWatch)clearInterval(_hostWatch);
@@ -4136,13 +4139,22 @@ function launchSnakeGame(){
 
 // ── Combat Tuning Suite ──────────────────────────────────────
 function _toggleTuning(){
-  // LOCKED FOR EVERYONE (incl. the owner). Collision tuning is now hardcoded + server-locked, so the panel
-  // is permanently disabled — no key, button, or DevTools ss_owner=1 trick can open it, and the server
-  // ignores ss-tune anyway. Always force it hidden and bail.
-  _showTuning=false; const _p=document.getElementById('tuning-panel'); if(_p)_p.style.display='none';
+  // OWNER-ONLY (re-enabled by owner request): live circle-graze tuning so the owner can retune circle
+  // kills in-game and pick new defaults. The REAL gate is server-side — ss-tune only applies from the
+  // owner's WALLET — so a DevTools ss_owner=1 forge opens a panel whose sliders do nothing.
+  if(localStorage.getItem('ss_owner')!=='1'){ _showTuning=false; const _q=document.getElementById('tuning-panel'); if(_q)_q.style.display='none'; return; }
+  _showTuning=!_showTuning;
+  const _p=document.getElementById('tuning-panel'); if(_p)_p.style.display=_showTuning?'block':'none';
+  if(_showTuning){
+    // Outside the test lobby, seed the knobs ONCE with the CURRENT LIVE settings (what all lobbies run).
+    if(!_isTestLobby()&&!_ownerTuneSeeded){ Object.assign(_tuningTest,_LIVE_TUNING_DEFAULTS); _ownerTuneSeeded=true; }
+    _syncTuningUI();
+  }
 }
 function _onTuning(){
-  if(_isTestLobby()){
+  // Owner uses the circle-graze knobs EVERYWHERE (the live model IS the promoted test-lobby model);
+  // the legacy hbs/hhbs branch below only remains for the test-lobby-less past and is server-ignored.
+  if(_isTestLobby()||localStorage.getItem('ss_owner')==='1'){
     const g=id=>document.getElementById(id);
     _tuningTest.grazePx   =+g('tun-grazePx').value;
     _tuningTest.grazeHead =+g('tun-grazeHead').value;
@@ -4159,7 +4171,7 @@ function _onTuning(){
     g('tun-grazereach-val').textContent=_tuningTest.grazeReach.toFixed(2)+'×';
     g('tun-circ-val').textContent     =_tuningTest.circDeg+'°';
     g('tun-faceT-val').textContent    =_tuningTest.faceDeg+'°';
-    try{localStorage.setItem('ss_tuning_test8',JSON.stringify(_tuningTest));}catch(_){}
+    if(_isTestLobby()){try{localStorage.setItem('ss_tuning_test8',JSON.stringify(_tuningTest));}catch(_){}} // don't contaminate saved test-lobby values from live tuning
     if(_sio)_sio.emit('ss-tune',_tuningTest);
     return;
   }
@@ -4177,7 +4189,7 @@ function _onTuning(){
 function _syncTuningUI(){
   const e=id=>document.getElementById(id);
   if(!e('tun-hbs'))return;
-  const _test=_isTestLobby();
+  const _test=_isTestLobby()||localStorage.getItem('ss_owner')==='1'; // owner: always the circle-graze knobs (the live model)
   if(e('tun-normal'))e('tun-normal').style.display=_test?'none':'block';
   if(e('tun-nose'))  e('tun-nose').style.display  =_test?'block':'none';
   if(_test){
