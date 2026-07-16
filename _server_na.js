@@ -800,6 +800,92 @@ function ssSpawnKillFood(sg, sn) {
 
 }
 
+// ── Unclaimed gold-food persistence (PAID lobbies only) ───────────────────────────────────────────
+// Gold orbs are CLAIM TICKETS on money already pooled in escrow: when a player dies their deposit
+// stays in the escrow account and their `pw:` record is deleted, so ONLY whoever eats the orbs can
+// draw that value out. The room teardown (`ssGames.delete`) used to destroy sg.food along with the
+// game — the SOL then sat in escrow permanently unclaimable by anyone, which is the "gold food just
+// disappeared" bug. So: park the unclaimed orbs when a paid room empties, reclaim them when it
+// reopens. This NEVER moves money — escrow is untouched here; we only persist the tickets.
+//
+// LOBBY-SCOPED BY CONSTRUCTION: the store key is per-lobby (foodpark:ss-paid-lobby-1 vs
+// foodpark:ss-paid-lobby-5), and the lid is re-verified inside the payload, so money left in the $1
+// lobby can only ever come back in the $1 lobby. Free/test lobbies are excluded: their food carries
+// no wager (w=0) and regenerates on its own, so there is nothing of value to preserve.
+function ssIsPaidLobby(lid) { return !!lid && lid.indexOf('ss-') === 0 && lid.indexOf('paid') !== -1; }
+
+function ssFoodAuth(lid) {
+  const ts = Date.now();
+  return { ts, proof: crypto.createHmac('sha256', GAME_SECRET).update('food:' + lid + ':' + ts).digest('hex') };
+}
+
+// Low-level: hand an explicit orb list to the store. Sending [] CLEARS the lobby's park, which is
+// correct — it means nothing is left unclaimed here.
+function ssParkOrbs(lid, orbs) {
+  if (!ssIsPaidLobby(lid) || !GAME_SECRET) return;
+  try {
+    const { ts, proof } = ssFoodAuth(lid);
+    const url = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
+    fetch(url, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
+      body: JSON.stringify({ action: 'park-food', lid, orbs }), signal: AbortSignal.timeout(5000) })
+      .then(() => { if (orbs.length) console.log(`[${lid}] parked ${orbs.length} unclaimed gold orbs`); })
+      .catch(e => console.warn(`[${lid}] park-food failed: ${e.message}`));
+  } catch (_) {}
+}
+
+// Called at teardown: persist whatever gold is still on the floor.
+function ssParkFood(lid, sg) {
+  if (!ssIsPaidLobby(lid) || !GAME_SECRET || !sg) return;
+  const orbs = (sg.food || [])
+    .filter(f => f && f.k && (Number(f.w) || 0) > 0)   // money orbs only; pebbles are worthless
+    .map(f => ({ x: f.x, y: f.y, w: f.w }));
+  ssParkOrbs(lid, orbs);
+}
+
+// Called when a player joins: reclaim this lobby's parked gold.
+// The store side uses GETDEL (atomic claim) so only ONE node/instance can ever take a given parked
+// set — the same lobby id runs on BOTH the NA and EU nodes against ONE shared escrow, and restoring
+// the same orbs on both would let two sets of players cash out the same SOL (escrow shortfall).
+// Deliberate trade-off: if the claim response is lost in flight the tickets are lost (the SOL simply
+// stays in escrow) rather than risking duplication — a lost ticket costs those players; a duplicated
+// one costs the escrow and breaks everyone else's cashout. Fail toward no-duplication, like settle.
+function ssRestoreParkedFood(lid, sg) {
+  if (!ssIsPaidLobby(lid) || !GAME_SECRET || !sg || sg._foodRestored) return;
+  sg._foodRestored = true;   // set SYNCHRONOUSLY: a second joiner in the same tick must not re-claim
+  try {
+    const { ts, proof } = ssFoodAuth(lid);
+    const url = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
+    fetch(url, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
+      body: JSON.stringify({ action: 'get-food', lid }), signal: AbortSignal.timeout(5000) })
+      .then(r => r.json())
+      .then(j => {
+        const orbs = (j && Array.isArray(j.orbs)) ? j.orbs : [];
+        if (!orbs.length) return;
+        const g = ssGames.get(lid);
+        // Room already torn down again while we were fetching — we've CLAIMED (deleted) the park, so
+        // put it straight back or the money would be orphaned.
+        if (!g) { ssParkOrbs(lid, orbs); return; }
+        if (!g.food) g.food = [];
+        // Clamp to the CURRENT (possibly shrunk) border so restored money always lands where players
+        // can actually reach it, never outside the ring. ssTick's shrink sweep keeps it in from here.
+        const EDGE = (g.arenaR || SS_ARENA_R) - 30;
+        for (const o of orbs) {
+          let x = Number(o.x) || 0, y = Number(o.y) || 0;
+          const w = Number(o.w) || 0;
+          if (!(w > 0) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+          const d = Math.sqrt(x * x + y * y);
+          if (d > EDGE && d > 0) { const s = EDGE / d; x *= s; y *= s; }
+          g.food.push(ssMakeFood(x, y, 1, w));
+        }
+        g._foodDirty = true;
+        console.log(`[${lid}] restored ${orbs.length} parked gold orbs`);
+      })
+      .catch(e => console.warn(`[${lid}] get-food failed: ${e.message}`));
+  } catch (_) {}
+}
+
 
 
 function ssFindSafeSpawn(sg) {
@@ -1051,6 +1137,9 @@ function ssHandleInput(lid, pid, d, io) {
     sg.snakes.set(pid, sn);
 
     if (!sg.food || !sg.food.length) ssReconcileFood(sg);
+
+    // Paid lobbies: reclaim any gold left on the floor when THIS lobby last emptied (once per game).
+    ssRestoreParkedFood(lid, sg);
 
     if (!sg.tickInterval) {
 
@@ -1471,7 +1560,8 @@ function ssTick(lid, io) {
 
   });
 
-  if (sg.snakes.size === 0) { clearInterval(sg.tickInterval); sg.tickInterval = null; ssGames.delete(lid); return; }
+  // Park unclaimed gold BEFORE the game object (and its food) is dropped — see ssParkFood.
+  if (sg.snakes.size === 0) { ssParkFood(lid, sg); clearInterval(sg.tickInterval); sg.tickInterval = null; ssGames.delete(lid); return; }
 
 
 
@@ -1552,6 +1642,8 @@ function ssTick(lid, io) {
     sg.snakes.delete(pid);
 
     if (sg.snakes.size === 0) {
+
+      ssParkFood(lid, sg); // persist unclaimed gold before the food is dropped with the game
 
       clearInterval(sg.tickInterval); sg.tickInterval = null;
 

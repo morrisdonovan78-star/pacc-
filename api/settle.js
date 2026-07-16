@@ -323,6 +323,67 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // ── park-food / get-food: persist a paid lobby's UNCLAIMED gold food across an empty room ──────
+    // Server-to-server only (GAME_SECRET-HMAC, exactly like elim-lock). Touches ONLY KV, never escrow:
+    // the dead players' SOL is already pooled in escrow — these persist the CLAIM TICKETS (gold orbs)
+    // so a returning player can still grab that value instead of it vanishing when the room tears down.
+    // NO signing, NO transfers happen here, so no money can be moved or duplicated by this path.
+    //
+    // get-food uses GETDEL (atomic read+delete), NOT GET, on purpose: the same paid lobby id can run on
+    // both the NA and EU nodes against ONE shared escrow. GETDEL means exactly one node/instance can
+    // ever claim a given parked set; the loser gets nothing. That's what prevents restoring the same
+    // gold food on two nodes and letting both sets of players cash it out (escrow shortfall). Whichever
+    // instance claims it re-parks whatever is still unclaimed when IT empties, so nothing is lost.
+    if (action === 'park-food' || action === 'get-food') {
+      const lid = (body.lid || lobbyId || '').toString();
+      let authed = false;
+      const gp  = (req.headers['x-game-proof'] || '').trim();
+      const gts = Number(req.headers['x-game-ts'] || 0);
+      if (GAME_SECRET && gp && gts && Math.abs(Date.now() - gts) < 300000) {
+        const expected = crypto.createHmac('sha256', GAME_SECRET).update('food:' + lid + ':' + gts).digest('hex');
+        try { authed = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(gp)); } catch (_) {}
+      }
+      if (!authed) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
+      // paid Slither lobbies only — this is the only place gold food carries real escrow value
+      if (!lid || !lid.startsWith('ss-') || lid.indexOf('paid') === -1) {
+        clearTimeout(guard); done = true; return res.status(400).json({ error: 'paid ss lobby required' });
+      }
+      // Key is per-lobby, so a $1 lobby's money can never surface in a $5 lobby (ss-paid-lobby-1 vs
+      // ss-paid-lobby-5 are different keys). The lid is ALSO stamped inside the payload and re-checked
+      // on read — belt-and-braces so a future key refactor can't hand one lobby another lobby's money.
+      const KEY = 'foodpark:' + lid;
+      if (action === 'get-food') {
+        let orbs = [];
+        try {
+          const raw = await kvGetDel(KEY);
+          if (raw) {
+            const p = JSON.parse(raw);
+            // fail CLOSED on any lid mismatch: never hand a lobby value parked by a different one
+            if (p && p.lid === lid && Array.isArray(p.orbs)) orbs = p.orbs;
+            else if (p && p.lid && p.lid !== lid) console.warn('[food] lid mismatch parked=' + p.lid + ' asked=' + lid + ' — refusing');
+          }
+        } catch (_) {}
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ orbs });
+      }
+      // park-food: store the server's authoritative set of currently-unclaimed gold orbs. Permanent
+      // (kvSetPerm, no TTL) so it genuinely never disappears; cleared when nothing is left unclaimed.
+      // Validate BEFORE coercing: `Number(x) || 0` would turn junk ('a', NaN, undefined) into a
+      // perfectly valid money orb sitting at the map origin. Reject non-finite coords outright.
+      const orbs = Array.isArray(body.orbs)
+        ? body.orbs.slice(0, 4000)
+            .map(o => (o && typeof o === 'object') ? { x: Number(o.x), y: Number(o.y), w: Number(o.w) } : null)
+            .filter(o => o && Number.isFinite(o.x) && Number.isFinite(o.y) && Number.isFinite(o.w) && o.w > 0)
+            .map(o => ({ x: Math.round(o.x), y: Math.round(o.y), w: o.w }))
+        : [];
+      try {
+        if (orbs.length) await kvSetPerm(KEY, JSON.stringify({ lid, ts: Date.now(), orbs }));
+        else await kvDel(KEY);
+      } catch (_) {}
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, parked: orbs.length });
+    }
+
     // ── Wallet signature auth — required for all fund-moving actions ─────────
     // The player signs the request with their Solana private key.
     // Only the real wallet owner can produce a valid signature.
