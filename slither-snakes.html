@@ -4299,7 +4299,8 @@ function launchPractice(){
   // Give player same starting length as circle bots
   const _ps=SG.snakes.get(myPid);
   if(_ps){
-    _ps.numSections=INIT_SECTIONS+15;
+    // Join length is ALWAYS INIT_SECTIONS (17) — practice must match free/paid, not start at 32.
+    _ps.numSections=INIT_SECTIONS;
     const _pr=sectionRadius(_ps);
     const _ppLen=Math.ceil(_ps.numSections*_pr*SEGMENT_SPACING*2/SNAKE_SPD)+10;
     const _ph=_ps.path[0]||{x:0,y:0};

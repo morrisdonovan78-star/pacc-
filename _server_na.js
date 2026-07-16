@@ -1129,15 +1129,16 @@ function ssHandleInput(lid, pid, d, io) {
 
     sn = ssSpawnSnake(pid, (sn && sn.color) || d.color || '#FFD700', (sn && sn.name) || d.name || 'SNAKE', sg);
 
-    // usd/baseUsd FIRST: the declared-length clamp below is the wager cap, so it needs the wager.
-
     if (d.usd != null && typeof d.usd === 'number' && sn.usd === 0) { sn.usd = Math.max(0, d.usd); sn.baseUsd = sn.usd; }
 
-    // A client declaring its own length must still respect its wager cap, or the cap is bypassable
-
-    // by simply rejoining with a big d.ns.
-
-    if (d.ns && d.ns > SS_INIT_NS) { sn.ns = Math.min(ssGrowCap(sn), d.ns); sn.size = ssSizeFromNs(sn.ns); sn.thick = ssThick(sn.ns); }
+    // JOIN LENGTH IS ALWAYS SS_INIT_NS (17) — practice, free and paid alike. ssSpawnSnake already sets
+    // it; nothing may raise it here. This used to honour a client-declared `d.ns` (clamped to the wager
+    // cap), so a fresh spawn could start LONGER than 17 — and the client's own default was `ns: ...||26`,
+    // so a join with no local snake yet literally asked for 26. Length is now earned in-game only, and a
+    // client can no longer declare its own size at all (the cap-bypass surface is gone with it).
+    // NOTE this does NOT affect a refresh/reconnect: that snake still exists and is alive, so this
+    // whole spawn branch is skipped and the player resumes their real server-side length. Only genuine
+    // fresh spawns and post-death respawns come through here, and both correctly start at 17.
 
     sg.snakes.set(pid, sn);
 
