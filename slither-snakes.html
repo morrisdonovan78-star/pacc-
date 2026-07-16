@@ -1227,6 +1227,26 @@ function getMyName(){
   // wallet address, and the account-wallet sync changed the address).
   return inp||(localStorage.getItem('ss_name_'+(ST.address||''))||localStorage.getItem('ss_name_e_'+(ST.email||''))||'').trim()||'SNAKE';
 }
+// Pull the account's server-registered display name when this device has none stored locally. Without
+// this, a fresh browser/device (empty localStorage) sends 'SNAKE' as the join name and shows SNAKE
+// in-game even though the name is saved on the account. Only runs when there's no local name, so it
+// never clobbers a name the player just typed. Caches into both localStorage keys so getMyName() finds it.
+async function _loadAccountName(){
+  try{
+    if(!ST.address)return;
+    const haveLocal=(localStorage.getItem('ss_name_'+ST.address)||localStorage.getItem('ss_name_e_'+(ST.email||''))||'').trim();
+    if(haveLocal)return;
+    const r=await fetch('/api/leaderboard?game=ss&address='+encodeURIComponent(ST.address));
+    const d=await r.json().catch(()=>null);
+    const nm=d&&d.player&&d.player.name;
+    if(nm){
+      localStorage.setItem('ss_name_'+ST.address,nm);
+      if(ST.email)localStorage.setItem('ss_name_e_'+ST.email,nm);
+      const ni=document.getElementById('name-input');
+      if(ni&&!ni.value.trim())ni.value=nm;
+    }
+  }catch(_){}
+}
 // Was localStorage-only — the SAVE button showed a "Name saved!" confirmation but never told
 // the server at all. The ONLY thing that ever pushed a name server-side was joining a PAID
 // lobby (api/join.js), which meant fixing a wrong/stuck name required spending real money on
@@ -1877,6 +1897,7 @@ async function finishLogin(kp){
   const savedName=localStorage.getItem('ss_name_'+ST.address)||localStorage.getItem('ss_name_e_'+ST.email)||'';
   const nameInput=document.getElementById('name-input');
   if(nameInput&&savedName) nameInput.value=savedName;
+  else await _loadAccountName(); // fresh device: pull the account's registered name so we don't join as SNAKE
   document.getElementById('home-off').style.display='none';
   document.getElementById('home-on').style.display='block';
   _showPracticeBtn();
@@ -1903,6 +1924,7 @@ async function checkSession(){
     const savedName=localStorage.getItem('ss_name_'+ST.address)||localStorage.getItem('ss_name_e_'+ST.email)||'';
     const nameInput=document.getElementById('name-input');
     if(nameInput&&savedName) nameInput.value=savedName;
+    else await _loadAccountName(); // fresh device: pull the account's registered name so we don't join as SNAKE
     document.getElementById('home-off').style.display='none';
     document.getElementById('home-on').style.display='block';
     _showPracticeBtn();
