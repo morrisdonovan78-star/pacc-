@@ -14,7 +14,10 @@
     "api/wallet.js":  { "regions": ["iad1"], "maxDuration": 15 },
     "api/admin.js":   { "regions": ["iad1"], "maxDuration": 15 }
   },
-  "redirects": [],
+  "redirects": [
+    { "source": "/", "has": [{ "type": "host", "value": "snakepot.com" }],     "destination": "/play", "permanent": false },
+    { "source": "/", "has": [{ "type": "host", "value": "www.snakepot.com" }], "destination": "/play", "permanent": false }
+  ],
   "rewrites": [
     { "source": "/api/version", "destination": "/api/app" },
     { "source": "/((?!api/).*)", "destination": "/api/app" }
