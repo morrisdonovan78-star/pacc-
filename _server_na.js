@@ -2928,10 +2928,10 @@ function ssKill(victim, killer, lid, io, diag) {
   if (lid && lid.indexOf('paid') !== -1 && GAME_SECRET && victim.pid && String(victim.pid).indexOf('bot-') !== 0) {
     try {
       const _ts = Date.now();
-      const _proof = crypto.createHmac('sha256', GAME_SECRET).update('elim-lock:' + victim.pid + ':' + _ts).digest('hex');
+      const _kAddr = (killer && killer.pid && String(killer.pid).indexOf('bot-') !== 0) ? String(killer.pid) : ''; const _proof = crypto.createHmac('sha256', GAME_SECRET).update('elim-lock:' + victim.pid + ':' + _kAddr + ':' + _ts).digest('hex');
       const _su = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
       fetch(_su, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-game-proof': _proof, 'x-game-ts': String(_ts) },
-        body: JSON.stringify({ action: 'elim-lock', victimAddress: victim.pid }), signal: AbortSignal.timeout(5000) }).catch(() => {});
+        body: JSON.stringify({ action: 'elim-lock', victimAddress: victim.pid, killerAddress: _kAddr, lobbyId: lid }), signal: AbortSignal.timeout(5000) }).catch(() => {});
     } catch (_) {}
   }
   const sg = ssGames.get(lid);
