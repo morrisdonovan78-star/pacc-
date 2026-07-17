@@ -288,8 +288,12 @@ module.exports = async function handler(req, res) {
     const game = (lobbyId && lobbyId.startsWith('ss-')) ? 'ss' : 'pac';
 
     // ── elim-lock: game server calls this immediately on kill to block victim cashout ──
+    // Also the ONLY trustworthy place to record the killer's elimination stat: the snake game
+    // pays kills via dropped food (action:'kill' never fires for ss), so without this the
+    // leaderboard KILLS column sat at 0 for everyone. killerAddress rides the same
+    // GAME_SECRET-HMAC'd server-to-server call, so clients can't inflate it.
     if (action === 'elim-lock') {
-      const { victimAddress } = body;
+      const { victimAddress, killerAddress } = body;
       // Auth: EITHER the admin secret, OR — for the game server, which has GAME_SECRET but not
       // ADMIN_SECRET — a GAME_SECRET-HMAC proof over victim+timestamp (same secret that signs kill
       // proofs). Either proves the caller is our own infrastructure. Without this the dead-flag silently
@@ -302,8 +306,12 @@ module.exports = async function handler(req, res) {
         const gp  = (req.headers['x-game-proof'] || '').trim();
         const gts = Number(req.headers['x-game-ts'] || 0);
         if (gp && gts && Math.abs(Date.now() - gts) < 300000) {
-          const expected = crypto.createHmac('sha256', GAME_SECRET).update('elim-lock:' + victimAddress + ':' + gts).digest('hex');
-          try { authed = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(gp)); } catch (_) {}
+          // New form binds the killer into the proof; old form kept so not-yet-updated game
+          // servers stay authed during rollout (proofs never leave our own infra either way).
+          const expectedNew = crypto.createHmac('sha256', GAME_SECRET).update('elim-lock:' + victimAddress + ':' + (killerAddress || '') + ':' + gts).digest('hex');
+          const expectedOld = crypto.createHmac('sha256', GAME_SECRET).update('elim-lock:' + victimAddress + ':' + gts).digest('hex');
+          try { authed = crypto.timingSafeEqual(Buffer.from(expectedNew), Buffer.from(gp)); } catch (_) {}
+          if (!authed) { try { authed = crypto.timingSafeEqual(Buffer.from(expectedOld), Buffer.from(gp)); } catch (_) {} }
         }
       }
       if (!authed) {
@@ -319,6 +327,13 @@ module.exports = async function handler(req, res) {
         kvSet('dead:' + victimAddress, '1', 600),
         kvGetDel('pw:' + victimAddress),
       ]).catch(() => {});
+      // Record the killer's elimination — paid lobbies only (matches every other leaderboard
+      // stat: "wagered lobbies only"), never bots, never self-kills.
+      if (killerAddress && typeof killerAddress === 'string' && killerAddress.length >= 20 &&
+          killerAddress !== victimAddress && killerAddress.indexOf('bot-') !== 0 &&
+          lobbyId && lobbyId.indexOf('paid') !== -1) {
+        try { await kvHincrby('ph:' + game + ':' + killerAddress, 'kills', 1); } catch (_) {}
+      }
       clearTimeout(guard); done = true;
       return res.status(200).json({ ok: true });
     }
