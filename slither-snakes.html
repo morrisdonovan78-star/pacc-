@@ -2649,6 +2649,40 @@ function cancelJoin(){
 
 // ══ NETWORK / SOCKET ════════════════════════════════════════
 let _hostPid=null,_pkTick=0,_pkSentTick=0,_myHelloTs=0,_pingInterval=null,_lastSsTs=0,_hostWatch=null;
+let _reconnTimes=[];
+// Manual-reconnect prompt shown when the connection is too unstable to auto-recover (see the
+// reconnect-storm guard in pkConnect). Injected on demand so it never touches normal-play markup.
+function _showReconnectPrompt(){
+  if(document.getElementById('reconn-prompt'))return;
+  const paid=_lobbyIsPaid;
+  const d=document.createElement('div');
+  d.id='reconn-prompt';
+  d.style.cssText='position:fixed;inset:0;z-index:10050;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.82);';
+  d.innerHTML=
+    '<div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:2rem 1.75rem;max-width:380px;width:90%;text-align:center;">'
+    +'<div style="font-size:40px;margin-bottom:.6rem;">📡</div>'
+    +'<div style="font-family:\'Press Start 2P\',monospace;font-size:11px;color:var(--y);margin-bottom:.9rem;">CONNECTION UNSTABLE</div>'
+    +'<div style="font-size:12px;color:var(--muted);line-height:1.7;margin-bottom:1.4rem;">Your connection kept dropping, so we stopped auto-retrying.'
+    +(paid?'<br><br><span style="color:var(--g);">Your snake &amp; wager are held for 10 minutes</span> — reconnect to resume the same game.':'')
+    +'</div>'
+    +'<button class="btn btn-g" id="reconn-go" style="margin-bottom:10px;">🔄 RECONNECT</button>'
+    +'<button class="btn btn-c btn-sm" id="reconn-home" style="margin:0 auto;">⌂ HOME</button>'
+    +'</div>';
+  document.body.appendChild(d);
+  document.getElementById('reconn-go').onclick=_manualReconnect;
+  document.getElementById('reconn-home').onclick=()=>{_hideReconnectPrompt();goHome();};
+  setTimeout(()=>{try{gpadFocus(0);}catch(_){}},60); // controller lands on RECONNECT
+}
+function _hideReconnectPrompt(){const d=document.getElementById('reconn-prompt');if(d)d.remove();}
+function _manualReconnect(){
+  _hideReconnectPrompt();
+  _reconnTimes=[];
+  addToast('Reconnecting…','#FFD700');
+  try{
+    if(_sio&&_sio.io){ _sio.io.reconnection(true); _sio.connect(); }
+    else if(_lastRoomId){ rejoinGame(); }
+  }catch(_){ try{goHome();}catch(_e){} }
+}
 
 // spectate=true connects read-only (no gameToken, no wager, no snake ever created for us) — used
 // by the public "watch live" viewer (see enterWatchMode). The server's spectator connection path
@@ -2711,7 +2745,34 @@ async function pkConnect(roomId,gameToken,spectate){
       rememberUpgrade:true,
       reconnectionAttempts:Infinity,
       reconnectionDelay:500,
+      // Cap + jitter the backoff. Without a max, a flaky link (e.g. weak Wi-Fi on EU) where each
+      // reconnect briefly SUCCEEDS then drops keeps resetting the delay to 500ms → a reconnect STORM
+      // (observed: ~2000 connect/disconnect cycles from one player in one session, hammering the node).
+      // The storm guard below (_reconnStorm) is the real backstop; these just soften each retry.
+      reconnectionDelayMax:4000,
+      randomizationFactor:0.5,
     });
+
+    // ── Reconnect-storm guard ─────────────────────────────────────────────────────────────────────
+    // On an unstable connection the socket can reconnect-then-drop in a tight loop forever (each brief
+    // success resets socket.io's backoff). That silently hammers the server AND, once the player's
+    // coasting snake finally dies mid-storm, dumps them to the menu with "make a new deposit" — feeling
+    // like a random boot mid-game. Instead: detect the storm, STOP auto-reconnecting, and show a manual
+    // Reconnect prompt. The server holds a disconnected paid snake for 600s (alive, same session), so a
+    // manual reconnect resumes the SAME snake + wager — no lost money, no server hammering.
+    _reconnTimes=[];
+    if(_sio&&_sio.io&&_sio.io.on){
+      _sio.io.on('reconnect_attempt',()=>{
+        const now=Date.now();
+        _reconnTimes.push(now);
+        _reconnTimes=_reconnTimes.filter(t=>now-t<12000);
+        if(_reconnTimes.length>=6){                       // 6 reconnect tries in 12s = a storm
+          try{_sio.io.reconnection(false);}catch(_){}     // stop hammering
+          _showReconnectPrompt();
+        }
+      });
+      _sio.io.on('reconnect',()=>{ _reconnTimes=[]; _hideReconnectPrompt(); }); // stable again → reset
+    }
 
     // WebSocket health check — if we're STILL on HTTP long-polling several seconds after connecting, the
     // websocket UPGRADE was blocked LOCALLY (server + upgrade are proven working in a normal browser on
@@ -2799,6 +2860,7 @@ async function pkConnect(roomId,gameToken,spectate){
     // used to do: hitting the cap disconnected you).
     _sio.on('err',(msg)=>{
       lg('mm-log','❌ '+(msg||'Server rejected'),'lerr');
+      _hideReconnectPrompt(); _reconnTimes=[];
       if(_sio){try{_sio.disconnect();}catch(_){}} _sio=null;
       ablyChannel=null; _joiningLobby=false; _lobbyIsPaid=false;
       setTimeout(()=>{try{go('scr-lobby');}catch(_){}},3000);
@@ -3139,6 +3201,7 @@ async function pkConnect(roomId,gameToken,spectate){
 function pkSend(data){if(ablyChannel)ablyChannel.publish(data.t,data,()=>{});}
 
 function pkDisconnect(){
+  _hideReconnectPrompt(); _reconnTimes=[];
   const _bb3=document.getElementById('bot-bar');if(_bb3)_bb3.style.display='none';
   stopHostLoop();
   clearInterval(_guestInputLoop);_guestInputLoop=null;
