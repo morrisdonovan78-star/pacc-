@@ -210,7 +210,7 @@ module.exports = async function handler(req, res) {
         readStats(game, addr),
         kvLrange('ph:' + game + ':hist:' + addr, 0, 199).catch(() => null),
       ]);
-      const hasData = stats.earned > 0 || stats.wagered > 0 || stats.games > 0 || stats.name;
+      const hasData = stats.earned > 0 || stats.wagered > 0 || stats.games > 0 || stats.kills > 0 || stats.name;
       if (!hasData) return res.status(200).json({ player: null });
       // kvLpush writes newest-first; reverse to chronological order for the chart
       const history = (histRaw || [])
