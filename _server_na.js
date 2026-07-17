@@ -467,7 +467,7 @@ const SS_BORDER_SHRINK_OUT   = SS_ARENA_R * 0.0009; // outward ease-back/tick (~
 
 const SS_MAX_TURN      = 0.274;   // rad/tick — client MAX_TURN
 
-const SS_FOOD_TARGET   = 95;     // client FOOD_TARGET
+const SS_FOOD_TARGET   = 68;     // regular-pebble baseline maintained on the map (topped up every tick in ssTick via ssReconcileFood — always ≥ this, a few transient over from boost/deaths is fine). Same for free + paid.
 
 const SS_FOOD_GROW     = 2;       // client FOOD_GROW
 
