@@ -6520,6 +6520,14 @@ function _logoDraw(){
   if(!document.getElementById('logo-snake'))return;
   const col=localStorage.getItem('ss_snake_color')||'#39FF14';
   _uiDrawSnake('logo-snake',_uiSnake(36,19,10,col,Math.PI*0.78,7,30,1.35,0.45),2);
+  // Favicon = this same top-left logo snake (so the tab icon matches the player's colour).
+  // Re-runs on every colour change since _onSnakeColorPick calls _logoDraw.
+  try{
+    const c=document.getElementById('logo-snake');
+    let l=document.querySelector('link[rel="icon"]');
+    if(!l){l=document.createElement('link');l.rel='icon';document.head.appendChild(l);}
+    l.type='image/png'; l.href=c.toDataURL('image/png');
+  }catch(_){}
 }
 let _homeDataTimer=null;
 async function _homeRefresh(){
