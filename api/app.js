@@ -45,6 +45,12 @@ module.exports = function handler(req, res) {
     return res.status(200).json({ v: process.env.VERCEL_DEPLOYMENT_ID || process.env.VERCEL_GIT_COMMIT_SHA || 'dev' });
   }
 
+  // ── Domain routing: snakepot.com is the snake game's own domain ──────────────
+  // Same Vercel project serves both games; on snakepot.com the ROOT is the snake
+  // game (slither-snakes.html), not the PAC ARENA index.
+  const host = String(req.headers.host || '').toLowerCase();
+  const isSnakepot = host === 'snakepot.com' || host.endsWith('.snakepot.com');
+
   // ── Slither Snakes game ───────────────────────────────────────────────────────
   if (reqPath === '/slither-snakes' || reqPath === '/slither-snakes.html' || reqPath === '/slither-snakes/') {
     try {
@@ -94,6 +100,18 @@ module.exports = function handler(req, res) {
   // MUST make a fresh request and get the latest HTML.  On the next deploy the
   // deployment ID changes → new URL → cache busted again automatically.
   // The redirect itself has no-store so it can never be cached.
+  // On snakepot.com every remaining path (including "/") IS the snake game —
+  // same headers as the /slither-snakes route above, no cache-bust redirect
+  // needed (the snake page has always been served no-store with no _v scheme).
+  if (isSnakepot) {
+    try {
+      if (!_slitherCached) _slitherCached = fs.readFileSync(path.resolve('slither-snakes.html'), 'utf8');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.status(200).send(_slitherCached);
+    } catch (e) { return res.status(500).send('Slither Snakes not found: ' + e.message); }
+  }
+
   const deployId = process.env.VERCEL_DEPLOYMENT_ID
                 || process.env.VERCEL_GIT_COMMIT_SHA
                 || 'dev';
