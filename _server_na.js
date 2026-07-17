@@ -1811,6 +1811,9 @@ function ssTick(lid, io) {
     }
   }
 
+  // Spectator betting: drive market state machine + resolutions (additive, never blocks the tick).
+  try { ssBetTick(lid, sg, io); } catch (_) {}
+
   // 5. Broadcast state to all clients
 
   ssBroadcastState(sg, lid, io);
@@ -2956,6 +2959,216 @@ function ssKill(victim, killer, lid, io, diag) {
 
 
 
+// ═══════════════════════════ SPECTATOR BETTING (pari-mutuel) ═══════════════════════════
+// The server is ONLY the market STATE MACHINE + odds/meta broadcaster + resolution TRIGGER. It never
+// moves money: every SOL flow goes through /api/settle (clients call bet-place; this code calls
+// bet-resolve / bet-refund via the GAME_SECRET-HMAC server-to-server pattern, exactly like elim-lock).
+// Fully additive — the only hooks into the game are ssBetTick() (called once per ssTick) and
+// ssBetSendTo() (one snapshot to a spectator on connect). No socket input listener is ever added, so a
+// modified client can never drive this — it can only READ broadcasts and place bets through the signed,
+// on-chain-verified settle path.
+// Default = TEST LOBBY ONLY (safe default: a crash/reboot never silently enables paid). Broaden to
+// paid deliberately by setting SS_BET_LOBBIES, e.g. 'ss-test-lobby,ss-paid-lobby-1,ss-paid-lobby-5'.
+const SS_BET_ENABLED    = new Set((process.env.SS_BET_LOBBIES || 'ss-test-lobby').split(',').map(s => s.trim()).filter(Boolean));
+const SS_BET_SETTLE_URL = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
+const BET_SURVIVAL_MS    = 90000;   // a survival market resolves after this many ms of survival
+const BET_SURVIVAL_OPEN  = 30000;   // survival betting window
+const BET_SURVIVAL_EVERY = 150000;  // don't open another survival market more often than this
+const BET_FLASH_OPEN     = 2000;    // cashout-flash betting window
+const BET_LMS_OPEN       = 30000;   // last-man-standing betting window
+const BET_LMS_EVERY      = 210000;  // min gap between LMS markets
+const BET_LMS_MAXMS      = 300000;  // hard cap on an LMS market (declare longest-survivor-so-far)
+const BET_MKT_CLEAN_MS   = 60000;   // keep a resolved market around this long (late spectators see result)
+
+const ssBet = new Map(); // lid -> { markets: Map<id,m>, seenCash:Set<pid>, lastSurvival, lastLMS }
+function ssBetLobby(lid) {
+  let s = ssBet.get(lid);
+  if (!s) { s = { markets: new Map(), seenCash: new Set(), lastSurvival: 0, lastLMS: 0 }; ssBet.set(lid, s); }
+  return s;
+}
+function betSign(canon) { return crypto.createHmac('sha256', GAME_SECRET).update(canon).digest('hex'); }
+function betMarketCanon(m) { return 'betmkt:' + m.id + ':' + m.lobby + ':' + m.type + ':' + m.outcomes.join(',') + ':' + m.openTs + ':' + m.lockTs; }
+function betDescriptor(m) {
+  return { id: m.id, lobby: m.lobby, type: m.type, outcomes: m.outcomes, openTs: m.openTs, lockTs: m.lockTs, sig: betSign(betMarketCanon(m)) };
+}
+function betPayload(m) {
+  return {
+    market: betDescriptor(m), question: m.question, labels: m.labels || null,
+    phase: m.phase, result: m.result || null, resolveTs: m.resolveTs || null,
+    runners: m.runners || null,
+  };
+}
+function betBroadcast(lid, io, m) { try { io.to(lid).emit('ss-bet', betPayload(m)); } catch (_) {} }
+
+// A snake's "notability" — money dominates (paid lobbies), size breaks ties (free/test lobby).
+function betMetric(sn) { return (Number(sn.usd) || 0) * 1e6 + (Number(sn.ns) || Number(sn.size) || 0); }
+function betAliveRealSnakes(sg) {
+  const out = [];
+  for (const sn of sg.snakes.values()) {
+    if (!sn.alive) continue;
+    if (String(sn.pid || '').indexOf('bot-') === 0) continue; // bots don't count as bettable runners
+    if (!sn.pid || String(sn.pid).length < 20) continue;      // must be a real wallet-pid
+    out.push(sn);
+  }
+  return out;
+}
+
+// POST bet-resolve (a winner) or bet-refund (void) to settle. Idempotent + retry-safe on that side, so
+// we just mark _needRetry on any non-ok reply and ssBetTick re-fires until _done.
+function betPostResolve(m) {
+  if (!GAME_SECRET) return;
+  const ts = Date.now();
+  m._lastPost = ts; m._needRetry = false;
+  const action = m.result ? 'bet-resolve' : 'bet-refund';
+  const canon  = m.result ? ('bet-resolve:' + m.id + ':' + m.result + ':' + ts) : ('bet-refund:' + m.id + ':' + ts);
+  const proof  = betSign(canon);
+  fetch(SS_BET_SETTLE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
+    body: JSON.stringify({ action, mkt: m.id, result: m.result || undefined, type: m.type, outcomes: m.outcomes, lobbyId: m.lobby }),
+    signal: AbortSignal.timeout(20000),
+  }).then(r => r.json()).then(d => {
+    if (d && d.ok && d.allPaid !== false) { m._done = true; }
+    else { m._needRetry = true; }
+  }).catch(() => { m._needRetry = true; });
+}
+function betResolve(lid, io, m, result) {
+  if (m.phase === 'resolved' || m.phase === 'void') return;
+  m.phase = result ? 'resolved' : 'void';
+  m.result = result || null;
+  m.resolvedAt = Date.now();
+  betBroadcast(lid, io, m);
+  betPostResolve(m);
+}
+
+// ── market openers ──────────────────────────────────────────────────────────
+function betOpenSurvival(lid, sg, io, s) {
+  const alive = betAliveRealSnakes(sg);
+  if (!alive.length) return;
+  let best = alive[0]; for (const sn of alive) if (betMetric(sn) > betMetric(best)) best = sn;
+  const now = Date.now();
+  const m = {
+    id: lid + ':surv:' + now, lobby: lid, type: 'binary', outcomes: ['YES', 'NO'],
+    labels: { YES: 'Survives', NO: 'Dies' },
+    question: 'Will ' + (best.name || 'SNAKE') + ' survive ' + Math.round(BET_SURVIVAL_MS / 1000) + 's?',
+    openTs: now, lockTs: now + BET_SURVIVAL_OPEN, resolveTs: now + BET_SURVIVAL_OPEN + BET_SURVIVAL_MS,
+    phase: 'open', targetPid: best.pid, targetName: best.name, kind: 'survival', cashed: false,
+  };
+  s.markets.set(m.id, m); s.lastSurvival = now;
+  betBroadcast(lid, io, m);
+}
+function betOpenFlash(lid, io, s, sn) {
+  const now = Date.now();
+  const m = {
+    id: lid + ':flash:' + sn.pid + ':' + now, lobby: lid, type: 'binary', outcomes: ['YES', 'NO'],
+    labels: { YES: '✅ Completes', NO: '❌ Fails' },
+    question: 'Does ' + (sn.name || 'SNAKE') + ' complete the cash-out?',
+    openTs: now, lockTs: now + BET_FLASH_OPEN, resolveTs: 0,
+    phase: 'open', targetPid: sn.pid, kind: 'flash',
+  };
+  s.markets.set(m.id, m); s.seenCash.add(sn.pid);
+  betBroadcast(lid, io, m);
+}
+function betOpenLMS(lid, sg, io, s) {
+  const alive = betAliveRealSnakes(sg);
+  if (alive.length < 2) return;
+  alive.sort((a, b) => betMetric(b) - betMetric(a));
+  const roster = alive.slice(0, 6); // cap the field so the outcome list stays small
+  const now = Date.now();
+  const m = {
+    id: lid + ':lms:' + now, lobby: lid, type: 'lms',
+    outcomes: roster.map(sn => sn.pid),
+    labels: Object.fromEntries(roster.map(sn => [sn.pid, sn.name || 'SNAKE'])),
+    runners: roster.map(sn => ({ pid: sn.pid, name: sn.name || 'SNAKE', color: sn.color || '#39FF14' })),
+    question: 'Last snake standing — who outlasts the rest?',
+    openTs: now, lockTs: now + BET_LMS_OPEN, resolveTs: now + BET_LMS_OPEN + BET_LMS_MAXMS,
+    phase: 'open', kind: 'lms', outAt: {},
+  };
+  s.markets.set(m.id, m); s.lastLMS = now;
+  betBroadcast(lid, io, m);
+}
+
+// ── the tick — drive every market's phase + resolution; open new ones on schedule/events ──
+function ssBetTick(lid, sg, io) {
+  if (!GAME_SECRET || !SS_BET_ENABLED.has(lid) || !sg) return;
+  const now = Date.now();
+  const s = ssBetLobby(lid);
+
+  // 1) cashout-flash detection: a snake that just began (and wound into) its cash-out circle.
+  for (const sn of sg.snakes.values()) {
+    if (sn.alive && sn.cashing && sn._cashStart && !s.seenCash.has(sn.pid) &&
+        String(sn.pid || '').indexOf('bot-') !== 0 && sn.pid && String(sn.pid).length >= 20) {
+      betOpenFlash(lid, io, s, sn);
+    }
+  }
+
+  // 2) drive each live market
+  for (const m of s.markets.values()) {
+    if (m.phase === 'open' && now >= m.lockTs) { m.phase = 'locked'; betBroadcast(lid, io, m); }
+
+    if (m.phase === 'locked') {
+      if (m.kind === 'survival') {
+        const sn = sg.snakes.get(m.targetPid);
+        const cashedPaid = (sn && sn._cashResolved === 'paid') || m.cashed;
+        if (sn && sn._cashResolved === 'paid') m.cashed = true;
+        if (cashedPaid) betResolve(lid, io, m, 'YES');                 // cashed out ⇒ survived
+        else if (!sn || !sn.alive) betResolve(lid, io, m, 'NO');       // died (not a paid cash-out)
+        else if (now >= m.resolveTs) betResolve(lid, io, m, 'YES');    // still alive at the bell
+      } else if (m.kind === 'flash') {
+        const sn = sg.snakes.get(m.targetPid);
+        if (sn && sn._cashResolved === 'paid') betResolve(lid, io, m, 'YES');
+        else if (!sn || sn._cashResolved === 'died' || (!sn.cashing && !sn.alive)) betResolve(lid, io, m, 'NO');
+        else if (now - m.openTs > 20000) betResolve(lid, io, m, 'NO'); // safety cap: cash-out can't take this long
+      } else if (m.kind === 'lms') {
+        // record each runner's exit time (first time we see it gone/paid)
+        let aliveCount = 0;
+        for (const pid of m.outcomes) {
+          const sn = sg.snakes.get(pid);
+          const gone = !sn || !sn.alive;
+          if (gone) { if (!m.outAt[pid]) m.outAt[pid] = now; }
+          else { aliveCount++; }
+        }
+        if (aliveCount <= 1 || now >= m.resolveTs) {
+          // winner = the runner who left LATEST; a still-alive runner counts as "latest".
+          const runners = m.outcomes.map(pid => ({ addr: pid, outAt: (sg.snakes.get(pid) && sg.snakes.get(pid).alive) ? Infinity : (m.outAt[pid] || 0) }));
+          let best = -Infinity, winners = [];
+          for (const r of runners) { if (r.outAt > best) { best = r.outAt; winners = [r.addr]; } else if (r.outAt === best) winners.push(r.addr); }
+          const winner = (winners.length === 1) ? winners[0] : null; // tie ⇒ void/refund
+          betResolve(lid, io, m, winner);
+        }
+      }
+    }
+
+    // 3) retry a resolution whose payout wasn't fully confirmed (idempotent on settle's side)
+    if ((m.phase === 'resolved' || m.phase === 'void') && m._needRetry && !m._done && now - (m._lastPost || 0) > 15000) {
+      betPostResolve(m);
+    }
+  }
+
+  // 4) open new scheduled markets (only when none of that kind is live)
+  const kinds = new Set(); for (const m of s.markets.values()) if (m.phase === 'open' || m.phase === 'locked') kinds.add(m.kind);
+  if (!kinds.has('survival') && now - s.lastSurvival > BET_SURVIVAL_EVERY) betOpenSurvival(lid, sg, io, s);
+  if (!kinds.has('lms')      && now - s.lastLMS      > BET_LMS_EVERY)      betOpenLMS(lid, sg, io, s);
+
+  // 5) cleanup finished markets (and free the seenCash slot so a snake can trigger a future flash)
+  for (const [id, m] of s.markets) {
+    if (m.phase === 'resolved' || m.phase === 'void') {
+      if (m.kind === 'flash' && (m._done || now - (m.resolvedAt || now) > BET_MKT_CLEAN_MS)) s.seenCash.delete(m.targetPid);
+      if (now - (m.resolvedAt || now) > BET_MKT_CLEAN_MS) s.markets.delete(id);
+    }
+  }
+}
+
+// Snapshot the lobby's current open/locked markets to a single spectator on connect.
+function ssBetSendTo(socket, lid) {
+  try {
+    if (!SS_BET_ENABLED.has(lid)) return;
+    const s = ssBet.get(lid); if (!s) return;
+    for (const m of s.markets.values()) if (m.phase === 'open' || m.phase === 'locked') socket.emit('ss-bet', betPayload(m));
+  } catch (_) {}
+}
+
+
 function getOrCreateRoom(lobbyId) {
 
   if (!rooms.has(lobbyId)) {
@@ -3417,6 +3630,8 @@ io.on('connection', socket => {
         ssBroadcastStateTo(socket, sg);                // immediate snapshot, don't wait ~33ms for the next tick
 
       }
+
+      ssBetSendTo(socket, watchLobbyId);               // hand this spectator any live betting markets
 
     } else {
 

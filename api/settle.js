@@ -3,7 +3,11 @@
 const nacl    = require('tweetnacl');
 const crypto  = require('crypto');
 const GAME_SECRET = (process.env.GAME_SECRET || '').trim();
-const { kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvHincrby, kvLpush, kvLtrim } = require('../lib/kv');
+const { kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvHincrby, kvLpush, kvLtrim,
+        kvHget, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
+// Pure pari-mutuel engine (spectator betting). All money math lives here so it is unit-tested
+// offline; this file only does auth, KV, and the on-chain transfers. See lib/betting.js.
+const BET = require('../lib/betting');
 
 // Appends a timestamped earnings snapshot (for the player-profile chart) and caps the
 // list at 200 points so it can't grow unbounded for long-lived accounts.
@@ -263,6 +267,199 @@ async function sendAndConfirm(txBytes) {
   return { sig, confirmed: false };
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── SPECTATOR BETTING (pari-mutuel) — additive, never touches the wager/cashout paths above ──
+// ══════════════════════════════════════════════════════════════════════════════
+// Money-safety model (see lib/betting.js): a bet payout is sized ONLY from the resolving market's
+// own pool (× 0.92), never from the wallet balance; the global solvency invariant is asserted before
+// EVERY transfer so betting can never reduce what is available for a player cashout.
+
+const BET_MKT_TTL = 172800;                 // market records / bets live 48h (ample for audit + retries)
+const BET_LEDGER  = 'betledger';            // hash: { betLiability, accruedFee } — atomic HINCRBY
+const ALERT_URL   = process.env.BET_ALERT_WEBHOOK || process.env.DISCORD_WEBHOOK || '';
+
+// Loud, non-blocking alert whenever the invariant refuses a payout (the backstop tripped) or an
+// accounting anomaly is seen. Never throws.
+function betAlert(msg) {
+  console.error('[BET-ALERT] ' + msg);
+  if (!ALERT_URL) return;
+  try {
+    fetch(ALERT_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: '⚠️ SNAKE POT betting: ' + msg }), signal: AbortSignal.timeout(4000) }).catch(() => {});
+  } catch (_) {}
+}
+
+// The two logical ledgers, read as integers (default 0). One hash → one round-trip.
+async function readBetLedger() {
+  const h = await kvHgetall(BET_LEDGER) || {};
+  return {
+    betLiability: Math.max(0, Math.floor(Number(h.betLiability) || 0)),
+    accruedFee:   Math.max(0, Math.floor(Number(h.accruedFee)   || 0)),
+  };
+}
+
+// Sum every outstanding player wager deposit (`pw:<addr>`), read-only, for the invariant's
+// `wagerLiability` term. This is the term that guarantees in-game players can always cash out.
+// Existing wager code is byte-for-byte untouched — we just observe it. Fail-CLOSED to a very large
+// number on any KV error so a read failure can NEVER let a payout slip past the invariant.
+async function sumWagerLiability() {
+  const keys = await kvScan('pw:*');
+  if (!keys.length) return 0;
+  let total = 0;
+  // chunk MGET to keep request bodies sane
+  for (let i = 0; i < keys.length; i += 256) {
+    const vals = await kvMget(keys.slice(i, i + 256));
+    for (const v of vals) total += Math.max(0, Math.floor(Number(v) || 0));
+  }
+  return total;
+}
+
+// THE gate. Fetches live escrow balance + all liabilities and asks the pure engine whether paying
+// `payoutLamports` now keeps escrow solvent for EVERYONE (players + bettors + house fee). Returns the
+// invariant result plus the figures used, so callers can log/alert. Fail-closed on any error.
+async function assertSolvency(escPubkeyB58, payoutLamports) {
+  let onChainBalance = 0, wagerLiability = Number.MAX_SAFE_INTEGER, betLiability = 0, accruedFee = 0;
+  try {
+    const bal = await rpc('getBalance', [escPubkeyB58, { commitment: 'confirmed' }]);
+    onChainBalance = (bal && typeof bal.value === 'number') ? bal.value : (typeof bal === 'number' ? bal : 0);
+    wagerLiability = await sumWagerLiability();
+    const led = await readBetLedger();
+    betLiability = led.betLiability; accruedFee = led.accruedFee;
+  } catch (e) {
+    // Any failure → keep wagerLiability at MAX so checkInvariant refuses. Never pay blind.
+    return { ok: false, reason: 'solvency-read-failed:' + (e && e.message || e), onChainBalance, wagerLiability, betLiability, accruedFee };
+  }
+  const inv = BET.checkInvariant({ onChainBalance, wagerLiability, betLiability, accruedFee, payoutLamports, txFee: TX_FEE });
+  return { ...inv, onChainBalance, wagerLiability, betLiability, accruedFee };
+}
+
+// Verify a GAME_SECRET-HMAC server-to-server proof (same trust model as elim-lock / park-food).
+// `payloadStr` is the exact string the game server signed. Uses the shared x-game-proof/x-game-ts headers.
+function verifyGameProof(req, payloadStr) {
+  if (!GAME_SECRET) return false;
+  const gp  = (req.headers['x-game-proof'] || '').trim();
+  const gts = Number(req.headers['x-game-ts'] || 0);
+  if (!gp || !gts || Math.abs(Date.now() - gts) > 300000) return false;
+  const expected = crypto.createHmac('sha256', GAME_SECRET).update(payloadStr).digest('hex');
+  try { return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(gp)); } catch (_) { return false; }
+}
+
+// Canonical string for a market descriptor — the game server signs this with GAME_SECRET so a client
+// cannot invent a market, change its outcomes, or extend its betting window.
+function marketCanon(m) {
+  return 'betmkt:' + m.id + ':' + m.lobby + ':' + m.type + ':' + (Array.isArray(m.outcomes) ? m.outcomes.join(',') : '') + ':' + m.openTs + ':' + m.lockTs;
+}
+function verifyMarketDescriptor(m, sig) {
+  if (!GAME_SECRET || !m || !sig) return false;
+  const expected = crypto.createHmac('sha256', GAME_SECRET).update(marketCanon(m)).digest('hex');
+  try { return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(sig))); } catch (_) { return false; }
+}
+
+// Confirm a bet deposit tx paid ≥ lamports into the escrow from walletAddress (mirrors join.js
+// verifyWagerTx exactly — same escrow, same checks). Throws a descriptive error on any shortfall.
+async function verifyBetDepositTx(txSig, walletAddress, lamports, escrowB58) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await sleep(1500);
+    let tx;
+    try { tx = await rpc('getTransaction', [txSig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]); }
+    catch (_) { continue; } // transient RPC error — retry
+    if (!tx) continue;      // not indexed yet — retry
+    if (tx.meta && tx.meta.err) throw new Error('Deposit tx failed on-chain');
+    const keys = tx.transaction.message.accountKeys;
+    const getKey = k => (typeof k === 'string' ? k : k.pubkey);
+    const escrowIdx = keys.findIndex(k => getKey(k) === escrowB58);
+    if (escrowIdx < 0) throw new Error('Escrow not found in deposit tx');
+    const received = tx.meta.postBalances[escrowIdx] - tx.meta.preBalances[escrowIdx];
+    if (received < lamports) throw new Error('Deposit too small: got ' + received + ' need ' + lamports);
+    const senderIdx = keys.findIndex(k => getKey(k) === walletAddress);
+    if (senderIdx < 0) throw new Error('Sender not found in deposit tx');
+    return; // verified ✓
+  }
+  throw new Error('Deposit not confirmed yet — try again in a moment');
+}
+
+// Enumerate every individual bet on a market. Keys are `bet:<mkt>:<outcome>:<addr>` → lamports.
+// Returns { pools:{outcome:lamports}, stakesByOutcome:{outcome:{addr:lamports}}, allStakes:{addr:lamports}, bettors:Set }.
+async function loadMarketBets(mktId) {
+  const prefix = 'bet:' + mktId + ':';
+  const keys = await kvScan(prefix + '*');
+  const pools = {}, stakesByOutcome = {}, allStakes = {}, byKey = {};
+  if (keys.length) {
+    for (let i = 0; i < keys.length; i += 256) {
+      const slice = keys.slice(i, i + 256);
+      const vals = await kvMget(slice);
+      for (let j = 0; j < slice.length; j++) {
+        const k = slice[j];
+        const lamps = Math.max(0, Math.floor(Number(vals[j]) || 0));
+        if (lamps <= 0) continue;
+        const rest = k.slice(prefix.length);           // "<outcome>:<addr>"
+        const ci = rest.lastIndexOf(':');
+        if (ci < 0) continue;
+        const outcome = rest.slice(0, ci);
+        const addr    = rest.slice(ci + 1);
+        pools[outcome] = (pools[outcome] || 0) + lamps;
+        (stakesByOutcome[outcome] = stakesByOutcome[outcome] || {})[addr] = (stakesByOutcome[outcome][addr] || 0) + lamps;
+        allStakes[addr] = (allStakes[addr] || 0) + lamps;
+        byKey[k] = { outcome, addr, lamps };
+      }
+    }
+  }
+  return { pools, stakesByOutcome, allStakes, byKey };
+}
+
+// Pay a set of { addr, lamports } recipients from escrow, in batches that fit one Solana tx, asserting
+// the solvency invariant before EACH batch and claiming per-bettor NX single-pay locks so a retry (or a
+// double-fired resolve) can never pay anyone twice. Decrements betLiability by exactly what is paid.
+// Returns { paid, refused, txs, stranded } — stranded>0 means the invariant blocked some payouts
+// (money stays safely in escrow; the alert fires). NEVER pays from anything but the caller's amounts.
+async function payBetRecipients(esc, mktId, recipients, tag) {
+  const BATCH = 12; // recipients per tx (well within Solana's account/size limits)
+  let paidLamports = 0, refused = 0, txs = [], stranded = 0;
+  for (let i = 0; i < recipients.length; i += BATCH) {
+    const batch = recipients.slice(i, i + BATCH).filter(r => r && r.lamports > 0);
+    if (!batch.length) continue;
+
+    // Claim each bettor with an NX lock so concurrent/replayed resolves cannot double-pay them.
+    const claimed = [];
+    for (const r of batch) {
+      const claim = await kvSetNX('betpaid:' + mktId + ':' + r.addr, '1', BET_MKT_TTL);
+      if (claim) claimed.push(r); // only pay first-claimers; already-claimed = already paid/being paid
+    }
+    if (!claimed.length) continue;
+
+    const batchTotal = claimed.reduce((a, r) => a + r.lamports, 0);
+    // INVARIANT — the backstop. Refuse if paying this batch would strand any player or bettor.
+    const inv = await assertSolvency(esc.pubkeyB58, batchTotal);
+    if (!inv.ok) {
+      // release the claims so a later (funded) retry can still pay them; leave the money in escrow.
+      for (const r of claimed) await kvDel('betpaid:' + mktId + ':' + r.addr).catch(() => {});
+      stranded += claimed.length;
+      betAlert('invariant REFUSED ' + tag + ' market=' + mktId + ' batchTotal=' + batchTotal +
+               ' bal=' + inv.onChainBalance + ' wagerLiab=' + inv.wagerLiability + ' betLiab=' + inv.betLiability +
+               ' fee=' + inv.accruedFee + ' deficit=' + (inv.deficit || 'n/a'));
+      break; // stop — do not attempt further batches once solvency is in question
+    }
+
+    try {
+      const { blockhash } = await fetchBalAndHash(esc.pubkeyB58);
+      const transfers = claimed.map(r => ({ to: b58Decode(r.addr), lamports: r.lamports }));
+      const tx = buildTx(esc, blockhash, transfers);
+      const result = await sendAndConfirm(tx);
+      txs.push(result.sig);
+      // Retire liability only for what we actually sent.
+      await kvHincrby(BET_LEDGER, 'betLiability', -batchTotal).catch(() => {});
+      paidLamports += batchTotal;
+    } catch (e) {
+      // Send failed — release the claims so this batch can be retried on the next resolve call.
+      for (const r of claimed) await kvDel('betpaid:' + mktId + ':' + r.addr).catch(() => {});
+      refused += claimed.length;
+      console.error('[bet] ' + tag + ' batch send failed market=' + mktId + ' — ' + (e && e.message || e));
+      // keep going: other batches may still succeed; the caller/game-server retries the rest.
+    }
+  }
+  return { paidLamports, refused, txs, stranded };
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   let done = false;
@@ -399,6 +596,108 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, parked: orbs.length });
     }
 
+    // ── bet-pools: PUBLIC read of a market's current pools + live implied odds ───────────────────
+    // No auth — pool sizes and odds are public info (like a scoreboard). Spectators poll this every
+    // second during the open window to render live sportsbook-style multipliers. Touches no money.
+    if (action === 'bet-pools') {
+      const mktId = String(body.mkt || body.marketId || '');
+      if (!mktId) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'mkt required' }); }
+      let meta = null;
+      try { const raw = await kvGet('betmkt:' + mktId); if (raw) meta = JSON.parse(raw); } catch (_) {}
+      const ph = await kvHgetall('betpool:' + mktId) || {};
+      const pools = {};
+      for (const k of Object.keys(ph)) { const v = Math.max(0, Math.floor(Number(ph[k]) || 0)); if (v > 0) pools[k] = v; }
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ mkt: mktId, pools, odds: BET.liveOdds(pools), meta,
+        total: BET.poolTotal(pools), status: (meta && meta.status) || 'open', result: (meta && meta.result) || null });
+    }
+
+    // ── bet-resolve / bet-refund: server-authoritative payout or 100% refund ─────────────────────
+    // GAME_SECRET-HMAC (same trust model as elim-lock). The game server decides the outcome from live
+    // game truth and calls this; the MONEY is computed here from the market's own pool only, gated by
+    // the global solvency invariant. Idempotent + retry-safe: safe to call repeatedly until fully paid.
+    if (action === 'bet-resolve' || action === 'bet-refund') {
+      const mktId  = String(body.mkt || '');
+      const result = action === 'bet-resolve' ? String(body.result || '') : '';
+      const gts    = Number(req.headers['x-game-ts'] || 0);
+      const payload = action === 'bet-resolve'
+        ? ('bet-resolve:' + mktId + ':' + result + ':' + gts)
+        : ('bet-refund:' + mktId + ':' + gts);
+      if (!verifyGameProof(req, payload)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
+      if (!mktId) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'mkt required' }); }
+
+      // Serialize resolution per market so two concurrent calls can't both pay.
+      const rLock = await kvSetNX('lock:betmkt:' + mktId, '1', 50);
+      if (!rLock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'resolution in progress' }); }
+      try {
+        let meta = null;
+        try { const raw = await kvGet('betmkt:' + mktId); if (raw) meta = JSON.parse(raw); } catch (_) {}
+        // Already fully settled → idempotent success.
+        if (meta && (meta.status === 'resolved' || meta.status === 'void') && meta.allPaid) {
+          clearTimeout(guard); done = true;
+          return res.status(200).json({ ok: true, market: mktId, status: meta.status, already: true });
+        }
+
+        const esc = getEscrow();
+        const { pools, stakesByOutcome, allStakes } = await loadMarketBets(mktId);
+        const bettors = Object.keys(allStakes);
+        const type = (meta && meta.type) || (body.type ? String(body.type) : 'binary');
+        const outcomes = (meta && Array.isArray(meta.outcomes)) ? meta.outcomes
+                        : (Array.isArray(body.outcomes) ? body.outcomes : Object.keys(pools));
+
+        // No bets at all → nothing to pay; mark done.
+        if (bettors.length === 0) {
+          const m2 = Object.assign({ id: mktId }, meta || {}, { status: 'void', result: null, allPaid: true, doneTs: Date.now() });
+          await kvSet('betmkt:' + mktId, JSON.stringify(m2), BET_MKT_TTL).catch(() => {});
+          clearTimeout(guard); done = true;
+          return res.status(200).json({ ok: true, market: mktId, status: 'void', paid: 0, note: 'no bets' });
+        }
+
+        // Decide void vs pay. A refund call is always void; a resolve voids if a winnable side had no
+        // counterparty (engine rule) or the declared winner has no backers (no one to pay).
+        const voidNow = (action === 'bet-refund')
+                     || BET.isVoid(type, pools, outcomes)
+                     || !result || !(Math.floor(Number(pools[result]) || 0) > 0);
+
+        let payResult, statusFinal;
+        if (voidNow) {
+          statusFinal = 'void';
+          const { refunds } = BET.voidRefunds(allStakes);
+          const recips = Object.keys(refunds).map(a => ({ addr: a, lamports: refunds[a] }));
+          payResult = await payBetRecipients(esc, mktId, recips, 'void-refund');
+        } else {
+          statusFinal = 'resolved';
+          const rp = BET.resolvePayouts(result, stakesByOutcome[result] || {}, pools);
+          // Move the house fee (+ rounding dust) out of betLiability into accruedFee EXACTLY ONCE.
+          // ORDER MATTERS (fail-safe): raise accruedFee FIRST, then lower betLiability. The two HINCRBYs
+          // aren't atomic, so if the function dies between them the ledger must err toward OVER-stating
+          // total liability (conservative → the invariant may refuse, never over-pay), never under-stating.
+          if (rp.feePlusDust > 0 && (await kvSetNX('betfee:' + mktId, '1', BET_MKT_TTL))) {
+            await kvHincrby(BET_LEDGER, 'accruedFee',    rp.feePlusDust).catch(() => {});
+            await kvHincrby(BET_LEDGER, 'betLiability', -rp.feePlusDust).catch(() => {});
+          }
+          const recips = Object.keys(rp.payouts).map(a => ({ addr: a, lamports: rp.payouts[a] }));
+          payResult = await payBetRecipients(esc, mktId, recips, 'bet-win');
+        }
+
+        const allPaid = payResult.stranded === 0 && payResult.refused === 0;
+        const m2 = Object.assign({ id: mktId }, meta || {}, {
+          type, outcomes, status: statusFinal, result: voidNow ? null : result,
+          allPaid, doneTs: Date.now(),
+        });
+        await kvSet('betmkt:' + mktId, JSON.stringify(m2), BET_MKT_TTL).catch(() => {});
+
+        clearTimeout(guard); done = true;
+        return res.status(200).json({
+          ok: true, market: mktId, status: statusFinal, allPaid,
+          paidLamports: payResult.paidLamports, txs: payResult.txs,
+          stranded: payResult.stranded, refused: payResult.refused,
+        });
+      } finally {
+        await kvDel('lock:betmkt:' + mktId).catch(() => {});
+      }
+    }
+
     // ── Wallet signature auth — required for all fund-moving actions ─────────
     // The player signs the request with their Solana private key.
     // Only the real wallet owner can produce a valid signature.
@@ -412,6 +711,59 @@ module.exports = async function handler(req, res) {
     }
 
     const esc = getEscrow();
+
+    // ── bet-place: a SPECTATOR deposits SOL into escrow to back an outcome ────────────────────────
+    // Auth is layered: (1) the wallet signature above proves the bettor owns the wallet; (2) the market
+    // descriptor is GAME_SECRET-signed by the game server so a client cannot invent a market, change its
+    // outcomes, or extend the window; (3) the on-chain tx proves the money actually arrived. Recorded to
+    // KV and added to betLiability. This path only ADDS to escrow, so it never needs the solvency gate.
+    if (action === 'bet-place') {
+      const bettor = playerAddress;
+      const stake  = wagerLamportsRaw;
+      const m      = body.market || null;                 // { id, lobby, type, outcomes, openTs, lockTs }
+      const msig   = body.marketSig || '';
+      const outcome = String(body.outcome || '');
+      const txSig  = body.txSig;
+
+      if (!bettor) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'playerAddress required' }); }
+      if (b58Decode(bettor).length !== 32) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'bad bettor address' }); }
+      if (!(stake > 0)) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'stake must be positive' }); }
+      if (!m || !verifyMarketDescriptor(m, msig)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Invalid market — cannot verify it came from the game server' }); }
+      if (!Array.isArray(m.outcomes) || !m.outcomes.includes(outcome)) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'unknown outcome' }); }
+      const nowMs = Date.now();
+      if (!(nowMs < Number(m.lockTs))) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Betting is closed for this market' }); }
+      if (!(nowMs >= Number(m.openTs) - 5000)) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Market not open yet' }); }
+
+      // Spectator-only gate (anti-collusion): anyone with a live wager deposit is an in-game player and
+      // is blocked from betting. Checkable here without knowing the lobby roster; the client also hides
+      // the panel from players. (Pari-mutuel carries no house risk, so a separate-wallet sybil can't
+      // hurt escrow — this rule is about fairness/optics and stopping the obvious self-bet.)
+      const activeWager = await kvGet('pw:' + bettor);
+      if (activeWager !== null) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Players in a live game cannot bet — cash out first' }); }
+
+      if (!txSig) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'txSig required' }); }
+      const depKey = 'bettx:' + txSig;
+      if (await kvGet(depKey) !== null) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Deposit already used — make a new deposit to bet again' }); }
+
+      // On-chain proof the deposit actually landed in escrow (mirrors the lobby-join deposit check).
+      await verifyBetDepositTx(txSig, bettor, stake, esc.pubkeyB58);
+      await kvSet(depKey, '1', BET_MKT_TTL);              // replay guard before recording
+
+      // Record the bet: per-bettor key (authoritative for payout), pool hash (cheap live odds),
+      // and the global betLiability ledger. Per-bet key uses INCRBY so repeat bets accumulate.
+      const betKey = 'bet:' + m.id + ':' + outcome + ':' + bettor;
+      await kvIncrby(betKey, stake); await kvExpire(betKey, BET_MKT_TTL).catch(() => {});
+      await kvHincrby('betpool:' + m.id, outcome, stake); await kvExpire('betpool:' + m.id, BET_MKT_TTL).catch(() => {});
+      await kvHincrby(BET_LEDGER, 'betLiability', stake);
+      // First bet writes the market meta (status:open) — SETNX so we never clobber a later resolved/void.
+      await kvSetNX('betmkt:' + m.id, JSON.stringify({
+        id: m.id, lobby: m.lobby, type: m.type, outcomes: m.outcomes,
+        openTs: m.openTs, lockTs: m.lockTs, status: 'open',
+      }), BET_MKT_TTL).catch(() => {});
+
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, market: m.id, outcome, recorded: stake });
+    }
 
     // ── balance ───────────────────────────────────────────────────────────────
     if (action === 'balance') {

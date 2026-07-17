@@ -3017,6 +3017,10 @@ async function pkConnect(roomId,gameToken,spectate){
       endSnakeGame('cashout',null);
     });
 
+    // Spectator betting market feed (read-only). Panel + place-bet UI live in the betting module;
+    // only shown while watching. Ignored by players (guarded by isSpectating inside the handler).
+    _sio.on('ss-bet',(p)=>{ try{ _onBetMarket(p); }catch(_){} });
+
     // ── JOIN body seed consumer ─────────────────────────────────────────────────────────────
     // Server sends each OTHER alive snake's authoritative body (head→tail, decimated) ONCE on join
     // (in response to seed:1 on our first ssin). Stash it; the render loop adopts it in place of the
@@ -3209,6 +3213,7 @@ function pkDisconnect(){
   if(_bgPump){clearInterval(_bgPump);_bgPump=null;}_bgSuppressSend=false;
   if(_hostWatch){clearInterval(_hostWatch);_hostWatch=null;}
   voiceCleanup();
+  try{ _betReset(); }catch(_){}
   _killFeed=[];
   ablyChannel=null;
   if(_sio){try{_sio.io.reconnection(false);}catch(_){}try{_sio.disconnect();}catch(_){}} _sio=null;
@@ -3236,6 +3241,183 @@ async function enterWatchMode(region,tier){
     const rb=document.getElementById('spec-rejoin-btn'); if(rb)rb.style.display='none';
     const pb=document.getElementById('spec-play-btn'); if(pb)pb.style.display='inline-flex';
   }
+}
+
+// ═══════════════════════ SPECTATOR BETTING (client — watch mode only) ═══════════════════════
+// Markets arrive read-only over the socket ('ss-bet'); live pool sizes/odds are polled from
+// /api/settle (action:'bet-pools'); placing a bet is a signed SOL deposit into the SAME escrow
+// (mirrors the lobby-join deposit) followed by an on-chain-verified 'bet-place'. ALL money safety is
+// server-side (pari-mutuel pool math + the global solvency invariant in api/settle.js + lib/betting.js)
+// — this file is purely the UI and the deposit flow. Nothing here can move money by itself.
+const _betMkts=new Map();       // id -> latest market payload from the server
+let _betActiveId=null;          // market shown in the panel right now
+let _betPools={};               // { outcome: lamports } for the active market (live odds)
+let _betTimer=null;             // 1s ticker: refresh countdown/odds + poll pools
+let _betPlacing=false;
+let _betSelOutcome=null;
+
+function _betEnabled(){ return !!isSpectating; }
+function _esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function _betShort(s){ s=String(s==null?'':s); return s.length>18?s.slice(0,17)+'…':s; }
+function _lampsToSol(l){ return (Number(l)||0)/1e9; }
+function _betMult(pools,outcome){
+  let total=0; for(const k in pools) total+=Number(pools[k])||0;
+  const p=Number(pools[outcome])||0;
+  if(total<=0||p<=0) return '—';
+  return (total/p*0.92).toFixed(2)+'×';   // net implied multiplier (after 8% fee)
+}
+
+function _onBetMarket(p){
+  try{
+    if(!p||!p.market||!p.market.id) return;
+    const id=p.market.id;
+    _betMkts.set(id,p);
+    if(p.phase==='resolved'||p.phase==='void'){
+      if(id===_betActiveId){
+        if(p.phase==='void') addToast('↩ Bet market VOIDED — every stake refunded','#FFD700',6000);
+        else { const lbl=(p.labels&&p.result&&p.labels[p.result])||p.result; addToast('🏁 Bet result: '+lbl,'#39FF14',6000); }
+      }
+      setTimeout(()=>{ _betMkts.delete(id); if(_betActiveId===id){_betActiveId=null;_betSelOutcome=null;_betPools={};} _betRender(); },8000);
+    }else{
+      const cur=_betActiveId&&_betMkts.get(_betActiveId);
+      if(!cur||cur.phase==='resolved'||cur.phase==='void'){ _betActiveId=id; _betSelOutcome=null; _betPools={}; }
+    }
+    _betRender(); _betEnsureTimer();
+  }catch(e){ console.warn('[bet] market',e); }
+}
+
+async function _betPoll(){
+  if(!_betActiveId||!_betEnabled()) return;
+  try{
+    const r=await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'bet-pools',mkt:_betActiveId})});
+    const d=await r.json().catch(()=>null);
+    if(d&&d.pools){ _betPools=d.pools; _betRefresh(); }
+  }catch(_){}
+}
+function _betEnsureTimer(){
+  if(_betTimer) return;
+  let n=0;
+  _betTimer=setInterval(()=>{
+    if(!_betActiveId||!_betMkts.has(_betActiveId)||!_betEnabled()){ clearInterval(_betTimer); _betTimer=null; _betRender(); return; }
+    _betRefresh();
+    if(n++%2===0) _betPoll();
+  },1000);
+  _betPoll();
+}
+function _betReset(){
+  try{ if(_betTimer){clearInterval(_betTimer);_betTimer=null;} }catch(_){}
+  _betMkts.clear(); _betActiveId=null; _betSelOutcome=null; _betPools={};
+  const panel=document.getElementById('bet-panel'); if(panel)panel.style.display='none';
+}
+
+function _betOutcomesHtml(p,disabled){
+  const m=p.market; let h='';
+  for(const o of m.outcomes){
+    const lbl=(p.labels&&p.labels[o])||o;
+    const sel=(_betSelOutcome===o);
+    h+='<div data-out="'+_esc(o)+'" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;margin-bottom:5px;border-radius:8px;cursor:'+(disabled?'default':'pointer')+';border:1.5px solid '+(sel?'#FFD700':'#3a3115')+';background:'+(sel?'rgba(255,215,0,.12)':'rgba(255,255,255,.03)')+'">';
+    h+='<span style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_esc(_betShort(lbl))+'</span>';
+    h+='<span style="text-align:right;white-space:nowrap"><span data-mult="'+_esc(o)+'" style="color:#FFD700;font-weight:800;font-size:13px">'+_betMult(_betPools,o)+'</span><br><span data-pool="'+_esc(o)+'" style="font-size:9px;color:#8a7c54">'+_lampsToSol(_betPools[o]||0).toFixed(3)+' SOL</span></span>';
+    h+='</div>';
+  }
+  return h;
+}
+function _betRender(){
+  let panel=document.getElementById('bet-panel');
+  const show=_betEnabled()&&_betActiveId&&_betMkts.has(_betActiveId);
+  if(!show){ if(panel)panel.style.display='none'; return; }
+  const p=_betMkts.get(_betActiveId), m=p.market;
+  const prevStake=panel&&panel.querySelector('#bet-stake')?panel.querySelector('#bet-stake').value:'0.01';
+  if(!panel){ panel=document.createElement('div'); panel.id='bet-panel'; document.body.appendChild(panel);
+    panel.style.cssText='position:fixed;right:14px;bottom:14px;width:300px;max-width:92vw;z-index:9000;background:linear-gradient(160deg,#1a1508,#0d0b04);border:1.5px solid #FFD700;border-radius:14px;padding:14px;box-shadow:0 8px 30px rgba(0,0,0,.6);color:#f4e9c8;font-family:inherit'; }
+  panel.style.display='block';
+  const locked=p.phase==='locked'||Date.now()>=Number(m.lockTs);
+  const resolved=p.phase==='resolved'||p.phase==='void';
+  const secs=Math.max(0,Math.ceil((Number(m.lockTs)-Date.now())/1000));
+  const cdTxt=resolved?(p.phase==='void'?'VOID':'RESULT'):(locked?'LOCKED':secs+'s to lock');
+  let html='';
+  html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">';
+  html+='<span style="font-size:11px;letter-spacing:.08em;color:#FFD700;font-weight:700">🎲 SPECTATOR BET</span>';
+  html+='<span data-bet-cd style="font-size:10px;color:#b8a97a">'+cdTxt+'</span></div>';
+  html+='<div style="font-size:13px;font-weight:600;margin-bottom:9px;line-height:1.25">'+_esc(p.question||'')+'</div>';
+  html+='<div id="bet-outs">'+_betOutcomesHtml(p,locked||resolved)+'</div>';
+  if(!resolved&&!locked){
+    html+='<div data-bet-place-wrap><div style="display:flex;gap:6px;margin-top:9px">';
+    html+='<input id="bet-stake" type="number" min="0.001" step="0.005" value="'+_esc(prevStake||'0.01')+'" style="flex:1;min-width:0;background:#0a0803;border:1px solid #6b5a20;border-radius:8px;color:#fff;padding:8px;font-size:13px">';
+    html+='<button id="bet-place-btn" style="background:#FFD700;color:#1a1200;border:0;border-radius:8px;font-weight:800;padding:8px 14px;cursor:pointer;font-size:13px">BET</button></div>';
+    html+='<div style="font-size:10px;color:#8a7c54;margin-top:6px">Pari-mutuel · 8% fee · winners split the pool · refunded if a side gets no bets</div></div>';
+  } else if(locked&&!resolved){
+    html+='<div style="font-size:11px;color:#b8a97a;margin-top:8px;text-align:center">Betting locked — awaiting result…</div>';
+  }
+  panel.innerHTML=html;
+  if(!locked&&!resolved){
+    panel.querySelectorAll('#bet-outs [data-out]').forEach(b=>b.onclick=()=>{ _betSelOutcome=b.getAttribute('data-out'); _betRender(); });
+    const pb=panel.querySelector('#bet-place-btn'); if(pb)pb.onclick=_betPlace;
+  }
+}
+function _betRefresh(){
+  const panel=document.getElementById('bet-panel'); if(!panel||panel.style.display==='none')return;
+  const p=_betActiveId&&_betMkts.get(_betActiveId); if(!p)return; const m=p.market;
+  const locked=p.phase==='locked'||Date.now()>=Number(m.lockTs);
+  const resolved=p.phase==='resolved'||p.phase==='void';
+  const cd=panel.querySelector('[data-bet-cd]');
+  if(cd){ const secs=Math.max(0,Math.ceil((Number(m.lockTs)-Date.now())/1000)); cd.textContent=resolved?(p.phase==='void'?'VOID':'RESULT'):(locked?'LOCKED':secs+'s to lock'); }
+  for(const o of m.outcomes){
+    const me=panel.querySelector('[data-mult="'+o+'"]'); if(me)me.textContent=_betMult(_betPools,o);
+    const pe=panel.querySelector('[data-pool="'+o+'"]'); if(pe)pe.textContent=_lampsToSol(_betPools[o]||0).toFixed(3)+' SOL';
+  }
+  if(locked){ const w=panel.querySelector('[data-bet-place-wrap]'); if(w){ _betRender(); } } // re-render to swap to "locked" state once
+}
+
+// Deposit `lamps` into the shared escrow (same flow as a lobby-join deposit) and return the tx sig.
+async function _betDeposit(lamps){
+  const escPubkey=new solanaWeb3.PublicKey(ESCROW_PUBKEY);
+  const from=new solanaWeb3.PublicKey(ST.address);
+  const tx=new solanaWeb3.Transaction().add(solanaWeb3.SystemProgram.transfer({fromPubkey:from,toPubkey:escPubkey,lamports:lamps}));
+  const _lbr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'getLatestBlockhash',params:[{commitment:'confirmed'}]})});
+  const _lbd=await _lbr.json(); if(_lbd.error)throw new Error('Blockhash: '+_lbd.error.message);
+  tx.recentBlockhash=_lbd.result.value.blockhash; tx.feePayer=from;
+  await signLocalTx(tx);
+  const _rawB64=btoa(String.fromCharCode(...tx.serialize()));
+  const _sndr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:2,method:'sendTransaction',params:[_rawB64,{encoding:'base64',preflightCommitment:'confirmed'}]})});
+  const _sndd=await _sndr.json(); if(_sndd.error)throw new Error('Send failed: '+_sndd.error.message);
+  const sig=_sndd.result;
+  addToast('Confirming deposit…','#FFD700');
+  for(let i=0;i<40;i++){
+    await new Promise(r=>setTimeout(r,1500));
+    const _sr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:3,method:'getSignatureStatuses',params:[[sig],{searchTransactionHistory:false}]})});
+    const _sd=await _sr.json().catch(()=>({})); const _st=_sd&&_sd.result&&_sd.result.value&&_sd.result.value[0];
+    if(_st){ if(_st.err)throw new Error('Deposit rejected on-chain'); if(_st.confirmationStatus==='confirmed'||_st.confirmationStatus==='finalized')return sig; }
+  }
+  throw new Error('Deposit confirmation timed out — try again');
+}
+
+async function _betPlace(){
+  if(_betPlacing)return;
+  const p=_betActiveId&&_betMkts.get(_betActiveId); if(!p)return; const m=p.market;
+  if(!ST.address||!_keypair){ addToast('Log in to place a bet','#FFD700'); return; }
+  if(!_betSelOutcome){ addToast('Pick an outcome first','#FFD700'); return; }
+  if(Date.now()>=Number(m.lockTs)){ addToast('Betting is closed','#FF6600'); _betRefresh(); return; }
+  const stakeSol=parseFloat((document.getElementById('bet-stake')||{}).value||'0');
+  if(!(stakeSol>0)||stakeSol<0.001){ addToast('Minimum bet is 0.001 SOL','#FFD700'); return; }
+  _betPlacing=true; const pb=document.getElementById('bet-place-btn'); if(pb){pb.disabled=true;pb.textContent='…';}
+  try{
+    await fetchPrice().catch(()=>{});
+    await refreshBal().catch(()=>{});
+    if(ST.balance<stakeSol+0.001){ addToast('Not enough SOL (need '+(stakeSol+0.001).toFixed(4)+', have '+ST.balance.toFixed(4)+')','#FF4444'); return; }
+    const lamps=Math.floor(stakeSol*solanaWeb3.LAMPORTS_PER_SOL);
+    const txSig=await _betDeposit(lamps);
+    const ts=Math.floor(Date.now()/1000);
+    const _msg=new TextEncoder().encode('pac-arena:bet-place:'+ST.address+':'+lamps+':'+ts);
+    const _sig=btoa(String.fromCharCode(...nacl.sign.detached(_msg,_keypair.secretKey)));
+    const body={action:'bet-place',playerAddress:ST.address,wagerLamports:lamps,outcome:_betSelOutcome,txSig,
+      market:{id:m.id,lobby:m.lobby,type:m.type,outcomes:m.outcomes,openTs:m.openTs,lockTs:m.lockTs},marketSig:m.sig};
+    const r=await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':_sig,'x-settle-ts':String(ts)},body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok&&d.ok){ addToast('✅ Bet placed: '+stakeSol.toFixed(3)+' SOL on '+((p.labels&&p.labels[_betSelOutcome])||_betSelOutcome),'#39FF14'); refreshBal().catch(()=>{}); _betPoll(); }
+    else addToast('Bet failed: '+(d.error||('HTTP '+r.status)),'#FF4444',5000);
+  }catch(e){ console.warn('[bet place]',e); addToast('Bet error: '+(e.message||e),'#FF4444',5000); }
+  finally{ _betPlacing=false; const pb2=document.getElementById('bet-place-btn'); if(pb2){pb2.disabled=false;pb2.textContent='BET';} }
 }
 
 // ══ SNAKE GAME LOGIC ════════════════════════════════════════
