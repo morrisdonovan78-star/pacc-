@@ -448,6 +448,10 @@ async function payBetRecipients(esc, mktId, recipients, tag) {
       txs.push(result.sig);
       // Retire liability only for what we actually sent.
       await kvHincrby(BET_LEDGER, 'betLiability', -batchTotal).catch(() => {});
+      // The Solana network fee for this transfer is absorbed by the house's 8% (accruedFee), NOT by a
+      // cushion — this is what lets betting run from an empty escrow. Decrement the fee ledger so it
+      // stays honest (a future owner sweep never claims fee that was already spent on network costs).
+      await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
       paidLamports += batchTotal;
     } catch (e) {
       // Send failed — release the claims so this batch can be retried on the next resolve call.
