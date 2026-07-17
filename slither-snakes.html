@@ -1,23 +1,23 @@
-<!-- SLITHER SNAKES v1 — Crypto wagering snake game on Solana -->
+<!-- SNAKE POT (slither-snakes) v1 — Crypto wagering snake game on Solana -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>SLITHER SNAKES — PVP Snake on Solana</title>
+<title>SNAKE POT — PVP Snake on Solana</title>
 <!-- Social link previews (Discord/Twitter/Telegram). Canonical home: snakepot.com -->
 <meta name="description"            content="PVP snake on Solana. Wager real SOL, eat snakes, take their money. Free, $1 and $5 lobbies — no download, plays in any browser."/>
 <meta name="theme-color"            content="#39FF14"/>
 <meta property="og:type"            content="website"/>
-<meta property="og:site_name"       content="SLITHER SNAKES"/>
-<meta property="og:title"           content="SLITHER SNAKES — PVP Snake on Solana"/>
+<meta property="og:site_name"       content="SNAKE POT"/>
+<meta property="og:title"           content="SNAKE POT — PVP Snake on Solana"/>
 <meta property="og:description"     content="Wager real SOL, eat snakes, take their money. Free, $1 and $5 lobbies — no download, plays in any browser."/>
 <meta property="og:url"             content="https://snakepot.com/"/>
 <meta property="og:image"           content="https://snakepot.com/og-snake.png"/>
 <meta property="og:image:width"     content="1200"/>
 <meta property="og:image:height"    content="630"/>
 <meta name="twitter:card"           content="summary_large_image"/>
-<meta name="twitter:title"          content="SLITHER SNAKES — PVP Snake on Solana"/>
+<meta name="twitter:title"          content="SNAKE POT — PVP Snake on Solana"/>
 <meta name="twitter:description"    content="Wager real SOL, eat snakes, take their money. Free, $1 and $5 lobbies."/>
 <meta name="twitter:image"          content="https://snakepot.com/og-snake.png"/>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Press+Start+2P&family=Exo+2:wght@400;600;700&display=swap" rel="stylesheet"/>
@@ -201,6 +201,98 @@ input,textarea,[contenteditable="true"]{-webkit-user-select:text;-moz-user-selec
 #m-zoom::-moz-range-track{height:6px;border-radius:3px;background:rgba(0,255,255,0.35);}
 #m-zoom::-moz-range-thumb{width:26px;height:26px;border:none;border-radius:50%;background:var(--c);}
 body.mctl #voice-speakers{left:150px;}
+/* ══ HOME DASHBOARD (snakepot.com look) ═══════════════════════════════════════ */
+#scr-home.on{justify-content:flex-start;padding:0 0 24px;}
+#topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;padding:10px 18px;position:relative;z-index:2;}
+.tb-left{display:flex;align-items:center;gap:10px;min-width:0;}
+#logo-snake{width:52px;height:52px;flex-shrink:0;}
+.tb-name{font-family:'Orbitron',sans-serif;font-weight:900;font-size:clamp(15px,2vw,22px);letter-spacing:3px;white-space:nowrap;}
+.tb-name .ss1{color:#39FF14;text-shadow:0 0 12px rgba(57,255,20,.8);}
+.tb-name .ss2{color:#00FFFF;text-shadow:0 0 12px rgba(0,255,255,.8);}
+.tb-sub{font-family:'Press Start 2P',monospace;font-size:6px;color:var(--c);letter-spacing:2px;margin-top:4px;opacity:.85;white-space:nowrap;}
+.tb-chips{display:flex;gap:8px;}
+.chip{font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);background:rgba(57,255,20,.05);border:1px solid rgba(57,255,20,.4);border-radius:8px;padding:9px 14px;cursor:pointer;display:flex;align-items:center;gap:7px;transition:box-shadow .15s,background .15s;}
+.chip:hover{box-shadow:0 0 14px rgba(57,255,20,.25);}
+.chip.sel{background:var(--g);color:#001500;}
+.chip-cnt{font-size:7px;opacity:.75;}
+.tb-right{display:flex;gap:8px;}
+.tico{width:40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:16px;background:rgba(0,255,255,.06);border:1px solid rgba(0,255,255,.35);border-radius:9px;color:var(--c);cursor:pointer;transition:box-shadow .15s;}
+.tico:hover{box-shadow:0 0 12px rgba(0,255,255,.3);}
+.tico.sm{width:26px;height:26px;font-size:11px;border-radius:6px;}
+#dash{display:grid;grid-template-areas:'l c r';grid-template-columns:280px minmax(340px,560px) 300px;gap:18px;width:100%;max-width:1500px;padding:6px 18px 0;justify-content:center;align-items:start;}
+#dash-c{grid-area:c;display:flex;flex-direction:column;align-items:center;min-width:0;}
+#dash-l{grid-area:l;display:flex;flex-direction:column;gap:16px;}
+#dash-r{grid-area:r;display:flex;flex-direction:column;gap:16px;}
+.panel{background:rgba(10,10,26,.82);border:1px solid var(--border);border-radius:14px;padding:15px 15px 13px;}
+.p-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px;}
+.p-title{font-family:'Press Start 2P',monospace;font-size:8px;color:var(--txt);letter-spacing:1px;}
+.p-live{font-family:'Press Start 2P',monospace;font-size:6px;color:var(--g);display:flex;align-items:center;gap:5px;}
+.p-badge{font-family:'Press Start 2P',monospace;font-size:6px;color:var(--g);background:rgba(57,255,20,.1);border:1px solid rgba(57,255,20,.35);border-radius:99px;padding:3px 8px;}
+.p-btn{width:100%;margin:9px 0 0;}
+.mini-row{display:flex;align-items:center;gap:8px;padding:7px 4px;font-size:12px;border-bottom:1px solid rgba(255,255,255,.05);}
+.mini-row:last-child{border-bottom:none;}
+.mini-rank{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;background:rgba(255,255,255,.08);flex-shrink:0;}
+.mini-rank.rk1{background:rgba(255,215,0,.2);color:var(--y);}
+.mini-rank.rk2{background:rgba(200,200,220,.18);color:#ddd;}
+.mini-rank.rk3{background:rgba(255,140,60,.18);color:#ff9c50;}
+.mini-name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mini-amt{color:var(--y);font-weight:700;font-size:11px;}
+.mini-dot{width:7px;height:7px;border-radius:50%;background:#555;flex-shrink:0;}
+.mini-empty{color:var(--muted);font-size:11px;text-align:center;padding:10px 0;}
+#cust-prev{width:100%;height:150px;display:block;background:rgba(0,0,0,.3);border:1px solid rgba(57,255,20,.15);border-radius:10px;}
+.w-big{font-family:'Press Start 2P',monospace;font-size:15px;color:var(--g);margin-top:9px;}
+.w-usd{font-size:12px;color:var(--muted);margin-top:4px;}
+.name-row{display:flex;gap:8px;align-items:stretch;margin-bottom:12px;}
+#av-box{width:38px;border-radius:8px;background:var(--g);color:#001500;display:flex;align-items:center;justify-content:center;font-family:'Press Start 2P',monospace;font-size:13px;flex-shrink:0;}
+.lob-row{display:flex;gap:8px;margin-bottom:12px;}
+.lob{flex:1;background:rgba(0,0,0,.35);border:1px solid rgba(57,255,20,.4);border-radius:10px;color:var(--g);cursor:pointer;padding:10px 4px;display:flex;flex-direction:column;align-items:center;gap:5px;transition:box-shadow .15s,background .15s;}
+.lob b{font-family:'Press Start 2P',monospace;font-size:12px;}
+.lob span{font-family:'Press Start 2P',monospace;font-size:6px;opacity:.7;}
+.lob:hover{box-shadow:0 0 14px rgba(57,255,20,.25);}
+.lob.sel{background:var(--g);color:#001500;box-shadow:0 0 20px rgba(57,255,20,.5);}
+.stat-row{display:flex;gap:8px;margin:12px 0 0;}
+.hstat{flex:1;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:10px;padding:9px 10px;display:flex;flex-direction:column;gap:3px;}
+.hstat b{font-size:15px;color:#fff;}
+.hstat span{font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);letter-spacing:1px;}
+@media(max-width:1180px){
+  #dash{grid-template-areas:'c' 'r' 'l';grid-template-columns:minmax(0,560px);}
+  .tb-sub{display:none;}
+}
+@media(max-width:640px){.tb-chips{display:none;}}
+/* ══ SOCIAL MODALS (gold restyle) ═════════════════════════════════════════════ */
+.soc-title{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:700;color:var(--y);}
+.soc-x{background:none;border:none;color:#aaa;font-size:16px;cursor:pointer;padding:4px 8px;}
+.soc-x:hover{color:#fff;}
+.soc-tabs{display:flex;gap:8px;margin:12px 0 14px;}
+.soc-tab{flex:1;font-size:12px;font-weight:700;color:var(--y);background:rgba(0,0,0,.25);border:1px solid rgba(255,215,0,.55);border-radius:9px;padding:9px 6px;cursor:pointer;white-space:nowrap;transition:background .15s;}
+.soc-tab:hover{background:rgba(255,215,0,.12);}
+.soc-tab.on{background:var(--y);color:#141000;}
+.soc .card{border-color:rgba(255,215,0,.25);background:#0b0b0f;}
+.soc input{border-color:rgba(255,215,0,.35)!important;}
+#lb-table,#lb-search-table{border-collapse:separate!important;border-spacing:0 7px;}
+#lb-rows tr,#lb-search-rows tr{background:#101014;}
+#lb-rows td,#lb-search-rows td{border-top:1px solid rgba(255,255,255,.14);border-bottom:1px solid rgba(255,255,255,.14);}
+#lb-rows td:first-child,#lb-search-rows td:first-child{border-left:1px solid rgba(255,255,255,.14);border-radius:10px 0 0 10px;}
+#lb-rows td:last-child,#lb-search-rows td:last-child{border-right:1px solid rgba(255,255,255,.14);border-radius:0 10px 10px 0;}
+#lb-rows tr.lb-top1{background:rgba(255,215,0,.08);}
+#lb-rows tr.lb-top1 td{border-color:rgba(255,215,0,.65);}
+#lb-rows tr.lb-top2 td{border-color:rgba(255,255,255,.4);}
+#lb-rows tr.lb-top3{background:rgba(255,140,60,.06);}
+#lb-rows tr.lb-top3 td{border-color:rgba(255,140,60,.55);}
+.rkc{display:inline-flex;width:22px;height:22px;border-radius:50%;align-items:center;justify-content:center;font-size:11px;font-weight:700;background:rgba(255,255,255,.1);color:#ddd;}
+.rkc.rk1{background:rgba(255,215,0,.25);color:var(--y);}
+.rkc.rk2{background:rgba(220,220,230,.22);color:#eee;}
+.rkc.rk3{background:rgba(255,140,60,.25);color:#ff9c50;}
+.pf-card{background:#101014;border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:13px;}
+.pf-card h4{font-size:13px;color:#fff;margin:0 0 10px;display:flex;align-items:center;gap:6px;}
+.pf-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.pf-cell span{display:block;font-size:11px;color:#999;margin-bottom:3px;}
+.pf-cell b{font-size:16px;}
+.fr-row{background:#101014;border-color:rgba(255,255,255,.14);border-radius:10px;padding:11px 12px;}
+.fr-remove{font-size:11px;font-weight:700;color:var(--r);background:none;border:1px solid var(--r);border-radius:99px;padding:5px 12px;cursor:pointer;}
+.fr-remove:hover{background:rgba(255,51,51,.12);}
+.pf-two{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;}
+@media(max-width:560px){.pf-two{grid-template-columns:1fr;}.soc-tabs{flex-wrap:wrap;}.soc-tab{flex:1 1 40%;}}
 </style>
 </head>
 <body>
@@ -212,17 +304,37 @@ body.mctl #voice-speakers{left:150px;}
 
 <!-- ══ HOME ══════════════════════════════════════════════════ -->
 <div id="scr-home" class="scr on">
-  <div style="margin-bottom:2rem;text-align:center;">
-    <div class="logo"><span class="ss1">SLITHER</span><br><span class="ss2">SNAKES</span></div>
+
+  <!-- Top bar: logo · quick lobby chips · profile/settings -->
+  <div id="topbar">
+    <div class="tb-left">
+      <canvas id="logo-snake" width="104" height="104"></canvas>
+      <div>
+        <div class="tb-name"><span class="ss1">SNAKE</span> <span class="ss2">POT</span></div>
+        <div class="tb-sub">· SOLANA PVP WAGER ARENA ·</div>
+      </div>
+    </div>
+    <div class="tb-chips">
+      <button class="chip" id="tb-c0" onclick="selLobby(0)">FREE <span class="chip-cnt" id="hc0">·</span></button>
+      <button class="chip" id="tb-c1" onclick="selLobby(1)">$1 <span class="chip-cnt" id="hc1">·</span></button>
+      <button class="chip" id="tb-c5" onclick="selLobby(5)">$5 <span class="chip-cnt" id="hc5">·</span></button>
+    </div>
+    <div class="tb-right">
+      <button class="tico" title="My profile" onclick="openMyProfile()">👤</button>
+      <button class="tico" title="Settings" onclick="_openSettings()">⚙</button>
+    </div>
+  </div>
+
+  <div id="dash">
+  <!-- Center column: big logo + sign-in / play card -->
+  <div id="dash-c">
+  <div style="margin:4px 0 1.4rem;text-align:center;">
+    <div class="logo"><span class="ss1">SNAKE</span> <span class="ss2">POT</span></div>
     <div class="logo-sub">≡ SOLANA PVP WAGER ARENA ≡</div>
   </div>
 
   <!-- Not logged in -->
   <div id="home-off" class="card">
-    <div style="display:flex;gap:8px;justify-content:center;margin:0 auto 1.25rem;">
-      <button class="btn btn-y btn-sm" onclick="openLeaderboard()" style="margin:0;">🏆 LEADERBOARD</button>
-      <button class="btn btn-c btn-sm" onclick="_openSettings()" style="margin:0;">⚙ SETTINGS</button>
-    </div>
     <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);text-align:center;margin-bottom:1.5rem;">SIGN IN TO PLAY</div>
     <!-- Email step -->
     <div id="step-email">
@@ -278,62 +390,100 @@ body.mctl #voice-speakers{left:150px;}
     </div>
   </div>
 
-  <!-- Logged in -->
-  <div id="home-on" class="card" style="display:none;max-width:640px;">
-    <div class="w-strip">
-      <div>
-        <div style="font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);margin-bottom:4px;">WALLET</div>
-        <div style="display:flex;align-items:center;gap:6px;">
-          <div class="w-addr" id="h-addr">--</div>
-          <button class="copy-btn" onclick="copyWalletAddr()" style="font-size:9px;padding:3px 8px;" title="Copy full address">📋</button>
-        </div>
-      </div>
-      <div style="text-align:right;">
-        <div class="w-bal" id="h-bal">-- SOL</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:2px;" id="h-usd">≈ $--</div>
-        <div style="display:flex;gap:5px;margin-top:6px;justify-content:flex-end;">
-          <button class="copy-btn" onclick="doRefreshBal()">🔄</button>
-          <span class="net-badge">◉ MAINNET</span>
-        </div>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:1rem;">
+  <!-- Logged in: play card -->
+  <div id="home-on" class="card" style="display:none;">
+    <div class="name-row">
+      <div id="av-box">S</div>
       <input id="name-input" maxlength="12" placeholder="Your name…" autocomplete="off"
-        style="flex:1;background:rgba(0,0,0,.4);border:1px solid rgba(57,255,20,.3);border-radius:6px;color:#fff;font-family:'Press Start 2P',monospace;font-size:9px;padding:8px 10px;outline:none;"
+        style="flex:1;background:rgba(0,0,0,.4);border:1px solid rgba(57,255,20,.3);border-radius:8px;color:#fff;font-family:'Press Start 2P',monospace;font-size:9px;padding:8px 10px;outline:none;min-width:0;"
         oninput="this.value=this.value.toUpperCase()"
         onkeydown="if(event.key==='Enter')saveDisplayName()"/>
       <button class="copy-btn" onclick="saveDisplayName()">SAVE</button>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:1rem;">
-      <span style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);white-space:nowrap;">SNAKE COLOR</span>
-      <input type="color" id="snake-color-pick" value="#39FF14"
-        oninput="_onSnakeColorPick(this.value)" onchange="_onSnakeColorPick(this.value)"
-        style="width:36px;height:28px;border:none;padding:0;background:none;cursor:pointer;border-radius:4px;flex-shrink:0;">
-      <div id="snake-color-swatches" style="display:flex;gap:5px;flex-wrap:wrap;">
-        <div onclick="_onSnakeColorPick('#39FF14')" style="width:18px;height:18px;border-radius:50%;background:#39FF14;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
-        <div onclick="_onSnakeColorPick('#FF4444')" style="width:18px;height:18px;border-radius:50%;background:#FF4444;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
-        <div onclick="_onSnakeColorPick('#00CFFF')" style="width:18px;height:18px;border-radius:50%;background:#00CFFF;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
-        <div onclick="_onSnakeColorPick('#FF6600')" style="width:18px;height:18px;border-radius:50%;background:#FF6600;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
-        <div onclick="_onSnakeColorPick('#CC00FF')" style="width:18px;height:18px;border-radius:50%;background:#CC00FF;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
-        <div onclick="_onSnakeColorPick('#FFD700')" style="width:18px;height:18px;border-radius:50%;background:#FFD700;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
-        <div onclick="_onSnakeColorPick('#FF69B4')" style="width:18px;height:18px;border-radius:50%;background:#FF69B4;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
-        <div onclick="_onSnakeColorPick('#FFFFFF')" style="width:18px;height:18px;border-radius:50%;background:#FFFFFF;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
-      </div>
+    <div class="lob-row">
+      <button class="lob" id="lb0" onclick="selLobby(0)"><b>FREE</b><span>PRACTICE</span></button>
+      <button class="lob" id="lb1" onclick="selLobby(1)"><b>$1</b><span>LOBBY</span></button>
+      <button class="lob" id="lb5" onclick="selLobby(5)"><b>$5</b><span>LOBBY</span></button>
     </div>
-    <div style="display:flex;gap:8px;margin-bottom:1rem;">
+    <button class="btn btn-g" onclick="playNow()" style="margin-bottom:10px;font-size:12px;letter-spacing:2px;padding:16px 20px;">▶ PLAY NOW</button>
+    <div style="display:flex;gap:8px;">
       <button id="srv-na" class="btn btn-c btn-sm" onclick="setGameServer('NA')" style="flex:1;">🇺🇸 NA</button>
       <button id="srv-eu" class="btn btn-c btn-sm" onclick="setGameServer('EU')" style="flex:1;">🇩🇪 EU</button>
     </div>
-    <button class="btn btn-g" onclick="go('scr-lobby');populateLobby();" style="margin-bottom:10px;font-size:11px;letter-spacing:2px;">▶ PLAY NOW</button>
-    <!-- Secondary actions: uniform 2×2 grid so they're all the same size and sit next to each other -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
-      <button class="btn btn-c btn-sm" onclick="showWithdraw()" style="margin:0;width:100%;">💸 WITHDRAW</button>
-      <button class="btn btn-c btn-sm" onclick="openLeaderboard()" style="margin:0;width:100%;">🏆 LEADERBOARD</button>
-      <button class="btn btn-c btn-sm" onclick="openFriends()" style="margin:0;width:100%;">👥 FRIENDS</button>
-      <button class="btn btn-c btn-sm" onclick="_openSettings()" style="margin:0;width:100%;">⚙ SETTINGS</button>
+    <div class="stat-row">
+      <div class="hstat"><b id="st-online">--</b><span>PLAYERS ONLINE</span></div>
+      <div class="hstat"><b id="st-paid">--</b><span>TOTAL PAID OUT</span></div>
     </div>
-    <button class="btn btn-r btn-sm" onclick="doLogout()" style="margin:0 auto;width:auto;">LOGOUT</button>
+    <div style="display:flex;gap:8px;justify-content:center;margin-top:12px;">
+      <button class="copy-btn" onclick="joinTestLobby()" style="border-color:#FF00FF;color:#FF66FF;">🧪 TEST LOBBY</button>
+      <button class="copy-btn" onclick="doLogout()" style="border-color:var(--r);color:var(--r);background:rgba(255,51,51,.06);">LOGOUT</button>
+    </div>
   </div>
+  </div><!-- /dash-c -->
+
+  <!-- Left column: leaderboard + friends -->
+  <div id="dash-l">
+    <div class="panel" id="pnl-lb">
+      <div class="p-head"><span class="p-title">🏆 LEADERBOARD</span><span class="p-live"><span class="ndot" style="width:6px;height:6px;"></span>LIVE</span></div>
+      <div id="mini-lb"><div class="mini-empty">Loading…</div></div>
+      <button class="btn btn-c btn-sm p-btn" onclick="openLeaderboard()">VIEW FULL LEADERBOARD</button>
+    </div>
+    <div class="panel" id="pnl-fr">
+      <div class="p-head"><span class="p-title">👥 FRIENDS</span><span class="p-badge" id="fr-mini-cnt">0</span></div>
+      <div id="mini-fr"><div class="mini-empty">No friends added yet</div></div>
+      <button class="btn btn-c btn-sm p-btn" onclick="openFriends()">ADD FRIENDS</button>
+    </div>
+  </div>
+
+  <!-- Right column: wallet + customize -->
+  <div id="dash-r">
+    <div class="panel" id="wallet-panel" style="display:none;">
+      <div class="p-head"><span class="p-title">👛 WALLET</span>
+        <span style="display:flex;gap:6px;">
+          <button class="tico sm" onclick="copyWalletAddr()" title="Copy address">📋</button>
+          <button class="tico sm" onclick="doRefreshBal()" title="Refresh balance">🔄</button>
+        </span>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+        <div class="w-addr" id="h-addr">--</div>
+        <span class="net-badge">◉ MAINNET</span>
+      </div>
+      <div class="w-big" id="h-bal">-- SOL</div>
+      <div class="w-usd" id="h-usd">≈ $--</div>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="btn btn-g btn-sm" style="flex:1;margin:0;" onclick="toggleDeposit()">DEPOSIT</button>
+        <button class="btn btn-c btn-sm" style="flex:1;margin:0;" onclick="showWithdraw()">CASH OUT</button>
+      </div>
+      <div id="dep-box" style="display:none;margin-top:10px;background:rgba(0,0,0,.35);border:1px solid rgba(57,255,20,.25);border-radius:8px;padding:10px;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);margin-bottom:6px;">SEND SOL TO THIS ADDRESS</div>
+        <div id="dep-addr" style="font-family:monospace;font-size:11px;color:var(--g);word-break:break-all;margin-bottom:8px;">--</div>
+        <button class="copy-btn" onclick="copyWalletAddr()" style="width:100%;">📋 COPY ADDRESS</button>
+      </div>
+    </div>
+    <div class="panel" id="pnl-cust">
+      <div class="p-head"><span class="p-title">🎨 CUSTOMIZE</span></div>
+      <canvas id="cust-prev" width="536" height="300"></canvas>
+      <div id="cust-open" style="display:none;margin-top:10px;">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <input type="color" id="snake-color-pick" value="#39FF14"
+            oninput="_onSnakeColorPick(this.value)" onchange="_onSnakeColorPick(this.value)"
+            style="width:36px;height:28px;border:none;padding:0;background:none;cursor:pointer;border-radius:4px;flex-shrink:0;">
+          <div id="snake-color-swatches" style="display:flex;gap:6px;flex-wrap:wrap;">
+            <div onclick="_onSnakeColorPick('#39FF14')" style="width:20px;height:20px;border-radius:50%;background:#39FF14;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
+            <div onclick="_onSnakeColorPick('#FF4444')" style="width:20px;height:20px;border-radius:50%;background:#FF4444;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
+            <div onclick="_onSnakeColorPick('#00CFFF')" style="width:20px;height:20px;border-radius:50%;background:#00CFFF;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
+            <div onclick="_onSnakeColorPick('#FF6600')" style="width:20px;height:20px;border-radius:50%;background:#FF6600;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
+            <div onclick="_onSnakeColorPick('#CC00FF')" style="width:20px;height:20px;border-radius:50%;background:#CC00FF;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
+            <div onclick="_onSnakeColorPick('#FFD700')" style="width:20px;height:20px;border-radius:50%;background:#FFD700;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
+            <div onclick="_onSnakeColorPick('#FF69B4')" style="width:20px;height:20px;border-radius:50%;background:#FF69B4;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
+            <div onclick="_onSnakeColorPick('#FFFFFF')" style="width:20px;height:20px;border-radius:50%;background:#FFFFFF;cursor:pointer;border:2px solid rgba(255,255,255,0.2);"></div>
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-c btn-sm p-btn" onclick="toggleCust()">CHANGE APPEARANCE</button>
+    </div>
+  </div>
+  </div><!-- /dash -->
 </div>
 
 <!-- Settings modal — clip toggle + remappable keybinds -->
@@ -400,11 +550,17 @@ body.mctl #voice-speakers{left:150px;}
 </div>
 
 <!-- Leaderboard modal (paid lobbies only) -->
-<div id="lb-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:10000;align-items:center;justify-content:center;padding:1rem;" onclick="if(event.target===this)closeLeaderboard()">
+<div id="lb-modal" class="soc" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:10000;align-items:center;justify-content:center;padding:1rem;" onclick="if(event.target===this)closeLeaderboard()">
   <div class="card" style="max-width:660px;width:100%;padding:1.5rem;max-height:88vh;display:flex;flex-direction:column;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-      <div class="logo" style="font-size:clamp(16px,3vw,22px);letter-spacing:2px;"><span class="ss1">🏆</span> LEADERBOARD</div>
-      <button class="copy-btn" onclick="closeLeaderboard()">✕ CLOSE</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div class="soc-title">👥 Social</div>
+      <button class="soc-x" onclick="closeLeaderboard()">✕</button>
+    </div>
+    <div class="soc-tabs">
+      <button class="soc-tab on" data-t="lb" onclick="socTab('lb')">🏆 Leaderboard</button>
+      <button class="soc-tab" data-t="search" onclick="socTab('search')">🔍 Search</button>
+      <button class="soc-tab" data-t="profile" onclick="socTab('profile')">👤 Profile</button>
+      <button class="soc-tab" data-t="friends" onclick="socTab('friends')">👥 Friends</button>
     </div>
     <div style="text-align:center;font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);letter-spacing:1px;margin-bottom:.85rem;">
       <span class="ndot" style="display:inline-block;width:6px;height:6px;margin-right:4px;vertical-align:middle;"></span>LIVE · WAGERED LOBBIES ONLY · SORTED BY EARNINGS
@@ -466,76 +622,80 @@ body.mctl #voice-speakers{left:150px;}
 </div>
 
 <!-- Player profile modal — full stats + earnings chart (opened from a leaderboard row) -->
-<div id="profile-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10001;align-items:center;justify-content:center;padding:1rem;" onclick="if(event.target===this)closeProfile()">
-  <div class="card" style="max-width:560px;width:100%;padding:1.5rem;max-height:88vh;overflow-y:auto;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem;">
+<div id="profile-modal" class="soc" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10001;align-items:center;justify-content:center;padding:1rem;" onclick="if(event.target===this)closeProfile()">
+  <div class="card" style="max-width:620px;width:100%;padding:1.5rem;max-height:88vh;overflow-y:auto;">
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div class="soc-title">👥 Social</div>
+      <button class="soc-x" onclick="closeProfile()">✕</button>
+    </div>
+    <div class="soc-tabs">
+      <button class="soc-tab" data-t="lb" onclick="socTab('lb')">🏆 Leaderboard</button>
+      <button class="soc-tab" data-t="search" onclick="socTab('search')">🔍 Search</button>
+      <button class="soc-tab on" data-t="profile" onclick="socTab('profile')">👤 Profile</button>
+      <button class="soc-tab" data-t="friends" onclick="socTab('friends')">👥 Friends</button>
+    </div>
+    <div class="pf-card" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px;">
       <div>
-        <div id="pf-name" style="font-family:'Press Start 2P',monospace;font-size:13px;color:var(--y);">--</div>
-        <div style="display:flex;align-items:center;gap:6px;margin-top:5px;">
-          <div id="pf-addr" style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);">--</div>
+        <div id="pf-name" style="font-size:18px;font-weight:700;color:#fff;">--</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+          <div id="pf-addr" style="font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);word-break:break-all;">--</div>
           <button class="copy-btn" onclick="copyAddress(_pfAddress)" style="font-size:7px;padding:3px 7px;">📋</button>
         </div>
       </div>
-      <button class="copy-btn" onclick="closeProfile()">✕ CLOSE</button>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:7px;margin-bottom:1rem;">
-      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
-        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">EARNED</div>
-        <div style="font-size:11px;color:var(--g);font-weight:700;" id="pf-earned">--</div>
-      </div>
-      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
-        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">WAGERED</div>
-        <div style="font-size:11px;color:var(--y);font-weight:700;" id="pf-wagered">--</div>
-      </div>
-      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
-        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">GAMES</div>
-        <div style="font-size:11px;font-weight:700;" id="pf-games">--</div>
-      </div>
-      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
-        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">WIN %</div>
-        <div style="font-size:11px;color:var(--c);font-weight:700;" id="pf-winrate">--</div>
-      </div>
-      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
-        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">WINS</div>
-        <div style="font-size:11px;color:var(--g);font-weight:700;" id="pf-wins">--</div>
-      </div>
-      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
-        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">LOSSES</div>
-        <div style="font-size:11px;color:var(--r);font-weight:700;" id="pf-losses">--</div>
-      </div>
-      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
-        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">KILLS</div>
-        <div style="font-size:11px;color:var(--r);font-weight:700;" id="pf-kills">--</div>
-      </div>
-      <div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;">
-        <div style="font-family:'Press Start 2P',monospace;font-size:5px;color:var(--muted);margin-bottom:4px;">K/D</div>
-        <div style="font-size:11px;font-weight:700;" id="pf-kd">--</div>
+      <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;">
+        <button class="btn btn-y btn-sm" style="margin:0;font-size:7px;padding:8px 12px;" onclick="addFriend(_pfName,_pfAddress)">➕ ADD FRIEND</button>
+        <button class="btn btn-g btn-sm" style="margin:0;font-size:7px;padding:8px 12px;" onclick="openSendModal(_pfAddress,_pfName)">💸 SEND MONEY</button>
       </div>
     </div>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-      <div style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);">EARNINGS OVER TIME</div>
+    <div class="pf-two">
+      <div class="pf-card">
+        <h4>🏆 Game Performance</h4>
+        <div class="pf-grid">
+          <div class="pf-cell"><span>Win Rate</span><b style="color:var(--y);" id="pf-winrate">--</b></div>
+          <div class="pf-cell"><span>Games Won</span><b style="color:var(--g);" id="pf-wins">--</b></div>
+          <div class="pf-cell"><span>Games Played</span><b id="pf-games">--</b></div>
+          <div class="pf-cell"><span>Losses</span><b style="color:var(--r);" id="pf-losses">--</b></div>
+        </div>
+      </div>
+      <div class="pf-card">
+        <h4>🎯 Combat &amp; Money</h4>
+        <div class="pf-grid">
+          <div class="pf-cell"><span>Eliminations</span><b style="color:#ff7c9c;" id="pf-kills">--</b></div>
+          <div class="pf-cell"><span>K/D</span><b style="color:#ffb060;" id="pf-kd">--</b></div>
+          <div class="pf-cell"><span>Total Wagered</span><b style="color:var(--y);" id="pf-wagered">--</b></div>
+          <div class="pf-cell"><span>Total Earned</span><b style="color:var(--g);" id="pf-earned">--</b></div>
+        </div>
+      </div>
+    </div>
+    <div class="pf-card" style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 13px;">
+      <div style="display:flex;align-items:center;gap:9px;">
+        <span style="font-size:13px;font-weight:700;color:#fff;">📈 Earnings</span>
+        <span style="font-size:15px;font-weight:700;color:var(--y);" id="pf-earned2"></span>
+      </div>
       <div style="display:flex;gap:4px;">
-        <button class="copy-btn pf-tf" data-tf="1" onclick="setProfileTimeframe('1')" style="padding:4px 8px;font-size:6px;">1D</button>
-        <button class="copy-btn pf-tf" data-tf="7" onclick="setProfileTimeframe('7')" style="padding:4px 8px;font-size:6px;">7D</button>
-        <button class="copy-btn pf-tf" data-tf="30" onclick="setProfileTimeframe('30')" style="padding:4px 8px;font-size:6px;">30D</button>
-        <button class="copy-btn pf-tf" data-tf="all" onclick="setProfileTimeframe('all')" style="padding:4px 8px;font-size:6px;">ALL</button>
+        <button class="copy-btn pf-tf" data-tf="1" onclick="setProfileTimeframe('1')" style="padding:4px 8px;font-size:6px;border-color:rgba(255,215,0,.5);color:var(--y);background:rgba(255,215,0,.05);">1D</button>
+        <button class="copy-btn pf-tf" data-tf="7" onclick="setProfileTimeframe('7')" style="padding:4px 8px;font-size:6px;border-color:rgba(255,215,0,.5);color:var(--y);background:rgba(255,215,0,.05);">7D</button>
+        <button class="copy-btn pf-tf" data-tf="30" onclick="setProfileTimeframe('30')" style="padding:4px 8px;font-size:6px;border-color:rgba(255,215,0,.5);color:var(--y);background:rgba(255,215,0,.05);">30D</button>
+        <button class="copy-btn pf-tf" data-tf="all" onclick="setProfileTimeframe('all')" style="padding:4px 8px;font-size:6px;border-color:rgba(255,215,0,.5);color:var(--y);background:rgba(255,215,0,.05);">ALL</button>
       </div>
     </div>
     <canvas id="pf-chart" width="600" height="180" style="width:100%;height:150px;background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:8px;"></canvas>
     <div id="pf-chart-empty" style="display:none;text-align:center;color:var(--muted);font-size:10px;padding:1rem 0;">No earnings history yet — cash out or win a kill to start the chart.</div>
-    <div style="display:flex;gap:8px;margin-top:1rem;">
-      <button class="btn btn-g btn-sm" style="flex:1;" onclick="openSendModal(_pfAddress,_pfName)">💸 SEND</button>
-      <button class="btn btn-c btn-sm" style="flex:1;" onclick="addFriend(_pfName,_pfAddress)">➕ ADD FRIEND</button>
-    </div>
   </div>
 </div>
 
 <!-- Friends modal — personal contact book (localStorage), copy/send to saved wallets -->
-<div id="friends-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:10000;align-items:center;justify-content:center;padding:1rem;" onclick="if(event.target===this)closeFriends()">
-  <div class="card" style="max-width:460px;width:100%;padding:1.5rem;max-height:85vh;display:flex;flex-direction:column;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.85rem;">
-      <div class="logo" style="font-size:clamp(16px,3vw,22px);letter-spacing:2px;">👥 FRIENDS</div>
-      <button class="copy-btn" onclick="closeFriends()">✕ CLOSE</button>
+<div id="friends-modal" class="soc" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:10000;align-items:center;justify-content:center;padding:1rem;" onclick="if(event.target===this)closeFriends()">
+  <div class="card" style="max-width:520px;width:100%;padding:1.5rem;max-height:85vh;display:flex;flex-direction:column;">
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div class="soc-title">👥 Social</div>
+      <button class="soc-x" onclick="closeFriends()">✕</button>
+    </div>
+    <div class="soc-tabs">
+      <button class="soc-tab" data-t="lb" onclick="socTab('lb')">🏆 Leaderboard</button>
+      <button class="soc-tab" data-t="search" onclick="socTab('search')">🔍 Search</button>
+      <button class="soc-tab" data-t="profile" onclick="socTab('profile')">👤 Profile</button>
+      <button class="soc-tab on" data-t="friends" onclick="socTab('friends')">👥 Friends</button>
     </div>
     <input id="fr-search" placeholder="🔍 Search player by name…" autocomplete="off" oninput="frSearchInput()"
       style="width:100%;background:rgba(0,0,0,.4);border:1px solid rgba(57,255,20,.3);border-radius:6px;color:#fff;font-size:11px;padding:9px 10px;outline:none;margin-bottom:6px;"/>
@@ -560,7 +720,7 @@ body.mctl #voice-speakers{left:150px;}
 <!-- ══ LOBBY ═════════════════════════════════════════════════ -->
 <div id="scr-lobby" class="scr">
   <div style="margin-bottom:1.5rem;text-align:center;">
-    <div class="logo" style="font-size:clamp(20px,4vw,36px);"><span class="ss1">SLITHER</span> <span class="ss2">SNAKES</span></div>
+    <div class="logo" style="font-size:clamp(20px,4vw,36px);"><span class="ss1">SNAKE</span> <span class="ss2">POT</span></div>
   </div>
   <div class="nav">
     <div style="display:flex;align-items:center;gap:8px;"><div class="ndot"></div><span class="nav-addr" id="lob-addr">--</span></div>
@@ -607,7 +767,7 @@ body.mctl #voice-speakers{left:150px;}
 <!-- ══ MATCHMAKING ═══════════════════════════════════════════ -->
 <div id="scr-mm" class="scr">
   <div class="card" style="text-align:center;">
-    <div class="logo" style="font-size:24px;margin-bottom:1.5rem;"><span class="ss1">SLITHER</span> <span class="ss2">SNAKES</span></div>
+    <div class="logo" style="font-size:24px;margin-bottom:1.5rem;"><span class="ss1">SNAKE</span> <span class="ss2">POT</span></div>
     <div class="mm-rw"><div class="mm-ring"></div><div class="mm-ico">🐍</div></div>
     <div style="font-family:'Press Start 2P',monospace;font-size:10px;color:var(--g);margin-bottom:8px;">FINDING MATCH…</div>
     <div id="mm-sub" style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);margin-bottom:1.25rem;line-height:1.9;">Connecting…</div>
@@ -1246,6 +1406,7 @@ function go(id){
   document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on'));
   const el=document.getElementById(id);
   if(el) el.classList.add('on');
+  if(id==='scr-home'){try{_homePollStart();}catch(_){}} // returning home restarts the dashboard data
   if(document.activeElement&&document.activeElement!==document.body)document.activeElement.blur();
   _gpadLastBtn=[];_gpadNavTs=0; // clear stale button state so first controller press always registers
   setTimeout(()=>gpadFocus(0),100); // re-anchor controller to first visible button on new screen
@@ -1390,12 +1551,12 @@ async function loadLeaderboard(){
     }else{
       emptyEl.style.display='none';
       rowsEl.innerHTML=players.map(p=>{
-        const medal=p.rank===1?'🥇':p.rank===2?'🥈':p.rank===3?'🥉':'#'+p.rank;
+        const medal='<span class="rkc rk'+p.rank+'">'+p.rank+'</span>';
         const cls='lb-top'+p.rank+(p.address===ST.address?' lb-me':'');
         const name=(p.name||_lbShortAddr(p.address)).replace(/[<>&]/g,'').slice(0,14);
         const attrName=name.replace(/"/g,'&quot;').replace(/'/g,'&#39;');
         return '<tr class="'+cls+'" data-address="'+p.address+'" data-name="'+attrName+'" tabindex="0">'+
-          '<td style="font-family:\'Press Start 2P\',monospace;font-size:9px;color:var(--y);">'+medal+'</td>'+
+          '<td>'+medal+'</td>'+
           '<td style="font-weight:600;">'+name+(p.address===ST.address?' <span style="color:var(--g);font-size:9px;">(YOU)</span>':'')+'</td>'+
           '<td style="text-align:right;color:var(--g);">'+_lbFmtUsd(p.earned)+'</td>'+
           '<td style="text-align:right;color:var(--muted);">'+_lbFmtUsd(p.wagered)+'</td>'+
@@ -1542,6 +1703,7 @@ async function openPlayerProfile(address,name){
     if(p.name)_pfName=p.name;
     document.getElementById('pf-name').textContent=_pfName;
     document.getElementById('pf-earned').textContent=_lbFmtUsd(p.earned);
+    {const e2=document.getElementById('pf-earned2');if(e2)e2.textContent=_lbFmtUsd(p.earned);}
     document.getElementById('pf-wagered').textContent=_lbFmtUsd(p.wagered);
     document.getElementById('pf-games').textContent=p.games||0;
     document.getElementById('pf-winrate').textContent=(p.games>0?Math.round((p.wins||0)/p.games*100):0)+'%';
@@ -1732,12 +1894,15 @@ function renderFriends(){
     const name=String(f.name||'').replace(/[<>&]/g,'').slice(0,20);
     const jsName=name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     return '<div class="fr-row">'+
-      '<div><div style="font-weight:600;font-size:12px;">'+name+'</div>'+
-      '<div style="font-family:\'Press Start 2P\',monospace;font-size:6px;color:var(--muted);margin-top:3px;">'+_lbShortAddr(f.address)+'</div></div>'+
-      '<div style="display:flex;gap:4px;">'+
+      '<div style="display:flex;align-items:center;gap:9px;min-width:0;">'+
+        '<span style="width:26px;height:26px;border-radius:50%;background:rgba(255,215,0,.14);display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0;">👤</span>'+
+        '<div style="min-width:0;"><div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+name+'</div>'+
+        '<div style="font-family:\'Press Start 2P\',monospace;font-size:6px;color:var(--muted);margin-top:3px;">'+_lbShortAddr(f.address)+'</div></div>'+
+      '</div>'+
+      '<div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">'+
         '<button class="lb-icon-btn" onclick="_frCopy(\''+jsName+'\',\''+f.address+'\')" title="Copy current wallet">📋</button>'+
         '<button class="lb-icon-btn" onclick="_frSend(\''+jsName+'\',\''+f.address+'\')" title="Send SOL to current wallet">💸</button>'+
-        '<button class="lb-icon-btn" onclick="removeFriend(\''+f.address+'\')" title="Remove" style="color:var(--r);">✕</button>'+
+        '<button class="fr-remove" onclick="removeFriend(\''+f.address+'\')">Remove</button>'+
       '</div>'+
     '</div>';
   }).join('');
@@ -1769,6 +1934,7 @@ function _onSnakeColorPick(col){
   if(myPid)_playerMeta.set(myPid,{...(_playerMeta.get(myPid)||{}),color:col});
   const my=SG&&SG.snakes.get(myPid);if(my)my.color=col;
   const pick=document.getElementById('snake-color-pick');if(pick)pick.value=col;
+  try{_custDraw();_logoDraw();}catch(_){} // live-update the customize preview + logo snake
   addToast('Snake color saved','#FFD700');
 }
 function _loadSnakeColorPick(){
@@ -1975,6 +2141,7 @@ async function finishLogin(kp){
   else await _loadAccountName(); // fresh device: pull the account's registered name so we don't join as SNAKE
   document.getElementById('home-off').style.display='none';
   document.getElementById('home-on').style.display='block';
+  _homeLoginUi(true);
   _showPracticeBtn();
   syncServerBtns();
 }
@@ -2003,6 +2170,7 @@ async function checkSession(){
     else await _loadAccountName(); // fresh device: pull the account's registered name so we don't join as SNAKE
     document.getElementById('home-off').style.display='none';
     document.getElementById('home-on').style.display='block';
+    _homeLoginUi(true);
     _showPracticeBtn();
     syncServerBtns();
   }catch(e){localStorage.removeItem('ss_last');}
@@ -2141,6 +2309,7 @@ function doLogout(){
   ST.email=''; ST.address=''; _jwt=''; _keypair=null; ST.conn=null; ST.balance=0;
   document.getElementById('home-on').style.display='none';
   document.getElementById('home-off').style.display='block';
+  _homeLoginUi(false);
   showStep('email');
   go('scr-home');
 }
@@ -2337,6 +2506,11 @@ function fetchLobbyCounts(){
         if(el('l0-cnt'))el('l0-cnt').textContent=f+' online';
         if(el('l1-cnt'))el('l1-cnt').textContent=p1+' online';
         if(el('l5-cnt'))el('l5-cnt').textContent=p5+' online';
+        // Home dashboard: top-bar chips + players-online stat share this same poll
+        if(el('hc0'))el('hc0').textContent=f;
+        if(el('hc1'))el('hc1').textContent=p1;
+        if(el('hc5'))el('hc5').textContent=p5;
+        if(el('st-online'))el('st-online').textContent=(f+p1+p5);
       }).catch(()=>{});
   },5000);
 }
@@ -6049,7 +6223,7 @@ function _drawHeadCircle(snake,r){
 }
 
 function _drawNameTag(snake,head,w){
-  if(!head)return;
+  if(!head||!snake.name)return; // menu-canvas snakes have no name — skip the empty tag box
   const fs=Math.max(9,Math.min(Math.round(w*0.7+4),18));
   ctx.save();
   ctx.font=`bold ${fs}px 'Exo 2',sans-serif`;
@@ -6277,11 +6451,135 @@ async function _checkBuild(){
   }catch(_){}
 }
 
+// ══ HOME DASHBOARD (snakepot.com layout) ══════════════════════════════════════
+// Perf notes: no new rAF loops anywhere here. The logo + customize-preview canvases render
+// ONCE (and again only on a colour change), reusing the real drawSnake renderer via the same
+// global-swap trick as the animated menu background. Data refresh only touches the network
+// while the home screen is actually on screen.
+let _selLobbyUsd=(function(){const v=+(localStorage.getItem('ss_sel_lobby')||0);return(v===1||v===5)?v:0;})();
+function selLobby(usd){_selLobbyUsd=usd;try{localStorage.setItem('ss_sel_lobby',usd);}catch(_){}_paintLobbySel();}
+function _paintLobbySel(){
+  [[0,'lb0','tb-c0'],[1,'lb1','tb-c1'],[5,'lb5','tb-c5']].forEach(([u,a,b])=>{
+    [a,b].forEach(id=>{const el=document.getElementById(id);if(el)el.classList.toggle('sel',u===_selLobbyUsd);});
+  });
+}
+function playNow(){joinLobby(_selLobbyUsd);}
+function openMyProfile(){
+  if(!ST.address){addToast('Sign in first to see your profile','#FFD700');return;}
+  openPlayerProfile(ST.address,getMyName());
+}
+function toggleDeposit(){
+  const b=document.getElementById('dep-box');if(!b)return;
+  const show=b.style.display==='none';
+  b.style.display=show?'block':'none';
+  if(show){const a=document.getElementById('dep-addr');if(a)a.textContent=ST.address||'--';}
+}
+function toggleCust(){
+  const b=document.getElementById('cust-open');if(!b)return;
+  b.style.display=b.style.display==='none'?'block':'none';
+  _custDraw();
+}
+// Menu-canvas snakes — drawn with the REAL drawSnake renderer so they're pixel-identical
+// to gameplay (owner requirement: the sprite look is canonical).
+function _uiSnake(cx,cy,ns,col,ang,amp,pts,sp,freq){
+  const path=[];
+  for(let i=0;i<pts;i++){
+    const t=i*sp;
+    path.push({
+      x:cx-Math.cos(ang)*t+Math.cos(ang+Math.PI/2)*Math.sin(i*freq)*amp,
+      y:cy-Math.sin(ang)*t+Math.sin(ang+Math.PI/2)*Math.sin(i*freq)*amp
+    });
+  }
+  return {id:'ui-'+cx+'-'+cy,path,numSections:ns,color:col,angle:ang,alive:true,boost:false,name:'',usd:0};
+}
+function _uiDrawSnake(id,snake,zoom){
+  const c=document.getElementById(id);if(!c)return;
+  const gameEl=document.getElementById('scr-game');
+  if(gameEl&&gameEl.classList.contains('on'))return; // never touch the shared renderer mid-game
+  const sc=ctx,sv=canvas,szm=_camZoom,scx=_camX,scy=_camY;
+  try{
+    ctx=c.getContext('2d');canvas=c;_camZoom=zoom;
+    _camX=c.width/(2*zoom);_camY=c.height/(2*zoom); // centre the cull viewport on THIS canvas
+    ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,c.width,c.height);
+    ctx.save();ctx.scale(zoom,zoom);drawSnake(snake);ctx.restore();
+  }catch(_){}
+  ctx=sc;canvas=sv;_camZoom=szm;_camX=scx;_camY=scy;
+}
+function _custDraw(){
+  if(!document.getElementById('cust-prev'))return;
+  const col=localStorage.getItem('ss_snake_color')||'#39FF14';
+  _uiDrawSnake('cust-prev',_uiSnake(206,72,26,col,Math.PI*0.03,14,92,1.6,0.085),2);
+}
+function _logoDraw(){
+  if(!document.getElementById('logo-snake'))return;
+  const col=localStorage.getItem('ss_snake_color')||'#39FF14';
+  _uiDrawSnake('logo-snake',_uiSnake(36,19,10,col,Math.PI*0.78,7,30,1.35,0.45),2);
+}
+let _homeDataTimer=null;
+async function _homeRefresh(){
+  const scr=document.getElementById('scr-home');
+  if(!scr||!scr.classList.contains('on'))return; // only spend network while home is visible
+  _miniFriends();
+  try{
+    if(!ST.solPrice||ST.solPrice<=0){try{await fetchPrice();}catch(_){}}
+    const r=await fetch('/api/leaderboard?game=ss');
+    const d=await r.json();
+    const box=document.getElementById('mini-lb');
+    const ps=(d.players||[]).slice(0,3);
+    if(box)box.innerHTML=ps.length?ps.map(p=>{
+      const name=(p.name||_lbShortAddr(p.address)).replace(/[<>&]/g,'').slice(0,14);
+      return '<div class="mini-row"><span class="mini-rank rk'+p.rank+'">'+p.rank+'</span><span class="mini-name">'+name+'</span><span class="mini-amt">'+_lbFmtUsd(p.earned)+'</span></div>';
+    }).join(''):'<div class="mini-empty">No paid games yet — be first!</div>';
+    const g=d.global||{};
+    const paid=document.getElementById('st-paid');
+    if(paid)paid.textContent=_lbFmtUsd(g.totalEarned);
+  }catch(_){}
+}
+function _miniFriends(){
+  const el=document.getElementById('mini-fr');if(!el)return;
+  const all=getFriends();
+  const cnt=document.getElementById('fr-mini-cnt');if(cnt)cnt.textContent=all.length;
+  el.innerHTML=all.length?all.slice(0,5).map(f=>{
+    const n=String(f.name||'').replace(/[<>&]/g,'').slice(0,16);
+    return '<div class="mini-row"><span class="mini-dot"></span><span class="mini-name">'+n+'</span></div>';
+  }).join(''):'<div class="mini-empty">No friends added yet</div>';
+}
+function _homePollStart(){
+  _homeRefresh();
+  if(!_homeDataTimer)_homeDataTimer=setInterval(_homeRefresh,30000);
+  fetchLobbyCounts(); // fills the FREE/$1/$5 chips + players-online (5s poll, stopped on join)
+}
+function _homeLoginUi(on){
+  const w=document.getElementById('wallet-panel');if(w)w.style.display=on?'block':'none';
+  if(on){
+    const av=document.getElementById('av-box');
+    if(av)av.textContent=(getMyName()||'S').charAt(0).toUpperCase();
+  }
+  _custDraw();
+}
+// Social tabs — shared across the leaderboard / profile / friends modals (they're separate
+// modals, so a tab switch closes the current one and opens the target).
+function socTab(t){
+  closeLeaderboard();closeProfile();closeFriends();
+  if(t==='lb'){openLeaderboard();}
+  else if(t==='search'){openLeaderboard();setTimeout(()=>{const s=document.getElementById('lb-search');if(s)s.focus();},60);}
+  else if(t==='profile'){
+    if(!ST.address){addToast('Sign in first to see your profile','#FFD700');openLeaderboard();t='lb';}
+    else openPlayerProfile(ST.address,getMyName());
+  }
+  else{openFriends();}
+  document.querySelectorAll('.soc-tab').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
+}
+
 document.addEventListener('DOMContentLoaded',async ()=>{
   setupOtp();
   syncServerBtns();
   _showPracticeBtn();
   _loadSnakeColorPick();
+  _paintLobbySel();
+  _logoDraw();
+  _custDraw();
+  _homePollStart();
   _applyGfx(); // re-apply the saved graphics preset AFTER the window._BODYSEGS default runs, so the preset wins
   setTimeout(_checkBuild,4000);              // capture the current build's ETag shortly after load
   setInterval(_checkBuild,90000);            // then poll for a new deploy every 90s (reloads only when idle)
