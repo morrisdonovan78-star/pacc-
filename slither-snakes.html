@@ -6764,15 +6764,62 @@ function drawArena(){
   const _cacheZoomOk=(_hexCache.zoom===_camZoom)||_zoomSettled;
   const _gridReach=Math.hypot(canvas.width,canvas.height)/(2*_camZoom);
   const _borderInView=(window._HEXBORDERGUARD===true)&&(Math.hypot(_camX,_camY)+_gridReach>=ARENA_R-2);
-  if(_hexUseCache() && !_borderInView && _cacheZoomOk){
-    _hexEnsure(false);
-    const c=_hexCache;
-    ctx.save();
-    ctx.clip();                                     // arena-circle clip (device space), same as live
-    ctx.setTransform(1,0,0,1,0,0);                  // blit in screen pixels, respecting the clip
-    ctx.drawImage(c.cv,(canvas.width-c.cv.width)/2+(c.camX-_camX)*_camZoom,(canvas.height-c.cv.height)/2+(c.camY-_camY)*_camZoom);
-    ctx.restore();
-  } else {
+  // ── ZOOM COST, ROUND 2 (measured from a 210Hz capture) ──────────────────────────────────────
+  // The live-stroke-while-zooming fix above removed the 3.64ms rebuild, but the live stroke is not
+  // free: a screen capture at 210 FPS shows `arena/bg` going 0.19ms idle -> 0.68-1.02ms for every
+  // frame of the gesture, and FPS tracking it exactly (210 -> 160-176). At 210Hz the WHOLE budget is
+  // 4.76ms, so ~0.8ms of extra blocking JS is ~17% of the frame — enough to lose 50 FPS on its own.
+  // Re-stroking 759 hexes every frame is the last real cost here.
+  //
+  // It is also unnecessary work, because of a property of THIS grid specifically: the hex radius is
+  // SCREEN-CONSTANT (`R=46/zoom` in _paintHexStrokes → always 46px on screen, pitch always 69px).
+  // Zooming therefore does NOT resize the grid at all. Screen position of lattice column c is
+  //     c*69 - camX*zoom + W/2
+  // so a zoom change only shifts the grid's screen PHASE by (cam*zoom). The cached texture is still
+  // the correct texture — it just needs a different offset. (This is also why scaling the bitmap by
+  // the zoom ratio is WRONG here and measured ~20/255 mean error: it resizes hexes that the real
+  // grid keeps fixed.) So the reuse is an UNSCALED blit — no resampling, no softness — at:
+  //     dx = (W-bw)/2 + (cache.camX*cache.zoom - camX*_camZoom)
+  // which collapses to exactly the settled blit below when the zoom hasn't changed.
+  //
+  // Guard: that phase term must stay inside the buffer's margin, or we'd slide the cached texture
+  // off the viewport and expose bare edges. |phase delta| <= margin is exactly the condition for the
+  // drawn rect to still span the screen, and it is the same margin test _hexEnsure already uses for
+  // panning. Outside it we fall back to the live stroke — never worse than today's behaviour.
+  //
+  // Not pixel-perfect in one place: _paintHexStrokes culls whole hexes on `centre outside ARENA_R`,
+  // and a hex's WORLD position depends on zoom, so the partial-hex ring right at the arena boundary
+  // can differ during the gesture. The boundary itself stays exact (the arena clip is applied LIVE
+  // on the blit), and this is the same class of edge difference the shipped border-guard removal
+  // already accepted. Interior frames are pixel-identical.
+  // Once the zoom holds still, _cacheZoomOk flips and the first branch rebuilds ONCE — so the
+  // settled picture is byte-for-byte what it has always been; only the in-flight frames differ.
+  // window._HEXZOOMBLIT===false restores the old always-live-stroke path (kill switch).
+  const _hc=_hexCache;
+  let _gridDrawn=false;
+  if(_hexUseCache() && !_borderInView){
+    if(_cacheZoomOk){
+      _hexEnsure(false);
+      ctx.save();
+      ctx.clip();                                   // arena-circle clip (device space), same as live
+      ctx.setTransform(1,0,0,1,0,0);                // blit in screen pixels, respecting the clip
+      ctx.drawImage(_hc.cv,(canvas.width-_hc.cv.width)/2+(_hc.camX-_camX)*_camZoom,(canvas.height-_hc.cv.height)/2+(_hc.camY-_camY)*_camZoom);
+      ctx.restore();
+      _gridDrawn=true;
+    }else if(_hc.cv && _hc.zoom>0 && window._HEXZOOMBLIT!==false){
+      const px=_hc.camX*_hc.zoom - _camX*_camZoom;    // screen-phase drift since the cache was built
+      const py=_hc.camY*_hc.zoom - _camY*_camZoom;
+      if(Math.abs(px)<=_hc.margin && Math.abs(py)<=_hc.margin){
+        ctx.save();
+        ctx.clip();
+        ctx.setTransform(1,0,0,1,0,0);
+        ctx.drawImage(_hc.cv,(canvas.width-_hc.cv.width)/2+px,(canvas.height-_hc.cv.height)/2+py);
+        ctx.restore();
+        _gridDrawn=true;
+      }
+    }
+  }
+  if(!_gridDrawn){
     ctx.save();ctx.clip();
     _paintHexStrokes(ctx,_camX,_camY,_camZoom,canvas.width,canvas.height);
     ctx.restore();
