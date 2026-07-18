@@ -2140,7 +2140,14 @@ async function recordWager(walletAddress,wagerLamports,txSig,lobbyId,playerName)
 
 async function settle(){
   // Payout ONLY on Cash Out — never on elimination. 90% to player, 10% to creator wallet (handled server-side).
-  if(!ST.address||!pkRoomId||ST.lobbyUsd===0)return;
+  // ⚠️ This used to bail on `!pkRoomId`. By the time a cash-out resolves the socket may already have
+  // been torn down (which nulls pkRoomId), so the payout was SILENTLY skipped — and the result screen
+  // still said "Payout sent to your wallet". That is the "only getting paid sometimes" bug. The lobby
+  // id is only used for stat scoping, so fall back to the last known room instead of abandoning
+  // someone's winnings, and never return without telling the caller what happened.
+  if(!ST.address){ console.error('[settle] no wallet loaded — cannot pay out'); return null; }
+  if(ST.lobbyUsd===0) return null;                       // free lobby: nothing to pay
+  const _payLobby = pkRoomId || _lastRoomId || (ST.lobbyUsd===1?'ss-paid-lobby-1':'ss-paid-lobby-5');
   try{
     // Refresh price right before cashout so lamport conversion is exact
     await fetchPrice().catch(()=>{});
@@ -2154,12 +2161,29 @@ async function settle(){
     const _smsg=new TextEncoder().encode('pac-arena:cashout:'+ST.address+':'+lamps+':'+ts);
     const _ssig=btoa(String.fromCharCode(...nacl.sign.detached(_smsg,_keypair.secretKey)));
     // Route through Vercel — only Vercel has ESCROW_SECRET to sign the SOL transfer
-    const r=await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':_ssig,'x-settle-ts':String(ts)},
-      body:JSON.stringify({playerAddress:ST.address,wagerLamports:lamps,lobbyId:pkRoomId,action:'cashout',gameToken:ST.entryToken||null})});
-    const d=await r.json().catch(()=>({}));
-    if(r.ok) addToast('✓ Winnings secured!','#39FF14');
-    else addToast('Cashout failed: '+(d.error||r.status),'#FF4444');
-    return r.ok ? d : null; // { playerCut, creatorCut, ... } — playerCut = net lamports to the player
+    // RETRY. A single failed fetch used to cost the player their entire cash-out: settle() returned
+    // null and the result screen still claimed the money was sent. The server side is idempotent
+    // (NX lock:co: per wallet + the pw: record is consumed atomically), so retrying is safe — a
+    // second attempt after a successful one simply finds no wager on record.
+    let lastErr=null;
+    for(let attempt=0;attempt<4;attempt++){
+      if(attempt>0){ await new Promise(r=>setTimeout(r,1500*attempt)); }
+      try{
+        const r=await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':_ssig,'x-settle-ts':String(ts)},
+          body:JSON.stringify({playerAddress:ST.address,wagerLamports:lamps,lobbyId:_payLobby,action:'cashout',gameToken:ST.entryToken||null})});
+        const d=await r.json().catch(()=>({}));
+        if(r.ok){ addToast('✓ Winnings secured!','#39FF14'); return d; }
+        // "already cashed out / no wager on record" means a previous attempt already paid — done.
+        if(/already cashed|no wager on record/i.test(d.error||'')){ return d||{}; }
+        lastErr=d.error||('HTTP '+r.status);
+        if(attempt<3) addToast('Payout retrying… ('+(attempt+2)+'/4)','#FFD700',2500);
+      }catch(e){ lastErr=e.message||String(e); }
+    }
+    // Out of retries — tell the player the truth and leave a record they can quote.
+    try{ localStorage.setItem('ss_lastCashoutFail', JSON.stringify({ts:Date.now(),lamps,addr:ST.address,err:String(lastErr)})); }catch(_){}
+    console.error('[settle] CASHOUT FAILED after retries:',lastErr);
+    addToast('⚠ Cashout did not go through: '+lastErr+' — your wager is still on record, try Cash Out again','#FF4444',9000);
+    return null;
   }catch(e){console.warn('[settle]',e); return null;}
 }
 
@@ -6168,7 +6192,9 @@ async function endSnakeGame(reason,killerId){
         _payoutEl.textContent='💰 YOU RECEIVED $'+_netUsd.toFixed(2)+'  ('+_netSol.toFixed(4)+' SOL)';
         const _subEl=document.getElementById('rsub'); if(_subEl)_subEl.textContent='Sent to your wallet — 10% fee applied';
       }else{
-        _payoutEl.textContent='💰 Payout sent to your wallet';
+        // settle() returned null = the payout did NOT complete. Never claim it did.
+        _payoutEl.textContent='⚠ Payout did not complete — your wager is still on record';
+        _payoutEl.style.color='#FF4444';
       }
     }
   }
