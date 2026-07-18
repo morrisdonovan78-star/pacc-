@@ -1320,6 +1320,9 @@ let _joinGen=0;
 // and the player was sent home 3s later before they could read it. _joinStage narrows the throw to a
 // phase; _ssJoinFail() below captures the rest and PERSISTS it so a booted player can report it.
 let _joinStage='idle';
+// Set for exactly one retry after a connect timeout, then cleared. Polling always works where
+// WebSocket is stalled by a middlebox or a slow upgrade, so it's the right second attempt.
+let _ssForcePolling=false;
 let GAME_SERVER=localStorage.getItem('ss_server')||'NA';
 let REGION=localStorage.getItem('ss_region')||'US';
 
@@ -2108,37 +2111,16 @@ async function _redeemDeposit(lamps,sig,roomId,playerName,alreadyConfirmed){
     if(i>0){ lg('mm-log','Still verifying deposit… ('+(i+1)+'/'+tries+')','lwarn'); await new Promise(r=>setTimeout(r,2500)); }
     try{
       const res=await recordWager(ST.address,lamps,sig,roomId,playerName);
-      try{ localStorage.removeItem('ss_pending_dep'); }catch(_){}   // redeemed — never reuse it
       return res;
     }catch(e){
       lastErr=e;
       // A deposit that was already registered means we're done — the wager is on record.
-      if(/already registered/i.test(e.message||'')){ try{ localStorage.removeItem('ss_pending_dep'); }catch(_){} throw e; }
+      // A deposit already on record means the wager IS registered — surface it plainly rather
+      // than silently retrying a signature the server will keep rejecting.
+      if(/already registered/i.test(e.message||'')) throw e;
     }
   }
   throw new Error((lastErr&&lastErr.message)||'Could not verify deposit');
-}
-
-// If a previous attempt paid but never completed, the SOL is already in escrow. Redeem THAT instead
-// of charging again. api/join.js only sets its replay guard after a SUCCESSFUL verification, so an
-// unredeemed signature is still valid to submit.
-async function _tryPendingDeposit(usd,lamps,roomId){
-  let p=null;
-  try{ p=JSON.parse(localStorage.getItem('ss_pending_dep')||'null'); }catch(_){}
-  if(!p||!p.sig)return null;
-  // Only reuse it for the SAME wallet, SAME tier and SAME amount, and only while it's recent.
-  if(p.addr!==ST.address||Number(p.usd)!==Number(usd)||Number(p.lamps)!==Number(lamps))return null;
-  if(Date.now()-Number(p.ts||0)>3600000){ try{ localStorage.removeItem('ss_pending_dep'); }catch(_){} return null; }
-  lg('mm-log','Found an unused deposit — reusing it (not charging again)…','lwarn');
-  try{
-    const res=await _redeemDeposit(lamps,p.sig,roomId,getMyName(),false);
-    lg('mm-log','Previous deposit recovered ✓','lok');
-    return res;
-  }catch(e){
-    lg('mm-log','Could not reuse it ('+e.message+') — making a new deposit','lwarn');
-    try{ localStorage.removeItem('ss_pending_dep'); }catch(_){}
-    return null;
-  }
 }
 
 async function recordWager(walletAddress,wagerLamports,txSig,lobbyId,playerName){
@@ -2729,19 +2711,6 @@ async function joinLobby(usd){
     const from=new solanaWeb3.PublicKey(ST.address);
     const lamps=Math.floor(ST.wagerSol*solanaWeb3.LAMPORTS_PER_SOL);
     ST.cashoutLamports=lamps;
-    const _roomId=usd===1?'ss-paid-lobby-1':'ss-paid-lobby-5';
-    // Did a previous attempt already pay without completing? Redeem that deposit instead of taking
-    // the player's money a second time.
-    const _recovered=await _tryPendingDeposit(usd,lamps,_roomId);
-    if(_recovered){
-      if(_myGen!==_joinGen)return;
-      ST.hasEscrow=true; ST.entryToken=_recovered.gameToken||null;
-      document.getElementById('mm-sub').textContent='Wager locked · Joining live lobby…';
-      await refreshBal();
-      if(_myGen!==_joinGen)return;
-      pkConnect(_roomId,ST.entryToken);
-      return;
-    }
     const tx=new solanaWeb3.Transaction().add(
       solanaWeb3.SystemProgram.transfer({fromPubkey:from,toPubkey:escPubkey,lamports:lamps})
     );
@@ -2760,11 +2729,6 @@ async function joinLobby(usd){
     const _sndr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:2,method:'sendTransaction',params:[_rawB64,{encoding:'base64',preflightCommitment:'confirmed'}]})});
     const _sndd=await _sndr.json();if(_sndd.error)throw new Error('Send failed: '+_sndd.error.message);
     const sig=_sndd.result;
-    // The SOL has left the wallet the moment this signature exists. Remember it BEFORE we start
-    // waiting: if anything below fails, the deposit is real and sitting in escrow, and a retry must
-    // REDEEM it rather than paying a second time (see the pending-deposit check at the top of the
-    // paid flow). Without this, a failed confirmation cost the player their stake twice.
-    try{ localStorage.setItem('ss_pending_dep', JSON.stringify({sig,lamps,usd,addr:ST.address,ts:Date.now()})); }catch(_){}
     lg('mm-log','Confirming on-chain…','lwarn');
     let _txConfirmed=false;
     // Poll FAST at first (Solana usually confirms in 0.4–0.8s) then ease off, instead of a flat
@@ -2917,7 +2881,11 @@ async function pkConnect(roomId,gameToken,spectate){
       // via the connect_error handler below (it flips opts to ['polling','websocket'] and reconnects)
       // and the 5s init-guard — same end state as before for them, but the majority stop getting
       // trapped on polling. One-line revert if ever needed: swap the array back.
-      transports:['websocket','polling'],
+      // Normally WebSocket-first (see the long note below). _ssForcePolling flips that for ONE
+      // retry after a connect timeout: spectators get no other fallback (the polling recovery a
+      // few lines down is gated `if(!spectate)`), so a stalled WS upgrade just ran out the 15s
+      // clock and failed the watch — the "had to try three times to spectate" report.
+      transports:_ssForcePolling?['polling','websocket']:['websocket','polling'],
       upgrade:true,
       // Bound the per-attempt connect time so a SILENTLY-blocked WebSocket (middlebox that drops the
       // handshake with no RST) can't hang: connect_error then fires at ~7s → the handler below flips
@@ -3428,6 +3396,7 @@ async function pkConnect(roomId,gameToken,spectate){
       launchSnakeGame();
     }
     _joinStage='joined';
+    return true;
 
   }catch(e){
     _ssJoinFail(e,roomId,spectate);
@@ -3435,7 +3404,10 @@ async function pkConnect(roomId,gameToken,spectate){
       lg('mm-log','Check your internet connection','lwarn');
     if(_sio){try{_sio.disconnect();}catch(_){}} _sio=null;
     ablyChannel=null; _joiningLobby=false; _lobbyIsPaid=false;
-    setTimeout(()=>{try{go('scr-lobby');}catch(_){}},3000);
+    // A failed WATCH must not dump you home: watching is free and the caller retries over polling.
+    // Only a real (paid/free) JOIN owes the player a trip back to the lobby.
+    if(!spectate) setTimeout(()=>{try{go('scr-lobby');}catch(_){}},3000);
+    return false;   // let the caller decide whether to retry
   }
 }
 
@@ -3512,7 +3484,17 @@ async function enterWatchMode(region,tier){
   if(_sio)pkDisconnect(); // switching lobbies from an existing watch session, or first entry
   document.getElementById('watch-switch').style.display='flex';
   setGameServer(region==='EU'?'EU':'NA');
-  await pkConnect('ss-paid-lobby-'+tier,null,true);
+  // ONE automatic retry over polling if the first attempt times out. Watching is free and
+  // read-only, so a retry can't cost anyone anything — and previously a stalled WebSocket just
+  // failed the watch outright, which is why spectating sometimes took several manual attempts.
+  let _ok=await pkConnect('ss-paid-lobby-'+tier,null,true);
+  if(!_ok){
+    lg('mm-log','Retrying over HTTP polling…','lwarn');
+    _ssForcePolling=true;
+    try{ _ok=await pkConnect('ss-paid-lobby-'+tier,null,true); }
+    finally{ _ssForcePolling=false; }
+    if(!_ok){ addToast('Could not reach that arena — try another server','#FF4444',5000); go('scr-lobby'); return; }
+  }
   const bar=document.getElementById('spectate-bar');
   if(bar){
     bar.style.display='flex';
@@ -3698,15 +3680,17 @@ function _wgOnRoster(d){
       if(w.status==='open'){ _wg.live.delete(w.id); _wg.open.set(w.id,Object.assign({},_wg.open.get(w.id)||{},w)); }
       else if(w.status==='matched'){ _wg.open.delete(w.id); _wg.live.set(w.id,Object.assign({},_wg.live.get(w.id)||{},w)); }
     }
-    // Drop anything the server no longer lists, but give a just-created wager a grace period: the
-    // server may not have reconciled it yet and yanking it would make our own fresh bet flicker.
+    // Prune ONLY the open book. A MATCHED wager must never be removed by a sync: real money is
+    // committed on both sides, and the only thing allowed to retire it is an actual settled/returned
+    // event. The server's in-memory list loses matched wagers across a restart (and isn't rebuilt at
+    // all while a lobby has no live game to reconcile), so pruning on its say-so made an accepted bet
+    // vanish from BOTH players' screens before it settled. Open wagers legitimately expire, so those
+    // still get pruned — with a grace period so a freshly created one can't flicker out.
     const now=Date.now();
-    for(const m of [_wg.open,_wg.live]){
-      for(const [id,w] of Array.from(m)){
-        if(seen.has(id))continue;
-        if(now-Number(w.createdTs||0)<15000)continue;
-        m.delete(id);
-      }
+    for(const [id,w] of Array.from(_wg.open)){
+      if(seen.has(id))continue;
+      if(now-Number(w.createdTs||0)<15000)continue;
+      _wg.open.delete(id);
     }
     if(before!==(_wg.open.size+'/'+_wg.live.size))changed=true;
   }
@@ -3832,7 +3816,11 @@ function _wgSlipHtml(w){
   const me=_wgMyAddr();
   const iWon=(w.status==='settled'&&w.winner===me);
   const iLost=(w.status==='settled'&&w.winner&&w.winner!==me);
-  let h='<div style="background:rgba(255,255,255,.03);border:1px solid #2c2a1f;border-radius:10px;padding:9px;margin-bottom:7px">';
+  // A finished ticket can be cleared off your own slip. Live ones deliberately get no × — money is
+  // still riding on them and the server refuses to hide those anyway.
+  const _done=(w.status==='settled'||w.status==='returned'||w.status==='cancelled');
+  let h='<div style="position:relative;background:rgba(255,255,255,.03);border:1px solid #2c2a1f;border-radius:10px;padding:9px;margin-bottom:7px">';
+  if(_done)h+='<span data-wg-hide="'+_wgEsc(w.id)+'" title="Remove from my bets" style="position:absolute;top:5px;right:7px;cursor:pointer;color:#5a5238;font-size:14px;line-height:1;font-weight:700">×</span>';
   h+='<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:5px">';
   h+='<span style="font-size:11px;font-weight:700;color:#f4e9c8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_wgEsc(_wgTitle(w))+'</span>';
   h+=_wgStatusChip(w.status)+'</div>';
@@ -4002,6 +3990,11 @@ function _wgRender(){
       if(_wg.myTab==='settled')arr=arr.filter(w=>w.status==='settled');
       else if(_wg.myTab==='returned')arr=arr.filter(w=>w.status==='returned'||w.status==='cancelled');
       else if(_wg.myTab!=='all')arr=arr.filter(w=>w.status===_wg.myTab);
+      // Clearing FINISHED tickets only. A live bet still has money on it, so it is never clearable
+      // — and this only hides them from YOUR slip; the wager record itself is kept for settlement
+      // and history (see wager-hide in api/settle.js).
+      const _fin=arr.filter(w=>w.status==='settled'||w.status==='returned'||w.status==='cancelled');
+      if(_fin.length>1)h+='<button id="wg-clear-fin" style="width:100%;background:transparent;color:#8a7c54;border:1px solid #2c2a1f;border-radius:8px;font-size:9px;font-weight:700;padding:6px;cursor:pointer;margin-bottom:8px">🗑 CLEAR '+_fin.length+' FINISHED</button>';
       if(!arr.length)h+='<div style="font-size:10px;color:#6b6142;text-align:center;padding:16px 0">Nothing here yet.</div>';
       else for(const w of arr)h+=_wgSlipHtml(w);
     }
@@ -4014,6 +4007,8 @@ function _wgRender(){
   const x=p.querySelector('#wg-x'); if(x)x.onclick=_wgClosePanel;
   on('[data-wg-tab]',function(){ _wg.tab=this.getAttribute('data-wg-tab'); _wgRender(); });
   on('[data-wg-mt]',function(){ _wg.myTab=this.getAttribute('data-wg-mt'); _wgRender(); });
+  on('[data-wg-hide]',function(){ _wgHide(this.getAttribute('data-wg-hide')); });
+  const _cf=p.querySelector('#wg-clear-fin'); if(_cf)_cf.onclick=()=>_wgHide(null,true);
   on('[data-wg-f]',function(){ _wg.filterUsd=Number(this.getAttribute('data-wg-f'))||0; _wgRender(); });
   const nb=p.querySelector('#wg-new'); if(nb)nb.onclick=()=>{ _wg.form={type:'cashout',subject:(_wg.roster[0]||{}).pid||null,subject2:null,side:'YES',durationMs:60000,usd:5}; _wgRender(); };
   const fx=p.querySelector('#wg-form-x'); if(fx)fx.onclick=()=>{ _wg.form=null; _wgRender(); };
@@ -4142,6 +4137,28 @@ async function _wgCreate(){
     if(d.wager){_wg.open.set(d.wager.id,d.wager);_wg.mine.unshift(d.wager);}
     refreshBal().catch(()=>{}); _wgRender();
   }catch(e){ console.warn('[wg create]',e); addToast('Bet error: '+(e.message||e),'#FF4444',6000); }
+  finally{ _wg.busy=false; }
+}
+// Clear finished tickets off MY bet slip. This removes them from my personal index only — the
+// wager record is kept server-side for settlement and history, and a bet that is still live is
+// refused by the API (and has no × in the UI to begin with).
+async function _wgHide(id,all){
+  if(!_wgGuard())return;
+  const finished=w=>w.status==='settled'||w.status==='returned'||w.status==='cancelled';
+  if(all&&!confirm('Remove all finished bets from your list? This only clears YOUR history — payouts are unaffected.'))return;
+  _wg.busy=true;
+  try{
+    const body=all?{action:'wager-hide',playerAddress:ST.address,all:true}
+                  :{action:'wager-hide',playerAddress:ST.address,wagerId:id};
+    const r=await fetch('/api/settle',{method:'POST',headers:_wgSignedHeaders('wager-hide',0),body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok||!d.ok){ addToast(d.error||'Could not remove that bet','#FF6600',5000); return; }
+    // Mirror it locally so the list updates without a refetch.
+    _wg.mine=all?_wg.mine.filter(w=>!finished(w)):_wg.mine.filter(w=>w.id!==id);
+    if(d.skipped)addToast(d.skipped+' still-live bet'+(d.skipped>1?'s':'')+' kept','#FFD700',4000);
+    else addToast(all?('Cleared '+(d.hidden||0)+' finished bet'+((d.hidden||0)===1?'':'s')):'Bet removed from your list','#8a7c54');
+    _wgRender();
+  }catch(e){ addToast('Error: '+(e.message||e),'#FF4444',5000); }
   finally{ _wg.busy=false; }
 }
 async function _wgAccept(id){

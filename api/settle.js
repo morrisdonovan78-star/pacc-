@@ -127,6 +127,32 @@ async function rpc(method, params) {
   }
 }
 
+// Like rpc(), but for LOOKUPS where a node legitimately answers "not found" (null). Racing and
+// taking the fastest reply means one un-indexed node can report not-found while another already has
+// the transaction — which made bet deposits fail verification and hang on "Escrowing bet...".
+// Resolve on the first node that actually HAS it; only report not-found once every node has spoken.
+async function rpcFound(method, params) {
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
+  const one = async (url) => {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (d.error) throw new Error('RPC ' + d.error.code + ': ' + d.error.message);
+    return d.result;
+  };
+  return await new Promise(resolve => {
+    let left = RPCS.length, settled = false;
+    if (!left) return resolve(null);
+    for (const url of RPCS) {
+      one(url).then(res => {
+        if (settled) return;
+        if (res != null) { settled = true; return resolve(res); }
+        if (--left === 0) { settled = true; resolve(null); }
+      }).catch(() => { if (settled) return; if (--left === 0) { settled = true; resolve(null); } });
+    }
+  });
+}
+
 // ── Batched getBalance + getLatestBlockhash in ONE HTTP request ───────────────
 // JSON-RPC batching halves pre-transaction RPC calls (2 → 1 HTTP round-trip).
 // JSON-RPC batching halves pre-transaction RPC round-trips (2 → 1 HTTP request).
@@ -361,7 +387,7 @@ async function verifyBetDepositTx(txSig, walletAddress, lamports, escrowB58) {
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt > 0) await sleep(1500);
     let tx;
-    try { tx = await rpc('getTransaction', [txSig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]); }
+    try { tx = await rpcFound('getTransaction', [txSig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]); }
     catch (_) { continue; } // transient RPC error — retry
     if (!tx) continue;      // not indexed yet — retry
     if (tx.meta && tx.meta.err) throw new Error('Deposit tx failed on-chain');
@@ -486,6 +512,7 @@ const WG_TTL       = 604800;   // wager records live 7 days (history)
 // 7-day TTL meant a single attempt that died between claiming it and paying (Vercel freeze, crash)
 // blocked every future payout forever and stranded the stake. Short TTL = self-releasing.
 const WG_PAY_LOCK_TTL = 180;
+
 const WG_OPEN_WINDOW_MS = 60000; // how long a new wager stays takeable before it's returned unmatched
 const WG_RESERVE_MS = 90000;   // an acceptor has 90s to land their deposit before the claim expires
 // A matched wager that the game never resolved is VOIDED after this long and both stakes are
@@ -1271,6 +1298,48 @@ module.exports = async function handler(req, res) {
     // lock by wager-return. Removing the endpoint (not just the button) means a creator cannot pull a
     // wager back via the API either, which also closes the free-option abuse: post a wager, watch how
     // the snake starts doing, then yank it before anyone can take the other side.
+
+    // ── wager-hide: clear finished tickets off YOUR OWN bet slip ────────────────────────────────
+    // Deliberately does NOT delete the wager record. `wg:<id>` is financial history: the sweep, the
+    // settle idempotency guards (wgpaid:/wgvoid:) and any dispute all read it. What gets removed is
+    // the id from `wgu:<address>` — the caller's personal index — so the ticket disappears from
+    // THEIR slip and nobody else's, and nothing about the money changes.
+    //
+    // Guards:
+    //   * signature-gated (this block sits below the wallet-signature check), so you can only ever
+    //     clear your own slip.
+    //   * TERMINAL statuses only. An open/reserved/matched wager still has money riding on it, and
+    //     hiding it would let someone lose track of a stake that is still owed to them.
+    //   * you must actually be a party to it.
+    // `all: true` clears every finished ticket in one go; otherwise pass a single wagerId.
+    if (action === 'wager-hide') {
+      const addr = playerAddress;
+      if (!addr) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'playerAddress required' }); }
+      const TERMINAL = [P2P.STATUS.SETTLED, P2P.STATUS.RETURNED, P2P.STATUS.CANCELLED];
+      const wantAll = body.all === true || body.all === 'true';
+      let ids = [];
+      if (wantAll) {
+        const z = await kvZrevrange('wgu:' + addr, 0, 199);
+        if (Array.isArray(z)) for (let i = 0; i < z.length; i += 2) ids.push(z[i]);
+      } else {
+        const one = String(body.wagerId || '');
+        if (!one) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wagerId or all required' }); }
+        ids = [one];
+      }
+      let hidden = 0, skipped = 0;
+      for (const id of ids) {
+        const w = await wgLoad(id);
+        if (!w) { await kvZrem('wgu:' + addr, id).catch(() => {}); hidden++; continue; }  // dangling id
+        const mine = (w.creator === addr || w.acceptor === addr);
+        const finished = TERMINAL.indexOf(w.status) >= 0;
+        if (!mine || !finished) { skipped++; continue; }
+        await kvZrem('wgu:' + addr, id).catch(() => {});
+        hidden++;
+      }
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, hidden, skipped,
+        note: skipped ? 'skipped bets that are still live or not yours' : undefined });
+    }
 
     // ── solvency: READ-ONLY view of escrow vs every claim against it ──────────────────────────
     // There was no way to see this from outside, which is exactly why "it says he won but nobody
