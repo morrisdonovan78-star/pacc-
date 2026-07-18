@@ -503,6 +503,30 @@ function verifySnakeSig(region, lobby, pid, name, ipHash, expTs, sig) {
   try { return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(sig))); } catch (_) { return false; }
 }
 
+// ── ANTI-SNIPE: the subject must still be IN THE ARENA at the moment you take the bet ──────────
+// The game server only signs snakes that are currently alive (wgBettableSnakes filters on sn.alive)
+// and re-signs the whole roster every 4s with a fresh expiry. So "holds a roster signature issued
+// seconds ago" is a proof that the snake has not yet died or cashed out.
+//
+// Why this is needed: verifySnakeSig alone only asserts `exp > now`, and an entry stays valid for
+// WG_ROSTER_TTL (180s) — while a wager is takeable for 60s. Nothing re-checked the subject after
+// CREATE, so an already-decided wager could be taken for free:
+//     Alice posts "VIPER cashes out — YES". VIPER dies 10s later. The wager is still open.
+//     Bob takes the NO side and collects 1.84x at zero risk.
+// That needs no collusion and no rigging, just watching — so it is enforced on RESERVE (the gate
+// before any money moves), for every subject of every type.
+//
+// TTL_MIRROR must match WG_ROSTER_TTL in the game server. If they ever diverge this only becomes
+// STRICTER (a smaller server TTL means fewer signatures qualify), never permissive, so a mismatch
+// cannot open the hole back up — it would just reject takes until corrected.
+const WG_ROSTER_TTL_MIRROR = 180000;
+const WG_SIG_MAX_AGE_MS    = 25000;   // roster re-signs every ~4s, so 25s is generous slack
+function isFreshSnakeSig(region, lobby, pid, name, ipHash, expTs, sig) {
+  if (!verifySnakeSig(region, lobby, pid, name, ipHash, expTs, sig)) return false;
+  const issuedAt = Number(expTs) - WG_ROSTER_TTL_MIRROR;
+  return (Date.now() - issuedAt) <= WG_SIG_MAX_AGE_MS;
+}
+
 // Stable, privacy-preserving fingerprint of the caller's IP. Same secret on the game server, so the
 // same network produces the same hash on both sides — raw IPs are never stored.
 function clientIpHash(req) {
@@ -592,7 +616,7 @@ async function wgPayOne(esc, toAddr, lamports, tag) {
 function wgPublic(w) {
   if (!w) return null;
   return {
-    id: w.id, lobby: w.lobby, region: w.region, type: w.type,
+    id: w.id, lobby: w.lobby, region: w.region, type: w.type, duel: !!w.duel,
     subject: w.subject, subjectName: w.subjectName, subject2: w.subject2, subject2Name: w.subject2Name,
     side: w.side, takerSide: P2P.opposingSide(w.type, w.side),
     stake: w.stakeLamports, potentialWin: P2P.potentialWin(w.stakeLamports),
@@ -888,15 +912,21 @@ module.exports = async function handler(req, res) {
 
       if (!creator || b58Decode(creator).length !== 32) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'bad creator address' }); }
 
+      const isDuel = body.duel === true || body.duel === 'true';
       const vErr = P2P.validateCreate({ typeId, side, stakeLamports: stake, lockTs, nowMs: now,
-        subject: body.subject, subject2: body.subject2, minStake: WG_MIN_STAKE, maxStake: WG_MAX_STAKE });
+        // subject2 is passed through UNCHANGED even for a duel: the engine must REJECT a duel that
+        // tries to name its opponent, not silently drop it. Nulling it here would have hidden the
+        // rule and quietly created a different wager than the caller asked for.
+        subject: body.subject, subject2: body.subject2,
+        minStake: WG_MIN_STAKE, maxStake: WG_MAX_STAKE, creator, duel: isDuel });
       if (vErr) { clearTimeout(guard); done = true; return res.status(400).json({ error: vErr }); }
 
       // Subject snake(s) must carry the game server's signature for THIS arena.
       if (!verifySnakeSig(region, lobby, body.subject, body.subjectName, body.subjIpHash, body.subjExp, body.subjSig)) {
         clearTimeout(guard); done = true; return res.status(403).json({ error: 'Invalid or expired snake — refresh and try again' });
       }
-      const needs2 = P2P.getBetType(typeId).needsSubject2;
+      // A duel carries no second snake at create — the opponent is whoever accepts, verified then.
+      const needs2 = P2P.getBetType(typeId).needsSubject2 && !isDuel;
       if (needs2 && !verifySnakeSig(region, lobby, body.subject2, body.subject2Name, body.subj2IpHash, body.subj2Exp, body.subj2Sig)) {
         clearTimeout(guard); done = true; return res.status(403).json({ error: 'Invalid or expired second snake' });
       }
@@ -919,9 +949,10 @@ module.exports = async function handler(req, res) {
 
       const id = 'w' + now.toString(36) + Math.random().toString(36).slice(2, 8);
       const w = {
-        id, region, lobby, type: typeId, side,
+        id, region, lobby, type: typeId, side, duel: isDuel,
         subject: body.subject, subjectName: String(body.subjectName || '').slice(0, 20),
-        subject2: body.subject2 || null, subject2Name: String(body.subject2Name || '').slice(0, 20),
+        subject2: isDuel ? null : (body.subject2 || null),
+        subject2Name: isDuel ? '' : String(body.subject2Name || '').slice(0, 20),
         // kept so the ACCEPTOR can be self-bet checked too (never exposed publicly)
         subjIpHash: body.subjIpHash || '', subj2IpHash: body.subj2IpHash || '',
         durationMs: Math.max(0, Math.floor(Number(body.durationMs) || 0)),
@@ -960,6 +991,43 @@ module.exports = async function handler(req, res) {
         }
         const aErr = P2P.validateAccept({ wager: w, acceptor: taker, nowMs: now });
         if (aErr) { clearTimeout(guard); done = true; return res.status(409).json({ error: aErr }); }
+
+        // ── ANTI-SNIPE — every subject must still be in the arena RIGHT NOW ──────────────────────
+        // Without this, any wager whose outcome had already been decided during its open window was
+        // free money for the taker (see isFreshSnakeSig). The taker proves liveness by presenting
+        // the CURRENT signed roster entry for each subject; a snake that has died or cashed out is
+        // no longer in the roster, so no such signature can exist.
+        const freshSubj = isFreshSnakeSig(w.region, w.lobby, w.subject, w.subjectName, w.subjIpHash || '', body.subjExp, body.subjSig);
+        if (!freshSubj) {
+          clearTimeout(guard); done = true;
+          return res.status(409).json({ error: 'That snake is no longer in the arena — this bet can no longer be taken' });
+        }
+        if (w.subject2) {
+          const fresh2 = isFreshSnakeSig(w.region, w.lobby, w.subject2, w.subject2Name, w.subj2IpHash || '', body.subj2Exp, body.subj2Sig);
+          if (!fresh2) {
+            clearTimeout(guard); done = true;
+            return res.status(409).json({ error: 'One of those snakes is no longer in the arena — this bet can no longer be taken' });
+          }
+        }
+
+        // ── DUEL — the taker nominates their OWN live snake as the opponent ──────────────────────
+        // Verified here (not at accept) so a duel can never be reserved by someone with no snake, or
+        // by someone trying to nominate a third party.
+        let duelSubject2 = null, duelSubject2Name = '', duelSubject2Ip = '';
+        if (w.duel) {
+          const s2 = String(body.mySubject || '');
+          const dErr = P2P.validateDuelAccept({ wager: w, acceptor: taker, subject2: s2 });
+          if (dErr) { clearTimeout(guard); done = true; return res.status(400).json({ error: dErr }); }
+          // Must be a CURRENT roster entry too: proves the challenger's snake is alive right now, so
+          // nobody can accept a duel with an already-dead snake and hand the creator a free win.
+          if (!isFreshSnakeSig(w.region, w.lobby, s2, body.mySubjectName, body.myIpHash, body.myExp, body.mySig)) {
+            clearTimeout(guard); done = true;
+            return res.status(403).json({ error: 'Your snake must be alive in this arena to accept a duel' });
+          }
+          duelSubject2 = s2;
+          duelSubject2Name = String(body.mySubjectName || '').slice(0, 20);
+          duelSubject2Ip = String(body.myIpHash || '');
+        }
         // The acceptor takes the OPPOSITE side, so the rig check must run against THAT side — not
         // the creator's. Backing your own snake to win is fine; being handed the "this snake dies"
         // side of a wager on a snake you control is exactly the riggable case.
@@ -972,6 +1040,9 @@ module.exports = async function handler(req, res) {
         });
         if (rigErr) { clearTimeout(guard); done = true; return res.status(403).json({ error: rigErr }); }
         w.status = P2P.STATUS.RESERVED; w.reservedBy = taker; w.reservedUntil = now + WG_RESERVE_MS;
+        // Held against the reservation, not applied yet — the opponent only becomes real once their
+        // deposit lands in wager-accept. If the reservation lapses, this lapses with it.
+        if (w.duel) { w.reservedSubject2 = duelSubject2; w.reservedSubject2Name = duelSubject2Name; w.reservedSubject2Ip = duelSubject2Ip; }
         await wgSave(w);
         await kvZrem('wgopen:' + wgLobbyKey(w.region, w.lobby), wid).catch(() => {}); // leaves the book at once
         wgPush(w.region, w.lobby, 'reserved', wgPublic(w));
@@ -1009,6 +1080,15 @@ module.exports = async function handler(req, res) {
         w.status = P2P.STATUS.MATCHED; w.acceptor = taker;
         w.acceptorName = String(body.acceptorName || '').replace(/[^A-Za-z0-9_\- ]/g, '').slice(0, 16);
         w.matchedTs = now; w.acceptTx = txSig; w.reservedBy = null; w.reservedUntil = 0;
+        // A duel's opponent becomes real here, from what was verified and held at reserve. The game
+        // server then settles it as a normal outlast (subject vs subject2) with NO server change —
+        // a duel IS an outlast, just one where both snakes belong to the two bettors.
+        if (w.duel && w.reservedSubject2) {
+          w.subject2 = w.reservedSubject2;
+          w.subject2Name = w.reservedSubject2Name || '';
+          w.subj2IpHash = w.reservedSubject2Ip || '';
+          w.reservedSubject2 = null; w.reservedSubject2Name = null; w.reservedSubject2Ip = null;
+        }
         // A "survive N" wager's clock starts when both sides are locked in — fair to creator and taker.
         if (w.type === 'survive' && w.durationMs > 0) w.resolveTs = now + w.durationMs;
         await wgSave(w);

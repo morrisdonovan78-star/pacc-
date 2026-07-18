@@ -3493,7 +3493,11 @@ const _wg = {
   loaded: false,
 };
 const _WG_QUICK_USD = [1, 5, 10, 25, 50];
+// 'duel' is a UI-level shape, not a new engine type: it posts an `outlast` with duel:true, where
+// side A is forced to YOUR snake and side B is filled in with the ACCEPTOR's own snake. Both sides
+// back themselves, so neither can win by playing badly — see lib/p2pbet.js validateCreate.
 const _WG_TYPES = [
+  { id: 'duel',    name: '⚔ Duel',      desc: 'Your snake vs whoever accepts — last one standing wins' },
   { id: 'cashout', name: 'Cashes out',  desc: 'Banks their money instead of dying' },
   { id: 'survive', name: 'Survives',    desc: 'Still in the arena when time is up' },
   { id: 'outlast', name: 'Outlasts',    desc: 'Stays in longer than another snake' },
@@ -3508,11 +3512,14 @@ function _wgUsdToLamports(usd){ const p=Number(ST.solPrice)||0; if(p<=0)return 0
 function _wgTypeName(t){ const x=_WG_TYPES.find(y=>y.id===t); return x?x.name:t; }
 // Human label for a side, matching lib/p2pbet.js semantics.
 function _wgSideLabel(w, side){
+  // A duel's side B has no name until someone takes it — never render a bare 'B'.
+  if(w.duel) return side==='A' ? (w.subjectName||'Challenger') : (w.subject2Name||'The challenger');
   if(w.type==='outlast') return side==='A' ? (w.subjectName||'A') : (w.subject2Name||'B');
   if(w.type==='survive') return side==='YES' ? 'Survives' : 'Dies';
   return side==='YES' ? 'Cashes out' : 'Dies';
 }
 function _wgTitle(w){
+  if(w.duel) return '⚔ '+(w.subjectName||'?')+' vs '+(w.subject2Name||'anyone who accepts');
   if(w.type==='outlast') return (w.subjectName||'?')+' outlasts '+(w.subject2Name||'?');
   if(w.type==='survive') return (w.subjectName||'?')+' survives '+Math.round((w.durationMs||0)/1000)+'s';
   return (w.subjectName||'?')+' cashes out';
@@ -3693,6 +3700,23 @@ function _wgFormHtml(){
   for(const t of _WG_TYPES){ const on=(f.type===t.id);
     h+='<button data-wg-type="'+t.id+'" style="flex:1;background:'+(on?'#FFD700':'transparent')+';color:'+(on?'#1a1200':'#b8a97a')+';border:1px solid '+(on?'#FFD700':'#3a3115')+';border-radius:7px;font-size:9px;font-weight:700;padding:7px 4px;cursor:pointer">'+t.name+'</button>'; }
   h+='</div>';
+  // DUEL: no picker at all — side A is your snake, side B is whoever accepts. Showing a chooser
+  // would imply you can nominate someone else, which is exactly what the shape forbids.
+  if(f.duel){
+    const me=r.find(s=>s.pid===myPid);
+    h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">THE CHALLENGE</div>';
+    if(!me){
+      h+='<div style="font-size:10px;color:#FF6600;background:rgba(255,102,0,.08);border:1px solid #5a3a10;border-radius:7px;padding:9px;margin-bottom:9px">You need a live snake in this arena to post a duel.</div>';
+    }else{
+      h+='<div style="display:flex;align-items:center;gap:7px;padding:8px;margin-bottom:6px;border-radius:7px;border:1px solid #FFD700;background:rgba(255,215,0,.10)">';
+      h+='<span style="width:9px;height:9px;border-radius:50%;background:'+_wgEsc(me.color||'#39FF14')+';flex:none"></span>';
+      h+='<span style="font-size:11px;font-weight:700;color:#f4e9c8;flex:1">'+_wgEsc(me.name||'YOUR SNAKE')+'</span>';
+      h+='<span style="font-size:9px;color:#8a7c54">vs whoever accepts</span></div>';
+      h+='<div style="font-size:9px;color:#8a7c54;line-height:1.5;margin-bottom:9px">Whoever takes this puts up their OWN snake. Last one left in the arena wins. Neither of you can win by dying, so there is nothing to rig.</div>';
+    }
+    h+=_wgFormTail(f);
+    return h;
+  }
   // snake picker
   h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">SNAKE</div><div style="max-height:96px;overflow-y:auto;margin-bottom:9px">';
   for(const s of r){ const on=(f.subject===s.pid);
@@ -3736,8 +3760,13 @@ function _wgFormHtml(){
   }
   h+='</div>';
   h+=_rigNote?'<div style="font-size:9px;color:#8a7c54;margin-bottom:9px;line-height:1.4">🔒 That\'s your own snake — you can back yourself to win, but not to lose.</div>':'<div style="margin-bottom:5px"></div>';
-  // stake in USD
-  h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">STAKE (USD)</div><div style="display:flex;gap:4px;margin-bottom:6px">';
+  h+=_wgFormTail(f);
+  return h;
+}
+// Stake + payout + submit. Shared by the normal form and the duel form so there is one stake UI,
+// one payout calculation and one POST BET button rather than two that can drift apart.
+function _wgFormTail(f){
+  let h='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">STAKE (USD)</div><div style="display:flex;gap:4px;margin-bottom:6px">';
   for(const u of _WG_QUICK_USD){ const on=(Number(f.usd)===u);
     h+='<button data-wg-usd="'+u+'" style="flex:1;background:'+(on?'#FFD700':'transparent')+';color:'+(on?'#1a1200':'#b8a97a')+';border:1px solid '+(on?'#FFD700':'#3a3115')+';border-radius:7px;font-size:10px;font-weight:800;padding:7px 2px;cursor:pointer">$'+u+'</button>'; }
   h+='</div>';
@@ -3745,7 +3774,7 @@ function _wgFormHtml(){
   const lam=_wgUsdToLamports(f.usd||0);
   const win=lam>0?Math.floor(lam*2*0.92):0;
   h+='<div style="font-size:9px;color:#8a7c54;margin-bottom:9px">Risk <b style="color:#fff">'+_wgUsdStr(lam)+'</b> ('+_wgSol(lam).toFixed(4)+' SOL) to win <b style="color:#39FF14">'+_wgUsdStr(win)+'</b> · 8% fee on winnings only</div>';
-  h+='<button id="wg-create-go" style="width:100%;background:#39FF14;color:#04240a;border:0;border-radius:8px;font-weight:800;padding:10px;cursor:pointer;font-size:12px">POST BET</button>';
+  h+='<button id="wg-create-go" style="width:100%;background:#39FF14;color:#04240a;border:0;border-radius:8px;font-weight:800;padding:10px;cursor:pointer;font-size:12px">'+(f.duel?'⚔ POST DUEL':'POST BET')+'</button>';
   h+='</div>';
   return h;
 }
@@ -3830,7 +3859,12 @@ function _wgRender(){
   on('[data-wg-f]',function(){ _wg.filterUsd=Number(this.getAttribute('data-wg-f'))||0; _wgRender(); });
   const nb=p.querySelector('#wg-new'); if(nb)nb.onclick=()=>{ _wg.form={type:'cashout',subject:(_wg.roster[0]||{}).pid||null,subject2:null,side:'YES',durationMs:60000,usd:5}; _wgRender(); };
   const fx=p.querySelector('#wg-form-x'); if(fx)fx.onclick=()=>{ _wg.form=null; _wgRender(); };
-  on('[data-wg-type]',function(){ const t=this.getAttribute('data-wg-type'); _wg.form.type=t; _wg.form.side=(t==='outlast')?'A':'YES'; if(t!=='outlast')_wg.form.subject2=null; _wgRender(); });
+  on('[data-wg-type]',function(){ const t=this.getAttribute('data-wg-type'); _wg.form.type=t;
+    _wg.form.duel=(t==='duel');
+    _wg.form.side=(t==='outlast'||t==='duel')?'A':'YES';
+    if(t!=='outlast')_wg.form.subject2=null;
+    if(t==='duel')_wg.form.subject=myPid;              // a duel is always your own snake
+    _wgRender(); });
   on('[data-wg-subj]',function(){
     _wg.form.subject=this.getAttribute('data-wg-subj');
     if(_wg.form.subject2===_wg.form.subject)_wg.form.subject2=null;
@@ -3887,9 +3921,16 @@ function _wgGuard(){
 async function _wgCreate(){
   if(!_wgGuard())return;
   const f=_wg.form; if(!f)return;
+  // A DUEL is always YOUR snake vs whoever accepts — the subject is forced to your own snake so the
+  // UI can never post one on someone else's behalf.
+  if(f.duel){
+    const me=_wg.roster.find(s=>s.pid===myPid);
+    if(!me){ addToast('You need a live snake in this arena to post a duel','#FFD700',5000); return; }
+    f.subject=me.pid; f.subject2=null; f.type='outlast'; f.side='A';
+  }
   const snake=_wg.roster.find(s=>s.pid===f.subject);
   if(!snake){ addToast('Pick a snake','#FFD700'); return; }
-  if(f.type==='outlast'&&!f.subject2){ addToast('Pick the second snake','#FFD700'); return; }
+  if(f.type==='outlast'&&!f.duel&&!f.subject2){ addToast('Pick the second snake','#FFD700'); return; }
   const s2=f.subject2?_wg.roster.find(s=>s.pid===f.subject2):null;
   const usd=Number(f.usd)||0;
   if(usd<0.5){ addToast('Minimum bet is $0.50','#FFD700'); return; }
@@ -3907,6 +3948,7 @@ async function _wgCreate(){
       region:_wg.region,lobby:_wg.lobby||pkRoomId,type:f.type,side:f.side,
       subject:snake.pid,subjectName:snake.name,subjIpHash:snake.ipHash,subjExp:snake.exp,subjSig:snake.sig,
       subject2:s2?s2.pid:null,subject2Name:s2?s2.name:null,subj2IpHash:s2?s2.ipHash:null,subj2Exp:s2?s2.exp:null,subj2Sig:s2?s2.sig:null,
+      duel:!!f.duel,
       durationMs:f.type==='survive'?f.durationMs:0,txSig,creatorName:nm};
     const r=await fetch('/api/settle',{method:'POST',headers:_wgSignedHeaders('wager-create',lamps),body:JSON.stringify(body)});
     const d=await r.json().catch(()=>({}));
@@ -3921,8 +3963,27 @@ async function _wgAccept(id){
   _wg.busy=true;
   try{
     // 1) claim it atomically BEFORE paying, so we never pay for a wager someone else just took
+    // ANTI-SNIPE: present the CURRENT signed roster entry for every subject. The server only signs
+    // snakes that are alive right now, so this is what proves the outcome isn't already decided —
+    // without it, any bet whose subject died during its open window was free money for the taker.
+    // A snake that has left the arena is simply not in _wg.roster, so we can't produce one.
+    const rs=_wg.roster.find(s=>s.pid===w.subject);
+    if(!rs){ addToast('That snake has left the arena — bet no longer takeable','#FF6600',5000); _wg.open.delete(id); _wgRender(); return; }
+    const rs2=w.subject2?_wg.roster.find(s=>s.pid===w.subject2):null;
+    if(w.subject2&&!rs2){ addToast('One of those snakes has left the arena — bet no longer takeable','#FF6600',5000); _wg.open.delete(id); _wgRender(); return; }
+    // A DUEL is answered with your OWN snake, so you must be in the arena to take one.
+    let mine=null;
+    if(w.duel){
+      mine=_wg.roster.find(s=>s.pid===myPid);
+      if(!mine){ addToast('You need a live snake in this arena to accept a duel','#FFD700',5000); return; }
+      if(mine.pid===w.subject){ addToast('That is your own duel','#FFD700'); return; }
+    }
     const rv=await fetch('/api/settle',{method:'POST',headers:_wgSignedHeaders('wager-reserve',0),
-      body:JSON.stringify({action:'wager-reserve',playerAddress:ST.address,wagerId:id})});
+      body:JSON.stringify({action:'wager-reserve',playerAddress:ST.address,wagerId:id,
+        subjExp:rs.exp,subjSig:rs.sig,
+        subj2Exp:rs2?rs2.exp:null,subj2Sig:rs2?rs2.sig:null,
+        mySubject:mine?mine.pid:null,mySubjectName:mine?mine.name:null,
+        myIpHash:mine?mine.ipHash:null,myExp:mine?mine.exp:null,mySig:mine?mine.sig:null})});
     const rd=await rv.json().catch(()=>({}));
     if(!rv.ok||!rd.ok){ addToast(rd.error||'Could not take that bet','#FF6600',5000); _wg.open.delete(id); _wgRender(); return; }
     await refreshBal().catch(()=>{});
