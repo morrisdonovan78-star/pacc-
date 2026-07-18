@@ -2560,10 +2560,13 @@ async function joinLobby(usd){
     addToast('Opening spectator mode — you were not charged','#FFD700');
     return;
   }
-  if(isSpectating&&usd>0){
-    addToast('You are spectating. Use ▶ PLAY NOW from the home screen to join a paid lobby.','#FFD700',5000);
-    return;
-  }
+  // NOTE: deliberately NO isSpectating check here. After a cash-out the client parks the player in
+  // spectate mode, and the result screen's "PLAY AGAIN" / "← HOME" buttons navigate with go() without
+  // clearing that flag — so gating on it blocked the completely legitimate "cash out, go home, rejoin"
+  // flow. The Watch & Bet picker (the thing that actually mis-charged people) is already contained by
+  // _wbSuppressUntil + the single-fire _enteringWatch guard above. Instead of refusing, clear the
+  // stale spectate state so a real join always starts from a clean slate.
+  if(isSpectating){ try{ isSpectating=false; _wgReset(); }catch(_){} }
   // Auto-save whatever is in the name field so getMyName() always returns the latest
   const _nin=document.getElementById('name-input');
   if(_nin&&_nin.value.trim()){const _nv=_nin.value.trim().toUpperCase().slice(0,12);localStorage.setItem('ss_name_'+(ST.address||''),_nv);if(ST.email)localStorage.setItem('ss_name_e_'+ST.email,_nv);}
