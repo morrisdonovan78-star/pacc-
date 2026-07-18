@@ -3141,14 +3141,37 @@ function ssWagerTick(lid, sg, io) {
     if (w.status === 'matched') {
       const side = wgDecide(s, sg, w);
       if (side) wgPostSettle(w, side);
-    } else if (w.status === 'open') {
+    } else if (w.status === 'open' || w.status === 'reserved') {
       // Nobody took it before the window closed → creator gets 100% back, no fee.
+      // 'reserved' is included on purpose: a claim whose deposit never landed used to leave the
+      // wager stranded here forever (it was handled nowhere), with the creator's stake stuck in
+      // escrow. settle sweeps a lapsed claim back to 'open', and this returns it once closed.
       if (now >= Number(w.lockTs || 0)) wgPostReturn(w);
     } else if (w.status === 'settled' || w.status === 'returned' || w.status === 'cancelled') {
       s.live.delete(id);
     }
   }
 }
+
+// ── standalone recovery sweep ────────────────────────────────────────────────
+// ssWagerTick only runs while an arena is actually being simulated, so a wager left behind in an
+// EMPTY lobby had nothing to rescue it — its creator's stake would sit in escrow indefinitely. This
+// runs on its own timer regardless of whether anyone is playing.
+function wgSweep() {
+  if (!GAME_SECRET) return;
+  const ts = Date.now();
+  const proof = wgHmac('wager-sweep:' + ts);
+  fetch(WG_SETTLE_URL, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
+    body: JSON.stringify({ action: 'wager-sweep' }),
+    signal: AbortSignal.timeout(25000),
+  }).then(r => r.json()).then(d => {
+    if (d && d.ok && (d.reverted || d.returned)) {
+      console.log('[wg] sweep: reverted=' + d.reverted + ' returned=' + d.returned + ' checked=' + d.checked);
+    }
+  }).catch(() => {});
+}
+if (GAME_SECRET) setInterval(wgSweep, 60000);
 
 // Give a newly-connected spectator the current roster so they can bet immediately.
 function ssWagerSendTo(socket, lid) {

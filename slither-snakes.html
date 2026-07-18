@@ -2040,6 +2040,38 @@ async function refreshBal(){
   if(el('h-usd')) el('h-usd').textContent='≈ $'+usd;
   if(el('lob-addr')) el('lob-addr').textContent=short;
   if(el('lob-bal')) el('lob-bal').textContent=solStr;
+  try{ _walletHud(); }catch(_){}
+}
+
+// Small live balance readout, top-left, while playing or spectating. Shows the player's REAL wallet
+// balance (ST.balance is refreshed from chain), in USD with SOL underneath, so they can see funds
+// move as they bet, win and cash out without leaving the arena.
+let _walletHudTimer=null;
+function _walletHud(){
+  const show=!!(ST&&ST.address)&&((SG&&!SG.over)||isSpectating);
+  let el=document.getElementById('wallet-hud');
+  if(!show){ if(el)el.style.display='none'; return; }
+  if(!el){
+    el=document.createElement('div'); el.id='wallet-hud'; document.body.appendChild(el);
+    el.style.cssText='position:fixed;left:10px;top:10px;z-index:8500;background:rgba(10,9,4,.72);'+
+      'border:1px solid rgba(255,215,0,.35);border-radius:9px;padding:5px 9px;color:#f4e9c8;'+
+      'font-family:inherit;line-height:1.15;pointer-events:none;backdrop-filter:blur(3px)';
+  }
+  el.style.display='block';
+  const sol=Number(ST.balance)||0, px=Number(ST.solPrice)||0;
+  const usd=px>0?('$'+(sol*px).toFixed(2)):'—';
+  el.innerHTML='<div style="font-size:8px;letter-spacing:.08em;color:#8a7c54">WALLET</div>'+
+    '<div style="font-size:13px;font-weight:800;color:#FFD700">'+usd+'</div>'+
+    '<div style="font-size:8px;color:#8a7c54">'+sol.toFixed(4)+' SOL</div>';
+}
+// Keep it honest without hammering the RPC: refresh while in an arena, and stop when we leave.
+function _walletHudStart(){
+  if(_walletHudTimer)return;
+  _walletHudTimer=setInterval(()=>{
+    if(!((SG&&!SG.over)||isSpectating)){ clearInterval(_walletHudTimer); _walletHudTimer=null; _walletHud(); return; }
+    refreshBal().catch(()=>{});
+  },20000);
+  _walletHud();
 }
 async function doRefreshBal(){await fetchPrice();await refreshBal();}
 function copyWalletAddr(){
@@ -4025,13 +4057,39 @@ async function _wgDeposit(lamps){
   const sr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:2,method:'sendTransaction',params:[raw,{encoding:'base64',preflightCommitment:'confirmed'}]})});
   const sd=await sr.json(); if(sd.error)throw new Error('Send failed: '+sd.error.message);
   const sig=sd.result;
-  for(let i=0;i<40;i++){
-    await new Promise(r=>setTimeout(r,1500));
-    const st=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:3,method:'getSignatureStatuses',params:[[sig],{searchTransactionHistory:false}]})});
+  // The SOL has left the wallet the instant this signature exists — remember it before waiting, so a
+  // failed bet can be recovered instead of the stake vanishing into escrow unrecorded.
+  try{ localStorage.setItem('ss_pending_bet', JSON.stringify({sig,lamps,addr:ST.address,ts:Date.now()})); }catch(_){}
+  // Same treatment the lobby-join deposit already got: poll FAST early (Solana confirms in ~0.4-0.8s),
+  // escalate to a history search once the tx may have aged out of the nodes' recent cache, cap at ~15s
+  // instead of 60s — and DO NOT THROW on timeout. api/settle.js verifies the deposit on-chain itself
+  // (verifyBetDepositTx, with its own retries) and is the authority. Throwing here is what made
+  // "Escrowing bet…" hang and then fail even though the money had actually landed.
+  for(let i=0;i<18;i++){
+    await new Promise(r=>setTimeout(r, i<6?400:(i<12?800:1500)));
+    const deep=i>=10;
+    const st=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:3,method:'getSignatureStatuses',params:[[sig],{searchTransactionHistory:deep}]})});
     const sj=await st.json().catch(()=>({})); const v=sj&&sj.result&&sj.result.value&&sj.result.value[0];
     if(v){ if(v.err)throw new Error('Deposit rejected on-chain'); if(v.confirmationStatus==='confirmed'||v.confirmationStatus==='finalized')return sig; }
   }
-  throw new Error('Deposit confirmation timed out');
+  return sig;   // unconfirmed here ≠ failed — let the server be the judge
+}
+// Post a bet action, retrying so a deposit that just needed a few more seconds still lands the bet
+// instead of the player losing their stake. Each attempt re-verifies on-chain server-side.
+async function _wgPost(body,headers,label){
+  let lastErr=null;
+  for(let i=0;i<4;i++){
+    if(i>0){ addToast('Verifying deposit… ('+(i+1)+'/4)','#FFD700',2500); await new Promise(r=>setTimeout(r,2500)); }
+    try{
+      const r=await fetch('/api/settle',{method:'POST',headers,body:JSON.stringify(body)});
+      const d=await r.json().catch(()=>({}));
+      if(r.ok&&d.ok){ try{ localStorage.removeItem('ss_pending_bet'); }catch(_){} return d; }
+      // A definitive rejection (already taken, closed, self-bet) must not be retried.
+      if(r.status===403||r.status===409||/already|closed|own snake|no longer/i.test(d.error||'')) throw new Error(d.error||('HTTP '+r.status));
+      lastErr=new Error(d.error||('HTTP '+r.status));
+    }catch(e){ if(/already|closed|own snake|no longer/i.test(e.message||'')) throw e; lastErr=e; }
+  }
+  throw lastErr||new Error(label+' failed');
 }
 function _wgSignedHeaders(action,lamps){
   const ts=Math.floor(Date.now()/1000);
@@ -4041,7 +4099,9 @@ function _wgSignedHeaders(action,lamps){
 }
 function _wgGuard(){
   if(!ST.address||!_keypair){ addToast('Sign in to place bets','#FFD700'); return false; }
-  if(_wg.busy){ return false; }
+  // Never fail silently. A bet deposit can take a few seconds to confirm, and returning false with no
+  // feedback is exactly why clicking BET "did nothing" — the first attempt was still running.
+  if(_wg.busy){ addToast('Still processing your last bet — one moment…','#FFD700',3000); return false; }
   return true;
 }
 async function _wgCreate(){
@@ -4076,10 +4136,11 @@ async function _wgCreate(){
       subject2:s2?s2.pid:null,subject2Name:s2?s2.name:null,subj2IpHash:s2?s2.ipHash:null,subj2Exp:s2?s2.exp:null,subj2Sig:s2?s2.sig:null,
       duel:!!f.duel,
       durationMs:f.type==='survive'?f.durationMs:0,txSig,creatorName:nm};
-    const r=await fetch('/api/settle',{method:'POST',headers:_wgSignedHeaders('wager-create',lamps),body:JSON.stringify(body)});
-    const d=await r.json().catch(()=>({}));
-    if(r.ok&&d.ok){ addToast('✅ Bet posted — waiting for an opponent','#39FF14',5000); _wg.form=null; if(d.wager){_wg.open.set(d.wager.id,d.wager);_wg.mine.unshift(d.wager);} refreshBal().catch(()=>{}); _wgRender(); }
-    else addToast('Bet failed: '+(d.error||('HTTP '+r.status)),'#FF4444',6000);
+    const d=await _wgPost(body,_wgSignedHeaders('wager-create',lamps),'Bet');
+    addToast('✅ Bet posted — waiting for an opponent','#39FF14',5000);
+    _wg.form=null;
+    if(d.wager){_wg.open.set(d.wager.id,d.wager);_wg.mine.unshift(d.wager);}
+    refreshBal().catch(()=>{}); _wgRender();
   }catch(e){ console.warn('[wg create]',e); addToast('Bet error: '+(e.message||e),'#FF4444',6000); }
   finally{ _wg.busy=false; }
 }
@@ -4118,11 +4179,11 @@ async function _wgAccept(id){
     addToast('Escrowing '+_wgUsdStr(lamps)+'…','#FFD700');
     const txSig=await _wgDeposit(lamps);
     let nm=''; try{ nm=(typeof getMyName==='function'?(getMyName()||''):''); }catch(_){}
-    const r=await fetch('/api/settle',{method:'POST',headers:_wgSignedHeaders('wager-accept',0),
-      body:JSON.stringify({action:'wager-accept',playerAddress:ST.address,wagerId:id,txSig,acceptorName:nm})});
-    const d=await r.json().catch(()=>({}));
-    if(r.ok&&d.ok){ addToast('✅ Bet matched — good luck!','#39FF14',5000); if(d.wager){_wg.open.delete(id);_wg.live.set(d.wager.id,d.wager);_wg.mine.unshift(d.wager);} refreshBal().catch(()=>{}); _wgRender(); }
-    else addToast(d.error||'Could not match that bet','#FF4444',6000);
+    const d=await _wgPost({action:'wager-accept',playerAddress:ST.address,wagerId:id,txSig,acceptorName:nm},
+      _wgSignedHeaders('wager-accept',0),'Match');
+    addToast('✅ Bet matched — good luck!','#39FF14',5000);
+    if(d.wager){_wg.open.delete(id);_wg.live.set(d.wager.id,d.wager);_wg.mine.unshift(d.wager);}
+    refreshBal().catch(()=>{}); _wgRender();
   }catch(e){ console.warn('[wg accept]',e); addToast('Error: '+(e.message||e),'#FF4444',6000); }
   finally{ _wg.busy=false; }
 }

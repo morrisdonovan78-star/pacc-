@@ -785,14 +785,84 @@ module.exports = async function handler(req, res) {
         if (Array.isArray(z)) for (let i = 0; i < z.length; i += 2) ids.push(z[i]);
       }
       const now = Date.now();
-      const open = [], live = [];
+      const open = [], live = [], stale = [];
       for (const id of ids.slice(0, 300)) {
-        const w = await wgLoad(id); if (!w) continue;
+        let w = await wgLoad(id); if (!w) continue;
+        // SWEEP stale reservations. A reservation is a 90s claim taken BEFORE the taker deposits; if
+        // their deposit never lands the wager must go back on the book, or it is stranded forever
+        // (never matched, never returned, creator's stake stuck in escrow). This used to happen only
+        // if another player coincidentally tried to reserve the same wager. wager-list is called by
+        // every client AND by the game server's reconcile, so sweeping here makes it self-healing.
+        if (w.status === P2P.STATUS.RESERVED && Number(w.reservedUntil || 0) < now) {
+          w.status = P2P.STATUS.OPEN; w.reservedBy = null; w.reservedUntil = 0;
+          w.reservedSubject2 = null; w.reservedSubject2Name = ''; w.reservedSubject2Ip = '';
+          await wgSave(w);
+          await kvZadd('wgopen:' + lk, w.createdTs, id).catch(() => {});
+          stale.push(id);
+        }
         if (w.status === P2P.STATUS.OPEN)      { if (now < Number(w.lockTs)) open.push(wgPublic(w)); }
         else if (w.status === P2P.STATUS.MATCHED) live.push(wgPublic(w));
+        // A wager whose window has closed with no taker is reported so the game server returns it.
+        else if (w.status === P2P.STATUS.RESERVED) { /* still validly claimed — leave it alone */ }
+      }
+      if (stale.length) console.log('[wg] swept ' + stale.length + ' stale reservation(s) back to open');
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, open, live, now, swept: stale.length });
+    }
+
+    // ── wager-sweep: RECOVER stranded wagers (GAME_SECRET-HMAC) ─────────────────────────────────
+    // Safety net that runs independently of any live game. ssWagerTick only runs while an arena is
+    // actually being simulated, so a wager left behind in an idle lobby had nothing to rescue it.
+    // This scans every wager and:
+    //   * reverts a lapsed 'reserved' claim back to 'open' (taker never funded it), and
+    //   * RETURNS 100% (no fee) to the creator of any unmatched wager whose window has closed.
+    // Idempotent and invariant-gated, exactly like wager-return.
+    if (action === 'wager-sweep') {
+      const gts = Number(req.headers['x-game-ts'] || 0);
+      if (!verifyGameProof(req, 'wager-sweep:' + gts)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
+      const now = Date.now();
+      const keys = await kvScan('wg:*', 2000);
+      let reverted = 0, returned = 0, checked = 0;
+      const esc = getEscrow();
+      for (const k of keys) {
+        if (returned >= 10) break;                       // bound the work per sweep
+        let w = null;
+        try { const raw = await kvGet(k); if (raw) w = JSON.parse(raw); } catch (_) {}
+        if (!w || !w.id) continue;
+        checked++;
+        // 1) lapsed reservation → back on the book
+        if (w.status === P2P.STATUS.RESERVED && Number(w.reservedUntil || 0) < now) {
+          w.status = P2P.STATUS.OPEN; w.reservedBy = null; w.reservedUntil = 0;
+          w.reservedSubject2 = null; w.reservedSubject2Name = ''; w.reservedSubject2Ip = '';
+          await wgSave(w);
+          await kvZadd('wgopen:' + wgLobbyKey(w.region, w.lobby), w.createdTs, w.id).catch(() => {});
+          reverted++;
+        }
+        // 2) unmatched and closed → refund the creator in full
+        if (w.status === P2P.STATUS.OPEN && now >= Number(w.lockTs || 0)) {
+          const lock = await kvSetNX('lock:wg:' + w.id, '1', 45);
+          if (!lock) continue;
+          try {
+            const cur = await wgLoad(w.id);
+            if (!cur || cur.status !== P2P.STATUS.OPEN) continue;
+            const claimed = await kvSetNX('wgpaid:' + w.id, '1', WG_TTL);
+            if (!claimed) continue;
+            const amt = P2P.returnAmount(cur.stakeLamports);
+            const pay = await wgPayOne(esc, cur.creator, amt, 'wager-sweep-return');
+            if (!pay.ok) { await kvDel('wgpaid:' + w.id).catch(() => {}); continue; }
+            await kvHincrby(BET_LEDGER, 'betLiability', -amt).catch(() => {});
+            await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
+            cur.status = P2P.STATUS.RETURNED; cur.payoutTx = pay.sig; cur.settledTs = Date.now(); cur.fee = 0;
+            await wgSave(cur);
+            await kvZrem('wgopen:' + wgLobbyKey(cur.region, cur.lobby), cur.id).catch(() => {});
+            await wgPush(cur.region, cur.lobby, 'returned', wgPublic(cur));
+            returned++;
+            betAlert('swept stranded wager ' + cur.id + ' → returned ' + amt + ' to ' + String(cur.creator).slice(0, 8));
+          } finally { await kvDel('lock:wg:' + w.id).catch(() => {}); }
+        }
       }
       clearTimeout(guard); done = true;
-      return res.status(200).json({ ok: true, open, live, now });
+      return res.status(200).json({ ok: true, checked, reverted, returned });
     }
 
     // ── wager-mine: PUBLIC read of one address's bet slip (all statuses). No money. ──────────────
@@ -1057,7 +1127,13 @@ module.exports = async function handler(req, res) {
         // deposit lands in wager-accept. If the reservation lapses, this lapses with it.
         if (w.duel) { w.reservedSubject2 = duelSubject2; w.reservedSubject2Name = duelSubject2Name; w.reservedSubject2Ip = duelSubject2Ip; }
         await wgSave(w);
-        await kvZrem('wgopen:' + wgLobbyKey(w.region, w.lobby), wid).catch(() => {}); // leaves the book at once
+        // ⚠️ DO NOT remove it from the wgopen: index here. It used to be zrem'd "so it leaves the book
+        // at once" — but wager-list reads ONLY wgopen:/wglive:, and a reserved wager is in neither
+        // until the accept lands. That ORPHANED it: invisible to wager-list, so invisible to the game
+        // server's reconcile, and ssWagerTick never handled 'reserved' either. If the accept never
+        // completed, the wager sat in 'reserved' forever — never matched, never returned, the
+        // creator's stake stuck in escrow. That is the "friend's money stuck pending" bug.
+        // It still leaves the *takeable* book instantly because wager-list filters on status==='open'.
         await wgPush(w.region, w.lobby, 'reserved', wgPublic(w));
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, stake: w.stakeLamports, expiresTs: w.reservedUntil, wager: wgPublic(w) });
