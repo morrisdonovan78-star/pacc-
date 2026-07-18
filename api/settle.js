@@ -513,33 +513,36 @@ function clientIpHash(req) {
   } catch (_) { return ''; }
 }
 
-// ── SELF-BETTING GUARD ────────────────────────────────────────────────────────
-// A player may freely use their ONE game wallet to create and accept wagers. The only thing they may
-// never do is bet on (or against) THEIR OWN snake — that's the outcome they personally control.
-// Two layers:
-//   1. Identity — a snake's pid IS its wallet address, so `subject === bettor` is an exact match.
-//   2. Network — if the bettor is on the same network as the snake they're backing, it's very likely
-//      the same person on a second account. Blocked, and the attempt is counted so repeat abuse is
-//      visible even if they later switch networks.
+// ── RIG GUARD (directional) ───────────────────────────────────────────────────
+// A player uses their ONE game wallet for everything and MAY back their own snake to succeed —
+// they can't guarantee a win (anyone can kill them), and it only makes them play harder. What they
+// may never do is take a side that pays out when a snake THEY CONTROL performs badly, because that
+// is riggable: drive into a wall and collect. lib/p2pbet.js#riggableSubjects decides which snakes
+// must fail for a side to win; we then check whether the bettor controls any of them, by:
+//   1. Identity — a snake's pid IS its wallet address, so `subject === bettor` is exact.
+//   2. Network — same hashed network as that snake ⇒ almost certainly the same person on an alt.
+//      (This is also what stops "back A to outlast B" when B is your own sacrificial alt.)
 // Returns an error string to reject with, or null to allow.
-async function wgSelfBetCheck({ bettor, subjects, subjectIpHashes, req }) {
-  for (const s of subjects) {
-    if (s && s === bettor) return 'You cannot bet on your own snake';
-  }
+async function wgRigCheck({ bettor, typeId, side, subject, subject2, subjectIpHash, subject2IpHash, req }) {
+  const mustFail = P2P.riggableSubjects(typeId, side, subject, subject2).filter(Boolean);
+  if (!mustFail.length) return null;                 // backing a snake to SUCCEED — never riggable
+  const ipOf = {};
+  if (subject)  ipOf[subject]  = subjectIpHash  || '';
+  if (subject2) ipOf[subject2] = subject2IpHash || '';
   const myIp = clientIpHash(req);
-  if (myIp) {
-    for (let i = 0; i < subjects.length; i++) {
-      const sIp = subjectIpHashes[i];
-      if (sIp && sIp === myIp) {
-        // Count it so a pattern is visible even across later IP changes.
-        try {
-          const k = 'wgselfhit:' + bettor;
-          await kvIncrby(k, 1); await kvExpire(k, 604800);
-          betAlert('self-bet attempt blocked (same network) bettor=' + String(bettor).slice(0, 8) +
-                   ' subject=' + String(subjects[i]).slice(0, 8));
-        } catch (_) {}
-        return 'You cannot bet on a snake played from your own network';
-      }
+  for (const s of mustFail) {
+    if (s === bettor) {
+      return 'You can back your own snake to win, but not to lose — take the other side';
+    }
+    if (myIp && ipOf[s] && ipOf[s] === myIp) {
+      // Count it so a pattern stays visible even if they later switch networks.
+      try {
+        const k = 'wgselfhit:' + bettor;
+        await kvIncrby(k, 1); await kvExpire(k, 604800);
+        betAlert('rig attempt blocked (same network) bettor=' + String(bettor).slice(0, 8) +
+                 ' mustFail=' + String(s).slice(0, 8) + ' type=' + typeId + ' side=' + side);
+      } catch (_) {}
+      return 'You cannot bet on a snake from your own network losing';
     }
   }
   return null;
@@ -898,14 +901,15 @@ module.exports = async function handler(req, res) {
         clearTimeout(guard); done = true; return res.status(403).json({ error: 'Invalid or expired second snake' });
       }
 
-      // You may bet freely with your one game wallet — but never on your own snake.
-      const selfErr = await wgSelfBetCheck({
-        bettor: creator,
-        subjects: [body.subject, needs2 ? body.subject2 : null].filter(Boolean),
-        subjectIpHashes: [body.subjIpHash, needs2 ? body.subj2IpHash : null].filter(x => x !== null),
+      // Back your own snake to WIN: allowed. Take a side that pays when a snake you control
+      // loses: refused (that's the riggable direction).
+      const rigErr = await wgRigCheck({
+        bettor: creator, typeId, side,
+        subject: body.subject, subject2: needs2 ? body.subject2 : null,
+        subjectIpHash: body.subjIpHash, subject2IpHash: needs2 ? body.subj2IpHash : null,
         req,
       });
-      if (selfErr) { clearTimeout(guard); done = true; return res.status(403).json({ error: selfErr }); }
+      if (rigErr) { clearTimeout(guard); done = true; return res.status(403).json({ error: rigErr }); }
 
       const txSig = body.txSig;
       if (!txSig) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'txSig required' }); }
@@ -956,15 +960,17 @@ module.exports = async function handler(req, res) {
         }
         const aErr = P2P.validateAccept({ wager: w, acceptor: taker, nowMs: now });
         if (aErr) { clearTimeout(guard); done = true; return res.status(409).json({ error: aErr }); }
-        // Taking the other side of a wager on YOUR OWN snake is just as exploitable as backing it
-        // (you'd control the outcome you're betting against), so the same guard applies here.
-        const selfErr = await wgSelfBetCheck({
-          bettor: taker,
-          subjects: [w.subject, w.subject2].filter(Boolean),
-          subjectIpHashes: [w.subjIpHash || '', w.subj2IpHash || ''],
+        // The acceptor takes the OPPOSITE side, so the rig check must run against THAT side — not
+        // the creator's. Backing your own snake to win is fine; being handed the "this snake dies"
+        // side of a wager on a snake you control is exactly the riggable case.
+        const takerSide = P2P.opposingSide(w.type, w.side);
+        const rigErr = await wgRigCheck({
+          bettor: taker, typeId: w.type, side: takerSide,
+          subject: w.subject, subject2: w.subject2,
+          subjectIpHash: w.subjIpHash || '', subject2IpHash: w.subj2IpHash || '',
           req,
         });
-        if (selfErr) { clearTimeout(guard); done = true; return res.status(403).json({ error: selfErr }); }
+        if (rigErr) { clearTimeout(guard); done = true; return res.status(403).json({ error: rigErr }); }
         w.status = P2P.STATUS.RESERVED; w.reservedBy = taker; w.reservedUntil = now + WG_RESERVE_MS;
         await wgSave(w);
         await kvZrem('wgopen:' + wgLobbyKey(w.region, w.lobby), wid).catch(() => {}); // leaves the book at once

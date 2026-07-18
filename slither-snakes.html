@@ -3341,6 +3341,18 @@ function _wgTitle(w){
   return (w.subjectName||'?')+' cashes out';
 }
 function _wgMyAddr(){ return (ST&&ST.address)||''; }
+// Mirrors lib/p2pbet.js#riggableSubjects. You may back your own snake to WIN (you can't guarantee
+// it — anyone can kill you), but never take a side that pays out when a snake you control loses,
+// because you could just drive into a wall. The server enforces this for real (and also catches
+// same-network alt accounts); this is purely so the UI never offers a side that would be rejected.
+function _wgRiggableForMe(type,side,subject,subject2){
+  const me=_wgMyAddr(); if(!me)return false;
+  let mustFail;
+  if(type==='cashout'||type==='survive') mustFail=(side==='NO')?[subject]:[];
+  else if(type==='outlast') mustFail=(side==='A')?[subject2]:[subject];
+  else mustFail=[subject,subject2];
+  return mustFail.some(s=>s&&s===me);
+}
 
 // ── socket-driven state ──────────────────────────────────────────────────────
 function _wgOnRoster(d){
@@ -3438,6 +3450,8 @@ function _wgCardHtml(w){
   h+='<div style="font-size:8px;color:#6b6142">'+(w.status==='open'?secs+'s left':'&nbsp;')+'</div></div></div>';
   if(w.status==='open'){
     if(mine) h+='<button data-wg-cancel="'+_wgEsc(w.id)+'" style="width:100%;margin-top:9px;background:transparent;border:1px solid #6b5a20;color:#b8a97a;border-radius:8px;font-weight:700;padding:8px;cursor:pointer;font-size:11px">CANCEL (full refund)</button>';
+    else if(_wgRiggableForMe(w.type,w.takerSide,w.subject,w.subject2))
+      h+='<div style="width:100%;margin-top:9px;text-align:center;font-size:9px;color:#8a7c54;border:1px solid #2c2a1f;border-radius:8px;padding:8px;line-height:1.4">🔒 Taking this side means betting on your own snake to lose</div>';
     else h+='<button data-wg-accept="'+_wgEsc(w.id)+'" style="width:100%;margin-top:9px;background:#FFD700;color:#1a1200;border:0;border-radius:8px;font-weight:800;padding:9px;cursor:pointer;font-size:12px">TAKE '+_wgEsc(_wgSideLabel(w,w.takerSide))+' · '+_wgUsdStr(w.stake)+'</button>';
   }else if(w.status==='matched'){
     h+='<div style="margin-top:8px;font-size:9px;color:#8a7c54;text-align:center">'+_wgEsc(w.creatorName||'anon')+' vs '+_wgEsc(w.acceptorName||'anon')+' · locked</div>';
@@ -3502,10 +3516,22 @@ function _wgFormHtml(){
   const fake={type:f.type,
     subjectName:((r.find(s=>s.pid===f.subject)||{}).name)||'this snake',
     subject2Name:((r.find(s=>s.pid===f.subject2)||{}).name)||'2nd snake'};
-  h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">YOUR SIDE</div><div style="display:flex;gap:5px;margin-bottom:9px">';
-  for(const sd of sides){ const on=(f.side===sd);
-    h+='<button data-wg-side="'+sd+'" style="flex:1;background:'+(on?'#FFD700':'transparent')+';color:'+(on?'#1a1200':'#b8a97a')+';border:1px solid '+(on?'#FFD700':'#3a3115')+';border-radius:7px;font-size:10px;font-weight:700;padding:8px 4px;cursor:pointer">'+_wgEsc(_wgSideLabel(fake,sd))+'</button>'; }
+  h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">YOUR SIDE</div><div style="display:flex;gap:5px;margin-bottom:4px">';
+  let _rigNote=false;
+  for(const sd of sides){
+    const on=(f.side===sd);
+    const rig=_wgRiggableForMe(f.type,sd,f.subject,f.subject2);
+    if(rig)_rigNote=true;
+    h+='<button '+(rig?'data-wg-rig="1" disabled':'data-wg-side="'+sd+'"')+
+       ' title="'+(rig?'You can back your own snake to win, but not to lose':'')+'"'+
+       ' style="flex:1;background:'+(rig?'rgba(255,255,255,.03)':(on?'#FFD700':'transparent'))+
+       ';color:'+(rig?'#5a5238':(on?'#1a1200':'#b8a97a'))+
+       ';border:1px solid '+(rig?'#2c2a1f':(on?'#FFD700':'#3a3115'))+
+       ';border-radius:7px;font-size:10px;font-weight:700;padding:8px 4px;cursor:'+(rig?'not-allowed':'pointer')+'">'+
+       _wgEsc(_wgSideLabel(fake,sd))+(rig?' 🔒':'')+'</button>';
+  }
   h+='</div>';
+  h+=_rigNote?'<div style="font-size:9px;color:#8a7c54;margin-bottom:9px;line-height:1.4">🔒 That\'s your own snake — you can back yourself to win, but not to lose.</div>':'<div style="margin-bottom:5px"></div>';
   // stake in USD
   h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">STAKE (USD)</div><div style="display:flex;gap:4px;margin-bottom:6px">';
   for(const u of _WG_QUICK_USD){ const on=(Number(f.usd)===u);
@@ -3595,7 +3621,16 @@ function _wgRender(){
   const nb=p.querySelector('#wg-new'); if(nb)nb.onclick=()=>{ _wg.form={type:'cashout',subject:(_wg.roster[0]||{}).pid||null,subject2:null,side:'YES',durationMs:60000,usd:5}; _wgRender(); };
   const fx=p.querySelector('#wg-form-x'); if(fx)fx.onclick=()=>{ _wg.form=null; _wgRender(); };
   on('[data-wg-type]',function(){ const t=this.getAttribute('data-wg-type'); _wg.form.type=t; _wg.form.side=(t==='outlast')?'A':'YES'; if(t!=='outlast')_wg.form.subject2=null; _wgRender(); });
-  on('[data-wg-subj]',function(){ _wg.form.subject=this.getAttribute('data-wg-subj'); if(_wg.form.subject2===_wg.form.subject)_wg.form.subject2=null; _wgRender(); });
+  on('[data-wg-subj]',function(){
+    _wg.form.subject=this.getAttribute('data-wg-subj');
+    if(_wg.form.subject2===_wg.form.subject)_wg.form.subject2=null;
+    // If picking this snake makes the currently-selected side riggable (it's your own snake), flip
+    // to the side you ARE allowed to take rather than leaving a locked button selected.
+    if(_wgRiggableForMe(_wg.form.type,_wg.form.side,_wg.form.subject,_wg.form.subject2)){
+      _wg.form.side=(_wg.form.type==='outlast')?(_wg.form.side==='A'?'B':'A'):(_wg.form.side==='YES'?'NO':'YES');
+    }
+    _wgRender();
+  });
   on('[data-wg-subj2]',function(){ _wg.form.subject2=this.getAttribute('data-wg-subj2'); _wgRender(); });
   on('[data-wg-dur]',function(){ _wg.form.durationMs=Number(this.getAttribute('data-wg-dur')); _wgRender(); });
   on('[data-wg-side]',function(){ _wg.form.side=this.getAttribute('data-wg-side'); _wgRender(); });
