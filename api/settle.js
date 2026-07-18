@@ -1025,36 +1025,11 @@ module.exports = async function handler(req, res) {
       } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
     }
 
-    // ── wager-cancel: creator withdraws an UNMATCHED wager → 100% back, no fee ───────────────────
-    if (action === 'wager-cancel') {
-      const requester = playerAddress;
-      const wid = String(body.wagerId || '');
-      if (!requester || !wid) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wagerId required' }); }
-      const lock = await kvSetNX('lock:wg:' + wid, '1', 45);
-      if (!lock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'busy' }); }
-      try {
-        const w = await wgLoad(wid);
-        const cErr = P2P.validateCancel({ wager: w, requester, nowMs: Date.now() });
-        if (cErr) { clearTimeout(guard); done = true; return res.status(409).json({ error: cErr }); }
-        const claimed = await kvSetNX('wgpaid:' + wid, '1', WG_TTL);
-        if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
-        const amt = P2P.returnAmount(w.stakeLamports);
-        const back = await wgPayOne(esc, w.creator, amt, 'wager-cancel');
-        if (!back.ok) {
-          await kvDel('wgpaid:' + wid).catch(() => {});
-          clearTimeout(guard); done = true;
-          return res.status(503).json({ error: 'refund held: ' + (back.reason || 'unknown'), retry: true });
-        }
-        await kvHincrby(BET_LEDGER, 'betLiability', -amt).catch(() => {});
-        await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
-        w.status = P2P.STATUS.CANCELLED; w.payoutTx = back.sig; w.settledTs = Date.now(); w.fee = 0;
-        await wgSave(w);
-        await kvZrem('wgopen:' + wgLobbyKey(w.region, w.lobby), wid).catch(() => {});
-        wgPush(w.region, w.lobby, 'cancelled', wgPublic(w));
-        clearTimeout(guard); done = true;
-        return res.status(200).json({ ok: true, wager: wgPublic(w), tx: back.sig });
-      } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
-    }
+    // NOTE: there is deliberately NO wager-cancel action. Once a wager is placed it must run to a
+    // conclusion — matched wagers SETTLE on game truth, and an unmatched one is RETURNED in full at
+    // lock by wager-return. Removing the endpoint (not just the button) means a creator cannot pull a
+    // wager back via the API either, which also closes the free-option abuse: post a wager, watch how
+    // the snake starts doing, then yank it before anyone can take the other side.
 
     // ── balance ───────────────────────────────────────────────────────────────
     if (action === 'balance') {

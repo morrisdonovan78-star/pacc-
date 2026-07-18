@@ -3452,7 +3452,9 @@ function _wgCardHtml(w){
   h+='<div style="text-align:right"><div style="font-size:8px;color:#8a7c54">TO WIN</div><div style="font-size:14px;font-weight:800;color:#39FF14">'+_wgUsdStr(w.potentialWin)+'</div>';
   h+='<div style="font-size:8px;color:#6b6142">'+(w.status==='open'?secs+'s left':'&nbsp;')+'</div></div></div>';
   if(w.status==='open'){
-    if(mine) h+='<button data-wg-cancel="'+_wgEsc(w.id)+'" style="width:100%;margin-top:9px;background:transparent;border:1px solid #6b5a20;color:#b8a97a;border-radius:8px;font-weight:700;padding:8px;cursor:pointer;font-size:11px">CANCEL (full refund)</button>';
+    // No cancel: a placed wager must run to a conclusion. If nobody takes it before the window
+    // closes it is returned in full automatically, so the creator is never stuck.
+    if(mine) h+='<div style="width:100%;margin-top:9px;text-align:center;font-size:9px;color:#8a7c54;border:1px solid #2c2a1f;border-radius:8px;padding:8px;line-height:1.4">Your bet — waiting for someone to take it.<br>Returned in full if nobody does.</div>';
     else if(_wgRiggableForMe(w.type,w.takerSide,w.subject,w.subject2))
       h+='<div style="width:100%;margin-top:9px;text-align:center;font-size:9px;color:#8a7c54;border:1px solid #2c2a1f;border-radius:8px;padding:8px;line-height:1.4">🔒 Taking this side means betting on your own snake to lose</div>';
     else h+='<button data-wg-accept="'+_wgEsc(w.id)+'" style="width:100%;margin-top:9px;background:#FFD700;color:#1a1200;border:0;border-radius:8px;font-weight:800;padding:9px;cursor:pointer;font-size:12px">TAKE '+_wgEsc(_wgSideLabel(w,w.takerSide))+' · '+_wgUsdStr(w.stake)+'</button>';
@@ -3643,7 +3645,6 @@ function _wgRender(){
   const se=p.querySelector('#wg-search'); if(se)se.oninput=function(){ _wg.search=this.value; const b=p.querySelector('#wg-body'); const sc=b?b.scrollTop:0; _wgRender(); const b2=document.querySelector('#wg-panel #wg-body'); if(b2)b2.scrollTop=sc; const s2=document.querySelector('#wg-panel #wg-search'); if(s2){s2.focus();s2.setSelectionRange(s2.value.length,s2.value.length);} };
   const so=p.querySelector('#wg-sort'); if(so)so.onchange=function(){ _wg.sort=this.value; _wgRender(); };
   on('[data-wg-accept]',function(){ _wgAccept(this.getAttribute('data-wg-accept')); });
-  on('[data-wg-cancel]',function(){ _wgCancel(this.getAttribute('data-wg-cancel')); });
 }
 
 // ── money actions ────────────────────────────────────────────────────────────
@@ -3733,19 +3734,6 @@ async function _wgAccept(id){
   }catch(e){ console.warn('[wg accept]',e); addToast('Error: '+(e.message||e),'#FF4444',6000); }
   finally{ _wg.busy=false; }
 }
-async function _wgCancel(id){
-  if(!_wgGuard())return;
-  _wg.busy=true;
-  try{
-    const r=await fetch('/api/settle',{method:'POST',headers:_wgSignedHeaders('wager-cancel',0),
-      body:JSON.stringify({action:'wager-cancel',playerAddress:ST.address,wagerId:id})});
-    const d=await r.json().catch(()=>({}));
-    if(r.ok&&d.ok){ addToast('Bet cancelled — '+_wgUsdStr((d.wager&&d.wager.stake)||0)+' refunded','#FFD700',5000); _wg.open.delete(id); refreshBal().catch(()=>{}); _wgRender(); }
-    else addToast(d.error||'Could not cancel','#FF4444',5000);
-  }catch(e){ addToast('Error: '+(e.message||e),'#FF4444'); }
-  finally{ _wg.busy=false; }
-}
-
 // ── home-screen entry: pick an arena to watch & bet on ───────────────────────
 function openWatchBet(){
   let m=document.getElementById('wb-modal');
