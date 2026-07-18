@@ -572,21 +572,34 @@ async function wgRigCheck({ bettor, typeId, side, subject, subject2, subjectIpHa
   return null;
 }
 
-// Push a live update to every spectator of that arena via the game server's websocket (no polling).
-// Fire-and-forget: a failed push only costs a client a slightly stale list, never money.
-function wgPush(region, lobby, event, wager) {
-  if (!GAME_SECRET) return;
+// Push a live update to everyone watching that arena, via the game server's websocket (no polling).
+//
+// ⚠️ MUST BE AWAITED. This was fire-and-forget and that is exactly why other players never saw a new
+// bet appear: Vercel can freeze/kill the function the instant the response is sent, so an un-awaited
+// fetch is a coin flip on whether it is even dispatched (api/join.js carries the same warning about
+// un-awaited background writes). Awaiting costs a few hundred ms on the bettor's own request but is
+// what makes the bet show up for everyone else immediately.
+//
+// The wager is already committed to KV before this runs, so a push that still fails (game server
+// down/slow) only means a briefly stale list — the periodic roster digest re-syncs it within ~4s.
+async function wgPush(region, lobby, event, wager) {
+  if (!GAME_SECRET) return false;
   try {
     const ts = Date.now();
     const proof = crypto.createHmac('sha256', GAME_SECRET).update('wager-event:' + lobby + ':' + ts).digest('hex');
     const base = String(region).toUpperCase() === 'EU' ? 'https://eu.pac-arena.com' : 'https://us.pac-arena.com';
-    fetch(base + '/wager-event', {
+    const r = await fetch(base + '/wager-event', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
       body: JSON.stringify({ lobby, event, wager }),
-      signal: AbortSignal.timeout(4000),
-    }).catch(() => {});
-  } catch (_) {}
+      signal: AbortSignal.timeout(2500),   // bounded so a slow node can't stall the bettor's response
+    });
+    if (!r.ok) console.warn('[wg] push ' + event + ' -> HTTP ' + r.status);
+    return r.ok;
+  } catch (e) {
+    console.warn('[wg] push ' + event + ' failed: ' + (e && e.message || e));
+    return false;
+  }
 }
 
 // Pay exactly one recipient, gated by the global solvency invariant. Used for winner payouts,
@@ -837,7 +850,7 @@ module.exports = async function handler(req, res) {
         const lk = wgLobbyKey(w.region, w.lobby);
         await kvZrem('wglive:' + lk, wid).catch(() => {});
         await kvZrem('wgopen:' + lk, wid).catch(() => {});
-        wgPush(w.region, w.lobby, 'settled', wgPublic(w));
+        await wgPush(w.region, w.lobby, 'settled', wgPublic(w));
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, wager: wgPublic(w), tx: pay.sig });
       } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
@@ -876,7 +889,7 @@ module.exports = async function handler(req, res) {
         await wgSave(w);
         const lk = wgLobbyKey(w.region, w.lobby);
         await kvZrem('wgopen:' + lk, wid).catch(() => {});
-        wgPush(w.region, w.lobby, 'returned', wgPublic(w));
+        await wgPush(w.region, w.lobby, 'returned', wgPublic(w));
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, wager: wgPublic(w), tx: pay.sig });
       } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
@@ -967,7 +980,7 @@ module.exports = async function handler(req, res) {
       await kvZadd('wgu:' + creator, now, id);
       await kvExpire('wgu:' + creator, WG_TTL).catch(() => {});
       await kvHincrby(BET_LEDGER, 'betLiability', stake);
-      wgPush(region, lobby, 'created', wgPublic(w));
+      await wgPush(region, lobby, 'created', wgPublic(w));
       clearTimeout(guard); done = true;
       return res.status(200).json({ ok: true, wager: wgPublic(w) });
     }
@@ -1045,7 +1058,7 @@ module.exports = async function handler(req, res) {
         if (w.duel) { w.reservedSubject2 = duelSubject2; w.reservedSubject2Name = duelSubject2Name; w.reservedSubject2Ip = duelSubject2Ip; }
         await wgSave(w);
         await kvZrem('wgopen:' + wgLobbyKey(w.region, w.lobby), wid).catch(() => {}); // leaves the book at once
-        wgPush(w.region, w.lobby, 'reserved', wgPublic(w));
+        await wgPush(w.region, w.lobby, 'reserved', wgPublic(w));
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, stake: w.stakeLamports, expiresTs: w.reservedUntil, wager: wgPublic(w) });
       } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
@@ -1099,7 +1112,7 @@ module.exports = async function handler(req, res) {
         await kvZadd('wgu:' + taker, w.createdTs, wid);
         await kvExpire('wgu:' + taker, WG_TTL).catch(() => {});
         await kvHincrby(BET_LEDGER, 'betLiability', w.stakeLamports);   // pot is now 2× stake
-        wgPush(w.region, w.lobby, 'matched', wgPublic(w));
+        await wgPush(w.region, w.lobby, 'matched', wgPublic(w));
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, wager: wgPublic(w) });
       } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }

@@ -3014,15 +3014,27 @@ function wgRosterEntry(lid, sn, exp) {
     sig: wgHmac('snake:' + WG_REGION + ':' + lid + ':' + sn.pid + ':' + name + ':' + ipHash + ':' + exp),
   };
 }
+// Everything currently on this arena's book (open + matched). Sent WITH the roster so a client that
+// missed a live push — Vercel hiccup, brief disconnect, tab wake — re-syncs within one roster tick.
+// Self-healing without the client ever polling.
+function wgOpenBook(lid) {
+  const s = wgLobby(lid);
+  const out = [];
+  for (const w of s.live.values()) {
+    if (w && w.id && (w.status === 'open' || w.status === 'matched')) out.push(w);
+    if (out.length >= 60) break;
+  }
+  return out;
+}
 function wgBroadcastRoster(lid, sg, io) {
   const exp = Date.now() + WG_ROSTER_TTL;
   const snakes = wgBettableSnakes(sg).map(sn => wgRosterEntry(lid, sn, exp));
-  try { io.to(lid).emit('ss-wager-roster', { region: WG_REGION, lobby: lid, snakes }); } catch (_) {}
+  try { io.to(lid).emit('ss-wager-roster', { region: WG_REGION, lobby: lid, snakes, wagers: wgOpenBook(lid) }); } catch (_) {}
 }
 function wgSendRosterTo(socket, lid, sg) {
   const exp = Date.now() + WG_ROSTER_TTL;
   const snakes = wgBettableSnakes(sg).map(sn => wgRosterEntry(lid, sn, exp));
-  try { socket.emit('ss-wager-roster', { region: WG_REGION, lobby: lid, snakes }); } catch (_) {}
+  try { socket.emit('ss-wager-roster', { region: WG_REGION, lobby: lid, snakes, wagers: wgOpenBook(lid) }); } catch (_) {}
 }
 
 // ── outcome reporting (server → settle) ──────────────────────────────────────

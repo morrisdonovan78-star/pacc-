@@ -3549,9 +3549,32 @@ function _wgOnRoster(d){
   // and now that live players can have the panel open it would land mid-gameplay. Compare only the
   // fields the panel actually draws (pid/colour/name — never `usd`, which changes constantly and is
   // not rendered) and skip the rebuild when they're unchanged.
-  const sig=d.snakes.map(s=>s.pid+''+(s.color||'')+''+(s.name||'')).join('');
-  const changed=(sig!==_wg._rosterSig);
+  const sig=d.snakes.map(s=>s.pid+''+(s.color||'')+''+(s.name||'')).join('');
+  let changed=(sig!==_wg._rosterSig);
   _wg._rosterSig=sig;
+  // Self-heal the order book from the digest the server sends with each roster tick. A live push
+  // that never landed (Vercel hiccup, brief disconnect, tab wake) can then never leave someone
+  // staring at a stale or empty book — they converge within one tick, with NO client polling.
+  if(Array.isArray(d.wagers)){
+    const seen=new Set(); const before=_wg.open.size+'/'+_wg.live.size;
+    for(const w of d.wagers){
+      if(!w||!w.id)continue;
+      seen.add(w.id);
+      if(w.status==='open'){ _wg.live.delete(w.id); _wg.open.set(w.id,Object.assign({},_wg.open.get(w.id)||{},w)); }
+      else if(w.status==='matched'){ _wg.open.delete(w.id); _wg.live.set(w.id,Object.assign({},_wg.live.get(w.id)||{},w)); }
+    }
+    // Drop anything the server no longer lists, but give a just-created wager a grace period: the
+    // server may not have reconciled it yet and yanking it would make our own fresh bet flicker.
+    const now=Date.now();
+    for(const m of [_wg.open,_wg.live]){
+      for(const [id,w] of Array.from(m)){
+        if(seen.has(id))continue;
+        if(now-Number(w.createdTs||0)<15000)continue;
+        m.delete(id);
+      }
+    }
+    if(before!==(_wg.open.size+'/'+_wg.live.size))changed=true;
+  }
   if(_wg.panel&&changed)_wgRender();
 }
 function _wgOnEvent(d){
