@@ -481,6 +481,11 @@ async function payBetRecipients(esc, mktId, recipients, tag) {
 //   wgtx:<txSig>       deposit replay guard
 const P2P = require('../lib/p2pbet');
 const WG_TTL       = 604800;   // wager records live 7 days (history)
+// wgpaid: is an in-flight payment LOCK, not proof of payment. The authoritative "already paid"
+// record is the wager's own status (settled/returned), which every payer checks FIRST. Giving this a
+// 7-day TTL meant a single attempt that died between claiming it and paying (Vercel freeze, crash)
+// blocked every future payout forever and stranded the stake. Short TTL = self-releasing.
+const WG_PAY_LOCK_TTL = 180;
 const WG_OPEN_WINDOW_MS = 60000; // how long a new wager stays takeable before it's returned unmatched
 const WG_RESERVE_MS = 90000;   // an acceptor has 90s to land their deposit before the claim expires
 const WG_MIN_STAKE = 1_000_000;      // 0.001 SOL floor
@@ -845,8 +850,16 @@ module.exports = async function handler(req, res) {
           try {
             const cur = await wgLoad(w.id);
             if (!cur || cur.status !== P2P.STATUS.OPEN) continue;
-            const claimed = await kvSetNX('wgpaid:' + w.id, '1', WG_TTL);
-            if (!claimed) continue;
+            let claimed = await kvSetNX('wgpaid:' + w.id, '1', WG_PAY_LOCK_TTL);
+            if (!claimed) {
+              // We already proved above that this wager is still OPEN — i.e. no payout ever
+              // completed. So a lock sitting here is a leftover from an attempt that died
+              // mid-flight, and honouring it would strand the creator's stake forever. Clear it.
+              await kvDel('wgpaid:' + w.id).catch(() => {});
+              claimed = await kvSetNX('wgpaid:' + w.id, '1', WG_PAY_LOCK_TTL);
+              if (!claimed) continue;
+              console.warn('[wg] cleared a stale payment lock on ' + w.id);
+            }
             const amt = P2P.returnAmount(cur.stakeLamports);
             const pay = await wgPayOne(esc, cur.creator, amt, 'wager-sweep-return');
             if (!pay.ok) { await kvDel('wgpaid:' + w.id).catch(() => {}); continue; }
@@ -900,7 +913,7 @@ module.exports = async function handler(req, res) {
         const r = P2P.resolveWager(w, winningSide);
         if (!r) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wager is not settleable' }); }
         // Single-pay marker claimed BEFORE the transfer — a crash mid-send can never double-pay.
-        const claimed = await kvSetNX('wgpaid:' + wid, '1', WG_TTL);
+        const claimed = await kvSetNX('wgpaid:' + wid, '1', WG_PAY_LOCK_TTL);
         if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
 
         const esc = getEscrow();
@@ -943,7 +956,7 @@ module.exports = async function handler(req, res) {
         if (!P2P.canTransition(w.status, P2P.STATUS.RETURNED)) {
           clearTimeout(guard); done = true; return res.status(400).json({ error: 'cannot return a ' + w.status + ' wager' });
         }
-        const claimed = await kvSetNX('wgpaid:' + wid, '1', WG_TTL);
+        const claimed = await kvSetNX('wgpaid:' + wid, '1', WG_PAY_LOCK_TTL);
         if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
         const esc = getEscrow();
         const amt = P2P.returnAmount(w.stakeLamports);          // 100%, no fee
@@ -1028,7 +1041,7 @@ module.exports = async function handler(req, res) {
       if (!txSig) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'txSig required' }); }
       if (await kvGet('wgtx:' + txSig) !== null) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Deposit already used' }); }
       await verifyBetDepositTx(txSig, creator, stake, esc.pubkeyB58);
-      await kvSet('wgtx:' + txSig, '1', WG_TTL);
+      await kvSet('wgtx:' + txSig, '1', WG_PAY_LOCK_TTL);
 
       const id = 'w' + now.toString(36) + Math.random().toString(36).slice(2, 8);
       const w = {
@@ -1154,7 +1167,7 @@ module.exports = async function handler(req, res) {
         if (await kvGet('wgtx:' + txSig) !== null) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Deposit already used' }); }
         // The deposit is real regardless of whether the match still stands — verify it first.
         await verifyBetDepositTx(txSig, taker, w.stakeLamports, esc.pubkeyB58);
-        await kvSet('wgtx:' + txSig, '1', WG_TTL);
+        await kvSet('wgtx:' + txSig, '1', WG_PAY_LOCK_TTL);
 
         const now = Date.now();
         const claimOk = (w.status === P2P.STATUS.RESERVED && w.reservedBy === taker && Number(w.reservedUntil || 0) >= now);
