@@ -2546,8 +2546,24 @@ async function joinTestLobby(){
 }
 function _isTestLobby(){ return pkRoomId==='ss-test-lobby'; }
 
+// Set while the Watch & Bet flow is opening/entering an arena. Spectating must NEVER be able to
+// turn into a paid join: players reported being CHARGED after clicking an arena in the Watch & Bet
+// picker (a fast second click landed on ▶ PLAY NOW underneath the modal once it closed). Both the
+// suppression window and the spectating check below make that fall-through impossible.
+let _wbSuppressUntil=0, _enteringWatch=false;
+
 async function joinLobby(usd){
   if(!ST.address){alert('Log in first');return;}
+  // Refuse any paid join that arrives from a stray click right after the Watch & Bet picker, or
+  // while a watch session is being set up. Watching is free — it must never charge anyone.
+  if(_enteringWatch||Date.now()<_wbSuppressUntil){
+    addToast('Opening spectator mode — you were not charged','#FFD700');
+    return;
+  }
+  if(isSpectating&&usd>0){
+    addToast('You are spectating. Use ▶ PLAY NOW from the home screen to join a paid lobby.','#FFD700',5000);
+    return;
+  }
   // Auto-save whatever is in the name field so getMyName() always returns the latest
   const _nin=document.getElementById('name-input');
   if(_nin&&_nin.value.trim()){const _nv=_nin.value.trim().toUpperCase().slice(0,12);localStorage.setItem('ss_name_'+(ST.address||''),_nv);if(ST.email)localStorage.setItem('ss_name_e_'+ST.email,_nv);}
@@ -2603,20 +2619,32 @@ async function joinLobby(usd){
     const _lbd=await _lbr.json();if(_lbd.error)throw new Error('Blockhash: '+_lbd.error.message);
     const lb={blockhash:_lbd.result.value.blockhash,lastValidBlockHeight:_lbd.result.value.lastValidBlockHeight};
     tx.recentBlockhash=lb.blockhash; tx.feePayer=from;
+    // Signing is LOCAL and instant (nacl) — it never hangs. The step that can be slow is the network
+    // send, so the log must advance BEFORE the fetch; leaving it on "Signing…" across a slow
+    // sendTransaction is what made players think signing itself was stuck.
     lg('mm-log','Signing…','lwarn');
     await signLocalTx(tx);
     const _rawB64=btoa(String.fromCharCode(...tx.serialize()));
+    lg('mm-log','Sending to Solana…','lwarn');
     const _sndr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:2,method:'sendTransaction',params:[_rawB64,{encoding:'base64',preflightCommitment:'confirmed'}]})});
     const _sndd=await _sndr.json();if(_sndd.error)throw new Error('Send failed: '+_sndd.error.message);
     const sig=_sndd.result;
     lg('mm-log','Confirming on-chain…','lwarn');
     let _txConfirmed=false;
-    for(let _ci=0;_ci<60&&!_txConfirmed;_ci++){
-      await new Promise(r=>setTimeout(r,1500));
-      const _sr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:3,method:'getSignatureStatuses',params:[[sig],{searchTransactionHistory:false}]})});
+    // Poll FAST at first (Solana usually confirms in 0.4–0.8s) then ease off, instead of a flat
+    // 1.5s × 60 = 90s grind that made a normal join feel broken. Same ~90s worst case, but a healthy
+    // confirmation is now seen in well under a second.
+    for(let _ci=0;_ci<70&&!_txConfirmed;_ci++){
+      await new Promise(r=>setTimeout(r, _ci<6?400:(_ci<14?800:1500)));
+      // After the first ~12 polls the tx may have aged out of the nodes' recent-signature cache, so
+      // a plain lookup keeps answering "not found" forever. Escalate to a history search — this is
+      // the other half of the "stuck on Confirming on-chain" hang.
+      const _deep=_ci>=12;
+      const _sr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:3,method:'getSignatureStatuses',params:[[sig],{searchTransactionHistory:_deep}]})});
       const _sd=await _sr.json().catch(()=>({}));
       const _st=_sd?.result?.value?.[0];
       if(_st){if(_st.err)throw new Error('Transaction rejected by network');if(_st.confirmationStatus==='confirmed'||_st.confirmationStatus==='finalized'){_txConfirmed=true;break;}}
+      if(_ci===12)lg('mm-log','Still confirming — searching history…','lwarn');
       if(_ci>0&&_ci%8===0){const _bhr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:4,method:'getBlockHeight',params:[]})});const _bhd=await _bhr.json().catch(()=>({}));if(typeof _bhd.result==='number'&&_bhd.result>lb.lastValidBlockHeight)throw new Error('Transaction expired — please try again');}
     }
     if(!_txConfirmed)throw new Error('Confirmation timeout — check your wallet then try again');
@@ -2862,9 +2890,26 @@ async function pkConnect(roomId,gameToken,spectate){
     _sio.on('err',(msg)=>{
       lg('mm-log','❌ '+(msg||'Server rejected'),'lerr');
       _hideReconnectPrompt(); _reconnTimes=[];
-      if(_sio){try{_sio.disconnect();}catch(_){}} _sio=null;
-      ablyChannel=null; _joiningLobby=false; _lobbyIsPaid=false;
-      setTimeout(()=>{try{go('scr-lobby');}catch(_){}},3000);
+      // Always drop the socket — whatever the server refused, this connection is finished.
+      if(_sio){try{_sio.io.reconnection(false);}catch(_){}try{_sio.disconnect();}catch(_){}} _sio=null;
+      ablyChannel=null;
+      // Only YANK the player to the lobby when this is a genuine JOIN failure (they're mid-join and
+      // owed an explanation). Socket.io reconnects in the background after a run has already ended —
+      // that reconnect re-presents the now-spent entry token and the server correctly answers "you
+      // were eliminated". Treating that as fatal is what randomly threw players to the home screen
+      // while they were just sitting on the result screen. In that case: disconnect quietly, toast,
+      // and leave them where they are.
+      const wasJoining=_joiningLobby;
+      const runOver=(_localDead||!SG||SG.over);
+      _joiningLobby=false; _lobbyIsPaid=false;
+      if(wasJoining&&!isSpectating){
+        setTimeout(()=>{try{go('scr-lobby');}catch(_){}},3000);
+      }else if(!runOver){
+        // Kicked out of a LIVE run — surface it, but don't teleport them mid-frame.
+        addToast(String(msg||'Disconnected by server'),'#FF4444',6000);
+      }else{
+        console.log('[err] ignored post-session:',msg);
+      }
     });
 
     // Non-fatal server message (bot limits, etc.) — toast only, never touches the connection.
@@ -3233,6 +3278,13 @@ function pkDisconnect(){
 // spectator connection branch) — there is no code path from here that could join, move a
 // snake, or claim money, even from a hand-modified client.
 async function enterWatchMode(region,tier){
+  // NEVER let spectating tear down a paid session. This function begins by dropping the current
+  // socket, so if a paid join is in flight (or already live) it would kill a connection the player
+  // just PAID for — they'd be charged and then dumped to the home screen seconds after joining.
+  // That is exactly the "randomly booted shortly after joining a paid lobby" report, triggered by a
+  // stray click in the Watch & Bet picker also firing joinLobby().
+  if(_joiningLobby){ addToast('Finishing your join first — you were not charged for watching','#FFD700',4000); return; }
+  if(_lobbyIsPaid&&!isSpectating&&SG&&!SG.over){ addToast('Cash out or finish your run before spectating','#FFD700',4000); return; }
   if(_sio)pkDisconnect(); // switching lobbies from an existing watch session, or first entry
   document.getElementById('watch-switch').style.display='flex';
   setGameServer(region==='EU'?'EU':'NA');
@@ -3676,12 +3728,24 @@ function openWatchBet(){
   }
   h+='</div>';
   m.innerHTML=h;
-  const x=m.querySelector('#wb-x'); if(x)x.onclick=()=>{ m.style.display='none'; };
-  m.onclick=(e)=>{ if(e.target===m)m.style.display='none'; };
-  m.querySelectorAll('[data-wb]').forEach(b=>b.onclick=()=>{
+  // Closing the picker arms a short suppression window. Without it, a fast second click lands on
+  // whatever sits beneath the modal on the home screen (▶ PLAY NOW) and CHARGES the player for a
+  // paid lobby they never meant to join. joinLobby() honours _wbSuppressUntil.
+  const closeWb=()=>{ m.style.display='none'; _wbSuppressUntil=Date.now()+900; };
+  const x=m.querySelector('#wb-x'); if(x)x.onclick=(e)=>{ e.stopPropagation(); closeWb(); };
+  // Backdrop click closes, but only after the modal has been up long enough that it can't eat the
+  // very click that opened it.
+  const openedAt=Date.now();
+  m.onclick=(e)=>{ if(e.target===m&&Date.now()-openedAt>250) closeWb(); };
+  m.querySelectorAll('[data-wb]').forEach(b=>b.onclick=async (e)=>{
+    e.preventDefault(); e.stopPropagation();
+    if(_enteringWatch) return;                       // ignore a rapid second click
+    _enteringWatch=true;
     const [region,tier]=b.getAttribute('data-wb').split(':');
-    m.style.display='none';
-    try{ enterWatchMode(region,Number(tier)); }catch(e){ addToast('Could not open arena','#FF4444'); }
+    closeWb();
+    try{ await enterWatchMode(region,Number(tier)); }
+    catch(err){ addToast('Could not open arena','#FF4444'); }
+    finally{ _enteringWatch=false; _wbSuppressUntil=Date.now()+900; }
   });
 }
 
@@ -5382,6 +5446,11 @@ async function endSnakeGame(reason,killerId){
   // Spectating host can still receive 'over'/'gameover' to fully shut down
   if(_localDead&&reason!=='over')return;
   _localDead=true;
+  // The run is over, so this session's entry token is spent. Stop socket.io from auto-reconnecting:
+  // a background reconnect would re-present that spent token, the server would correctly reject it
+  // ("you were eliminated"), and the player would get thrown to the home screen while innocently
+  // sitting on the result/spectate screen. Nothing below needs the socket to keep re-dialling.
+  if(_lobbyIsPaid&&_sio){try{_sio.io.reconnection(false);}catch(_){}}
   _autoCircle=false; // clear auto-circle on death/cashout
   if(_cashoutTimer){clearTimeout(_cashoutTimer);_cashoutTimer=null;} _cashoutActive=false;
   document.removeEventListener('keydown',onGameKey);
