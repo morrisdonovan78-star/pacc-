@@ -3,8 +3,8 @@
 const nacl    = require('tweetnacl');
 const crypto  = require('crypto');
 const GAME_SECRET = (process.env.GAME_SECRET || '').trim();
-const { kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvHincrby, kvLpush, kvLtrim,
-        kvHget, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
+const { kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvZrevrange, kvHincrby,
+        kvLpush, kvLtrim, kvLrange, kvHget, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
 // Pure pari-mutuel engine (spectator betting). All money math lives here so it is unit-tested
 // offline; this file only does auth, KV, and the on-chain transfers. See lib/betting.js.
 const BET = require('../lib/betting');
@@ -464,6 +464,142 @@ async function payBetRecipients(esc, mktId, recipients, tag) {
   return { paidLamports, refused, txs, stranded };
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── P2P BETTING EXCHANGE — player-vs-player, even money, platform never takes a side ──
+// ══════════════════════════════════════════════════════════════════════════════
+// Creator stakes S on one side; an opponent stakes the SAME S on the other. Pot = 2S in escrow.
+// Winner receives 2S − 8%. Unmatched → creator refunded 100%, no fee. The platform holds escrow,
+// matches, settles from authoritative game truth, and takes 8% of COMPLETED wagers only.
+//
+// KV schema:
+//   wg:<id>            JSON wager record
+//   wgopen:<lobbyKey>  ZSET(createdTs) of wager ids currently OPEN (the public order book)
+//   wglive:<lobbyKey>  ZSET(createdTs) of MATCHED wagers still awaiting settlement
+//   wgu:<address>      ZSET(createdTs) of every wager a user is party to (their bet slip)
+//   lock:wg:<id>       NX mutex around accept/settle/cancel (race guard)
+//   wgpaid:<id>        NX single-pay marker (a settled wager can never pay twice)
+//   wgtx:<txSig>       deposit replay guard
+const P2P = require('../lib/p2pbet');
+const WG_TTL       = 604800;   // wager records live 7 days (history)
+const WG_OPEN_WINDOW_MS = 60000; // how long a new wager stays takeable before it's returned unmatched
+const WG_RESERVE_MS = 90000;   // an acceptor has 90s to land their deposit before the claim expires
+const WG_MIN_STAKE = 1_000_000;      // 0.001 SOL floor
+const WG_MAX_STAKE = 100_000_000_000; // 100 SOL ceiling (sanity)
+
+function wgLobbyKey(region, lobby) { return String(region || 'NA') + ':' + String(lobby || ''); }
+async function wgLoad(id) {
+  try { const raw = await kvGet('wg:' + id); return raw ? JSON.parse(raw) : null; } catch (_) { return null; }
+}
+async function wgSave(w) { await kvSet('wg:' + w.id, JSON.stringify(w), WG_TTL); return w; }
+
+// The game server signs each bettable snake so a client cannot invent a subject that could never
+// settle. Mirrors the elim-lock trust model: HMAC over region+lobby+pid+name+ipHash+expiry.
+// ipHash lets us catch a player betting on their own snake from a second account (see wgSelfBetCheck).
+function verifySnakeSig(region, lobby, pid, name, ipHash, expTs, sig) {
+  if (!GAME_SECRET || !sig) return false;
+  if (!(Number(expTs) > Date.now())) return false;                 // roster entry expired
+  const canon = 'snake:' + region + ':' + lobby + ':' + pid + ':' + (name || '') + ':' + (ipHash || '') + ':' + expTs;
+  const expected = crypto.createHmac('sha256', GAME_SECRET).update(canon).digest('hex');
+  try { return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(sig))); } catch (_) { return false; }
+}
+
+// Stable, privacy-preserving fingerprint of the caller's IP. Same secret on the game server, so the
+// same network produces the same hash on both sides — raw IPs are never stored.
+function clientIpHash(req) {
+  try {
+    const xf = String(req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || '').split(',')[0].trim();
+    if (!xf || !GAME_SECRET) return '';
+    return crypto.createHmac('sha256', GAME_SECRET).update('ip:' + xf).digest('hex').slice(0, 16);
+  } catch (_) { return ''; }
+}
+
+// ── SELF-BETTING GUARD ────────────────────────────────────────────────────────
+// A player may freely use their ONE game wallet to create and accept wagers. The only thing they may
+// never do is bet on (or against) THEIR OWN snake — that's the outcome they personally control.
+// Two layers:
+//   1. Identity — a snake's pid IS its wallet address, so `subject === bettor` is an exact match.
+//   2. Network — if the bettor is on the same network as the snake they're backing, it's very likely
+//      the same person on a second account. Blocked, and the attempt is counted so repeat abuse is
+//      visible even if they later switch networks.
+// Returns an error string to reject with, or null to allow.
+async function wgSelfBetCheck({ bettor, subjects, subjectIpHashes, req }) {
+  for (const s of subjects) {
+    if (s && s === bettor) return 'You cannot bet on your own snake';
+  }
+  const myIp = clientIpHash(req);
+  if (myIp) {
+    for (let i = 0; i < subjects.length; i++) {
+      const sIp = subjectIpHashes[i];
+      if (sIp && sIp === myIp) {
+        // Count it so a pattern is visible even across later IP changes.
+        try {
+          const k = 'wgselfhit:' + bettor;
+          await kvIncrby(k, 1); await kvExpire(k, 604800);
+          betAlert('self-bet attempt blocked (same network) bettor=' + String(bettor).slice(0, 8) +
+                   ' subject=' + String(subjects[i]).slice(0, 8));
+        } catch (_) {}
+        return 'You cannot bet on a snake played from your own network';
+      }
+    }
+  }
+  return null;
+}
+
+// Push a live update to every spectator of that arena via the game server's websocket (no polling).
+// Fire-and-forget: a failed push only costs a client a slightly stale list, never money.
+function wgPush(region, lobby, event, wager) {
+  if (!GAME_SECRET) return;
+  try {
+    const ts = Date.now();
+    const proof = crypto.createHmac('sha256', GAME_SECRET).update('wager-event:' + lobby + ':' + ts).digest('hex');
+    const base = String(region).toUpperCase() === 'EU' ? 'https://eu.pac-arena.com' : 'https://us.pac-arena.com';
+    fetch(base + '/wager-event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
+      body: JSON.stringify({ lobby, event, wager }),
+      signal: AbortSignal.timeout(4000),
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+// Pay exactly one recipient, gated by the global solvency invariant. Used for winner payouts,
+// cancellations, returns and the "your deposit couldn't be matched" refund. Never sizes from balance.
+async function wgPayOne(esc, toAddr, lamports, tag) {
+  const amt = Math.floor(Number(lamports) || 0);
+  if (!(amt > 0)) return { ok: false, reason: 'nothing to pay' };
+  const inv = await assertSolvency(esc.pubkeyB58, amt);
+  if (!inv.ok) {
+    betAlert('invariant REFUSED ' + tag + ' to=' + String(toAddr).slice(0, 8) + ' amt=' + amt +
+             ' bal=' + inv.onChainBalance + ' wagerLiab=' + inv.wagerLiability + ' betLiab=' + inv.betLiability +
+             ' fee=' + inv.accruedFee + ' deficit=' + (inv.deficit || 'n/a'));
+    return { ok: false, reason: 'insolvent', inv };
+  }
+  try {
+    const { blockhash } = await fetchBalAndHash(esc.pubkeyB58);
+    const tx = buildTx(esc, blockhash, [{ to: b58Decode(toAddr), lamports: amt }]);
+    const result = await sendAndConfirm(tx);
+    return { ok: true, sig: result.sig, confirmed: result.confirmed };
+  } catch (e) {
+    console.error('[wg] payout failed ' + tag + ' — ' + (e && e.message || e));
+    return { ok: false, reason: (e && e.message) || 'send failed' };
+  }
+}
+
+// Public-safe projection of a wager (never leaks internal reservation details).
+function wgPublic(w) {
+  if (!w) return null;
+  return {
+    id: w.id, lobby: w.lobby, region: w.region, type: w.type,
+    subject: w.subject, subjectName: w.subjectName, subject2: w.subject2, subject2Name: w.subject2Name,
+    side: w.side, takerSide: P2P.opposingSide(w.type, w.side),
+    stake: w.stakeLamports, potentialWin: P2P.potentialWin(w.stakeLamports),
+    creator: w.creator, creatorName: w.creatorName, acceptor: w.acceptor, acceptorName: w.acceptorName,
+    status: w.status, createdTs: w.createdTs, lockTs: w.lockTs, durationMs: w.durationMs,
+    winningSide: w.winningSide || null, winner: w.winner || null,
+    payout: w.payout || 0, fee: w.fee || 0, payoutTx: w.payoutTx || null, settledTs: w.settledTs || null,
+  };
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   let done = false;
@@ -600,106 +736,123 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, parked: orbs.length });
     }
 
-    // ── bet-pools: PUBLIC read of a market's current pools + live implied odds ───────────────────
-    // No auth — pool sizes and odds are public info (like a scoreboard). Spectators poll this every
-    // second during the open window to render live sportsbook-style multipliers. Touches no money.
-    if (action === 'bet-pools') {
-      const mktId = String(body.mkt || body.marketId || '');
-      if (!mktId) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'mkt required' }); }
-      let meta = null;
-      try { const raw = await kvGet('betmkt:' + mktId); if (raw) meta = JSON.parse(raw); } catch (_) {}
-      const ph = await kvHgetall('betpool:' + mktId) || {};
-      const pools = {};
-      for (const k of Object.keys(ph)) { const v = Math.max(0, Math.floor(Number(ph[k]) || 0)); if (v > 0) pools[k] = v; }
+    // ── wager-list: PUBLIC order book for one arena (open + live). No auth, no money. ────────────
+    if (action === 'wager-list') {
+      const lk = wgLobbyKey(body.region, body.lobby);
+      const ids = [];
+      for (const key of ['wgopen:' + lk, 'wglive:' + lk]) {
+        const z = await kvZrevrange(key, 0, 199);           // newest first (score = createdTs)
+        if (Array.isArray(z)) for (let i = 0; i < z.length; i += 2) ids.push(z[i]);
+      }
+      const now = Date.now();
+      const open = [], live = [];
+      for (const id of ids.slice(0, 300)) {
+        const w = await wgLoad(id); if (!w) continue;
+        if (w.status === P2P.STATUS.OPEN)      { if (now < Number(w.lockTs)) open.push(wgPublic(w)); }
+        else if (w.status === P2P.STATUS.MATCHED) live.push(wgPublic(w));
+      }
       clearTimeout(guard); done = true;
-      return res.status(200).json({ mkt: mktId, pools, odds: BET.liveOdds(pools), meta,
-        total: BET.poolTotal(pools), status: (meta && meta.status) || 'open', result: (meta && meta.result) || null });
+      return res.status(200).json({ ok: true, open, live, now });
     }
 
-    // ── bet-resolve / bet-refund: server-authoritative payout or 100% refund ─────────────────────
-    // GAME_SECRET-HMAC (same trust model as elim-lock). The game server decides the outcome from live
-    // game truth and calls this; the MONEY is computed here from the market's own pool only, gated by
-    // the global solvency invariant. Idempotent + retry-safe: safe to call repeatedly until fully paid.
-    if (action === 'bet-resolve' || action === 'bet-refund') {
-      const mktId  = String(body.mkt || '');
-      const result = action === 'bet-resolve' ? String(body.result || '') : '';
-      const gts    = Number(req.headers['x-game-ts'] || 0);
-      const payload = action === 'bet-resolve'
-        ? ('bet-resolve:' + mktId + ':' + result + ':' + gts)
-        : ('bet-refund:' + mktId + ':' + gts);
-      if (!verifyGameProof(req, payload)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
-      if (!mktId) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'mkt required' }); }
+    // ── wager-mine: PUBLIC read of one address's bet slip (all statuses). No money. ──────────────
+    if (action === 'wager-mine') {
+      const addr = String(body.address || '');
+      if (!addr) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'address required' }); }
+      const z = await kvZrevrange('wgu:' + addr, 0, 199);
+      const ids = []; if (Array.isArray(z)) for (let i = 0; i < z.length; i += 2) ids.push(z[i]);
+      const mine = [];
+      for (const id of ids) { const w = await wgLoad(id); if (w) mine.push(wgPublic(w)); }
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, wagers: mine, now: Date.now() });
+    }
 
-      // Serialize resolution per market so two concurrent calls can't both pay.
-      const rLock = await kvSetNX('lock:betmkt:' + mktId, '1', 50);
-      if (!rLock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'resolution in progress' }); }
+    // ── wager-settle: AUTHORITATIVE settlement from the game server (GAME_SECRET-HMAC) ───────────
+    // The game server decides the winning side from live game truth; this pays the winner 2S − 8%
+    // and books the fee. Idempotent + NX-locked: a wager can NEVER pay out twice.
+    if (action === 'wager-settle') {
+      const wid = String(body.wagerId || '');
+      const winningSide = String(body.winningSide || '');
+      const gts = Number(req.headers['x-game-ts'] || 0);
+      if (!verifyGameProof(req, 'wager-settle:' + wid + ':' + winningSide + ':' + gts)) {
+        clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (!wid) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wagerId required' }); }
+      const lock = await kvSetNX('lock:wg:' + wid, '1', 45);
+      if (!lock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'settlement in progress' }); }
       try {
-        let meta = null;
-        try { const raw = await kvGet('betmkt:' + mktId); if (raw) meta = JSON.parse(raw); } catch (_) {}
-        // Already fully settled → idempotent success.
-        if (meta && (meta.status === 'resolved' || meta.status === 'void') && meta.allPaid) {
+        const w = await wgLoad(wid);
+        if (!w) { clearTimeout(guard); done = true; return res.status(404).json({ error: 'wager not found' }); }
+        if (w.status === P2P.STATUS.SETTLED) {   // idempotent replay
           clearTimeout(guard); done = true;
-          return res.status(200).json({ ok: true, market: mktId, status: meta.status, already: true });
+          return res.status(200).json({ ok: true, already: true, wager: wgPublic(w) });
         }
+        const r = P2P.resolveWager(w, winningSide);
+        if (!r) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wager is not settleable' }); }
+        // Single-pay marker claimed BEFORE the transfer — a crash mid-send can never double-pay.
+        const claimed = await kvSetNX('wgpaid:' + wid, '1', WG_TTL);
+        if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
 
         const esc = getEscrow();
-        const { pools, stakesByOutcome, allStakes } = await loadMarketBets(mktId);
-        const bettors = Object.keys(allStakes);
-        const type = (meta && meta.type) || (body.type ? String(body.type) : 'binary');
-        const outcomes = (meta && Array.isArray(meta.outcomes)) ? meta.outcomes
-                        : (Array.isArray(body.outcomes) ? body.outcomes : Object.keys(pools));
-
-        // No bets at all → nothing to pay; mark done.
-        if (bettors.length === 0) {
-          const m2 = Object.assign({ id: mktId }, meta || {}, { status: 'void', result: null, allPaid: true, doneTs: Date.now() });
-          await kvSet('betmkt:' + mktId, JSON.stringify(m2), BET_MKT_TTL).catch(() => {});
+        const pay = await wgPayOne(esc, r.winner, r.payout, 'wager-settle');
+        if (!pay.ok) {
+          await kvDel('wgpaid:' + wid).catch(() => {});   // release so a funded retry can pay
           clearTimeout(guard); done = true;
-          return res.status(200).json({ ok: true, market: mktId, status: 'void', paid: 0, note: 'no bets' });
+          return res.status(503).json({ error: 'payout held: ' + (pay.reason || 'unknown'), retry: true });
         }
-
-        // Decide void vs pay. A refund call is always void; a resolve voids if a winnable side had no
-        // counterparty (engine rule) or the declared winner has no backers (no one to pay).
-        const voidNow = (action === 'bet-refund')
-                     || BET.isVoid(type, pools, outcomes)
-                     || !result || !(Math.floor(Number(pools[result]) || 0) > 0);
-
-        let payResult, statusFinal;
-        if (voidNow) {
-          statusFinal = 'void';
-          const { refunds } = BET.voidRefunds(allStakes);
-          const recips = Object.keys(refunds).map(a => ({ addr: a, lamports: refunds[a] }));
-          payResult = await payBetRecipients(esc, mktId, recips, 'void-refund');
-        } else {
-          statusFinal = 'resolved';
-          const rp = BET.resolvePayouts(result, stakesByOutcome[result] || {}, pools);
-          // Move the house fee (+ rounding dust) out of betLiability into accruedFee EXACTLY ONCE.
-          // ORDER MATTERS (fail-safe): raise accruedFee FIRST, then lower betLiability. The two HINCRBYs
-          // aren't atomic, so if the function dies between them the ledger must err toward OVER-stating
-          // total liability (conservative → the invariant may refuse, never over-pay), never under-stating.
-          if (rp.feePlusDust > 0 && (await kvSetNX('betfee:' + mktId, '1', BET_MKT_TTL))) {
-            await kvHincrby(BET_LEDGER, 'accruedFee',    rp.feePlusDust).catch(() => {});
-            await kvHincrby(BET_LEDGER, 'betLiability', -rp.feePlusDust).catch(() => {});
-          }
-          const recips = Object.keys(rp.payouts).map(a => ({ addr: a, lamports: rp.payouts[a] }));
-          payResult = await payBetRecipients(esc, mktId, recips, 'bet-win');
-        }
-
-        const allPaid = payResult.stranded === 0 && payResult.refused === 0;
-        const m2 = Object.assign({ id: mktId }, meta || {}, {
-          type, outcomes, status: statusFinal, result: voidNow ? null : result,
-          allPaid, doneTs: Date.now(),
-        });
-        await kvSet('betmkt:' + mktId, JSON.stringify(m2), BET_MKT_TTL).catch(() => {});
-
+        // Book it: the whole pot leaves bet liability; the platform's 8% becomes accrued fee.
+        await kvHincrby(BET_LEDGER, 'accruedFee', r.fee).catch(() => {});
+        await kvHincrby(BET_LEDGER, 'betLiability', -r.pot).catch(() => {});
+        await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {}); // network cost from the fee
+        w.status = P2P.STATUS.SETTLED; w.winningSide = winningSide; w.winner = r.winner; w.loser = r.loser;
+        w.payout = r.payout; w.fee = r.fee; w.payoutTx = pay.sig; w.settledTs = Date.now();
+        await wgSave(w);
+        const lk = wgLobbyKey(w.region, w.lobby);
+        await kvZrem('wglive:' + lk, wid).catch(() => {});
+        await kvZrem('wgopen:' + lk, wid).catch(() => {});
+        wgPush(w.region, w.lobby, 'settled', wgPublic(w));
         clearTimeout(guard); done = true;
-        return res.status(200).json({
-          ok: true, market: mktId, status: statusFinal, allPaid,
-          paidLamports: payResult.paidLamports, txs: payResult.txs,
-          stranded: payResult.stranded, refused: payResult.refused,
-        });
-      } finally {
-        await kvDel('lock:betmkt:' + mktId).catch(() => {});
+        return res.status(200).json({ ok: true, wager: wgPublic(w), tx: pay.sig });
+      } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
+    }
+
+    // ── wager-return: unmatched at close → creator refunded 100%, NO fee (GAME_SECRET-HMAC) ──────
+    if (action === 'wager-return') {
+      const wid = String(body.wagerId || '');
+      const gts = Number(req.headers['x-game-ts'] || 0);
+      if (!verifyGameProof(req, 'wager-return:' + wid + ':' + gts)) {
+        clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' });
       }
+      const lock = await kvSetNX('lock:wg:' + wid, '1', 45);
+      if (!lock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'busy' }); }
+      try {
+        const w = await wgLoad(wid);
+        if (!w) { clearTimeout(guard); done = true; return res.status(404).json({ error: 'wager not found' }); }
+        if (w.status === P2P.STATUS.RETURNED) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+        // Only an UNMATCHED wager can be returned — a matched one must settle.
+        if (!P2P.canTransition(w.status, P2P.STATUS.RETURNED)) {
+          clearTimeout(guard); done = true; return res.status(400).json({ error: 'cannot return a ' + w.status + ' wager' });
+        }
+        const claimed = await kvSetNX('wgpaid:' + wid, '1', WG_TTL);
+        if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+        const esc = getEscrow();
+        const amt = P2P.returnAmount(w.stakeLamports);          // 100%, no fee
+        const pay = await wgPayOne(esc, w.creator, amt, 'wager-return');
+        if (!pay.ok) {
+          await kvDel('wgpaid:' + wid).catch(() => {});
+          clearTimeout(guard); done = true;
+          return res.status(503).json({ error: 'refund held: ' + (pay.reason || 'unknown'), retry: true });
+        }
+        await kvHincrby(BET_LEDGER, 'betLiability', -amt).catch(() => {});
+        await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
+        w.status = P2P.STATUS.RETURNED; w.payoutTx = pay.sig; w.settledTs = Date.now(); w.fee = 0;
+        await wgSave(w);
+        const lk = wgLobbyKey(w.region, w.lobby);
+        await kvZrem('wgopen:' + lk, wid).catch(() => {});
+        wgPush(w.region, w.lobby, 'returned', wgPublic(w));
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true, wager: wgPublic(w), tx: pay.sig });
+      } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
     }
 
     // ── Wallet signature auth — required for all fund-moving actions ─────────
@@ -716,57 +869,185 @@ module.exports = async function handler(req, res) {
 
     const esc = getEscrow();
 
-    // ── bet-place: a SPECTATOR deposits SOL into escrow to back an outcome ────────────────────────
-    // Auth is layered: (1) the wallet signature above proves the bettor owns the wallet; (2) the market
-    // descriptor is GAME_SECRET-signed by the game server so a client cannot invent a market, change its
-    // outcomes, or extend the window; (3) the on-chain tx proves the money actually arrived. Recorded to
-    // KV and added to betLiability. This path only ADDS to escrow, so it never needs the solvency gate.
-    if (action === 'bet-place') {
-      const bettor = playerAddress;
-      const stake  = wagerLamportsRaw;
-      const m      = body.market || null;                 // { id, lobby, type, outcomes, openTs, lockTs }
-      const msig   = body.marketSig || '';
-      const outcome = String(body.outcome || '');
-      const txSig  = body.txSig;
+    // ── wager-create: a spectator opens a P2P wager and escrows their stake ──────────────────────
+    // Layered auth: the wallet signature above proves ownership; the snake's GAME_SECRET signature
+    // proves the subject really is in that arena (so it can always settle); the on-chain tx proves
+    // the stake actually landed. Only ADDS to escrow, so no solvency gate is needed here.
+    if (action === 'wager-create') {
+      const creator = playerAddress;
+      const stake   = wagerLamportsRaw;
+      const region  = String(body.region || 'NA').toUpperCase() === 'EU' ? 'EU' : 'NA';
+      const lobby   = String(body.lobby || '');
+      const typeId  = String(body.type || '');
+      const side    = String(body.side || '');
+      const now     = Date.now();
+      const lockTs  = now + WG_OPEN_WINDOW_MS;
 
-      if (!bettor) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'playerAddress required' }); }
-      if (b58Decode(bettor).length !== 32) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'bad bettor address' }); }
-      if (!(stake > 0)) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'stake must be positive' }); }
-      if (!m || !verifyMarketDescriptor(m, msig)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Invalid market — cannot verify it came from the game server' }); }
-      if (!Array.isArray(m.outcomes) || !m.outcomes.includes(outcome)) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'unknown outcome' }); }
-      const nowMs = Date.now();
-      if (!(nowMs < Number(m.lockTs))) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Betting is closed for this market' }); }
-      if (!(nowMs >= Number(m.openTs) - 5000)) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Market not open yet' }); }
+      if (!creator || b58Decode(creator).length !== 32) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'bad creator address' }); }
 
-      // Spectator-only gate (anti-collusion): anyone with a live wager deposit is an in-game player and
-      // is blocked from betting. Checkable here without knowing the lobby roster; the client also hides
-      // the panel from players. (Pari-mutuel carries no house risk, so a separate-wallet sybil can't
-      // hurt escrow — this rule is about fairness/optics and stopping the obvious self-bet.)
-      const activeWager = await kvGet('pw:' + bettor);
-      if (activeWager !== null) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Players in a live game cannot bet — cash out first' }); }
+      const vErr = P2P.validateCreate({ typeId, side, stakeLamports: stake, lockTs, nowMs: now,
+        subject: body.subject, subject2: body.subject2, minStake: WG_MIN_STAKE, maxStake: WG_MAX_STAKE });
+      if (vErr) { clearTimeout(guard); done = true; return res.status(400).json({ error: vErr }); }
 
+      // Subject snake(s) must carry the game server's signature for THIS arena.
+      if (!verifySnakeSig(region, lobby, body.subject, body.subjectName, body.subjIpHash, body.subjExp, body.subjSig)) {
+        clearTimeout(guard); done = true; return res.status(403).json({ error: 'Invalid or expired snake — refresh and try again' });
+      }
+      const needs2 = P2P.getBetType(typeId).needsSubject2;
+      if (needs2 && !verifySnakeSig(region, lobby, body.subject2, body.subject2Name, body.subj2IpHash, body.subj2Exp, body.subj2Sig)) {
+        clearTimeout(guard); done = true; return res.status(403).json({ error: 'Invalid or expired second snake' });
+      }
+
+      // You may bet freely with your one game wallet — but never on your own snake.
+      const selfErr = await wgSelfBetCheck({
+        bettor: creator,
+        subjects: [body.subject, needs2 ? body.subject2 : null].filter(Boolean),
+        subjectIpHashes: [body.subjIpHash, needs2 ? body.subj2IpHash : null].filter(x => x !== null),
+        req,
+      });
+      if (selfErr) { clearTimeout(guard); done = true; return res.status(403).json({ error: selfErr }); }
+
+      const txSig = body.txSig;
       if (!txSig) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'txSig required' }); }
-      const depKey = 'bettx:' + txSig;
-      if (await kvGet(depKey) !== null) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Deposit already used — make a new deposit to bet again' }); }
+      if (await kvGet('wgtx:' + txSig) !== null) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Deposit already used' }); }
+      await verifyBetDepositTx(txSig, creator, stake, esc.pubkeyB58);
+      await kvSet('wgtx:' + txSig, '1', WG_TTL);
 
-      // On-chain proof the deposit actually landed in escrow (mirrors the lobby-join deposit check).
-      await verifyBetDepositTx(txSig, bettor, stake, esc.pubkeyB58);
-      await kvSet(depKey, '1', BET_MKT_TTL);              // replay guard before recording
-
-      // Record the bet: per-bettor key (authoritative for payout), pool hash (cheap live odds),
-      // and the global betLiability ledger. Per-bet key uses INCRBY so repeat bets accumulate.
-      const betKey = 'bet:' + m.id + ':' + outcome + ':' + bettor;
-      await kvIncrby(betKey, stake); await kvExpire(betKey, BET_MKT_TTL).catch(() => {});
-      await kvHincrby('betpool:' + m.id, outcome, stake); await kvExpire('betpool:' + m.id, BET_MKT_TTL).catch(() => {});
+      const id = 'w' + now.toString(36) + Math.random().toString(36).slice(2, 8);
+      const w = {
+        id, region, lobby, type: typeId, side,
+        subject: body.subject, subjectName: String(body.subjectName || '').slice(0, 20),
+        subject2: body.subject2 || null, subject2Name: String(body.subject2Name || '').slice(0, 20),
+        // kept so the ACCEPTOR can be self-bet checked too (never exposed publicly)
+        subjIpHash: body.subjIpHash || '', subj2IpHash: body.subj2IpHash || '',
+        durationMs: Math.max(0, Math.floor(Number(body.durationMs) || 0)),
+        stakeLamports: stake, creator, creatorName: String(body.creatorName || '').replace(/[^A-Za-z0-9_\- ]/g, '').slice(0, 16),
+        acceptor: null, acceptorName: null, status: P2P.STATUS.OPEN,
+        createdTs: now, lockTs, createTx: txSig,
+      };
+      await wgSave(w);
+      const lk = wgLobbyKey(region, lobby);
+      await kvZadd('wgopen:' + lk, now, id);
+      await kvExpire('wgopen:' + lk, WG_TTL).catch(() => {});
+      await kvZadd('wgu:' + creator, now, id);
+      await kvExpire('wgu:' + creator, WG_TTL).catch(() => {});
       await kvHincrby(BET_LEDGER, 'betLiability', stake);
-      // First bet writes the market meta (status:open) — SETNX so we never clobber a later resolved/void.
-      await kvSetNX('betmkt:' + m.id, JSON.stringify({
-        id: m.id, lobby: m.lobby, type: m.type, outcomes: m.outcomes,
-        openTs: m.openTs, lockTs: m.lockTs, status: 'open',
-      }), BET_MKT_TTL).catch(() => {});
-
+      wgPush(region, lobby, 'created', wgPublic(w));
       clearTimeout(guard); done = true;
-      return res.status(200).json({ ok: true, market: m.id, outcome, recorded: stake });
+      return res.status(200).json({ ok: true, wager: wgPublic(w) });
+    }
+
+    // ── wager-reserve: atomically CLAIM an open wager before depositing ──────────────────────────
+    // This is what makes double-accept impossible AND stops anyone paying for a wager someone else
+    // just took. The claim auto-expires (WG_RESERVE_MS) and the wager returns to the book.
+    if (action === 'wager-reserve') {
+      const taker = playerAddress;
+      const wid   = String(body.wagerId || '');
+      if (!taker || !wid) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wagerId required' }); }
+      const lock = await kvSetNX('lock:wg:' + wid, '1', 20);
+      if (!lock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'Someone else is taking this wager' }); }
+      try {
+        const w = await wgLoad(wid);
+        const now = Date.now();
+        // A stale reservation silently reverts to open before we validate.
+        if (w && w.status === P2P.STATUS.RESERVED && Number(w.reservedUntil || 0) < now) {
+          w.status = P2P.STATUS.OPEN; w.reservedBy = null; w.reservedUntil = 0; await wgSave(w);
+          await kvZadd('wgopen:' + wgLobbyKey(w.region, w.lobby), w.createdTs, wid);
+        }
+        const aErr = P2P.validateAccept({ wager: w, acceptor: taker, nowMs: now });
+        if (aErr) { clearTimeout(guard); done = true; return res.status(409).json({ error: aErr }); }
+        // Taking the other side of a wager on YOUR OWN snake is just as exploitable as backing it
+        // (you'd control the outcome you're betting against), so the same guard applies here.
+        const selfErr = await wgSelfBetCheck({
+          bettor: taker,
+          subjects: [w.subject, w.subject2].filter(Boolean),
+          subjectIpHashes: [w.subjIpHash || '', w.subj2IpHash || ''],
+          req,
+        });
+        if (selfErr) { clearTimeout(guard); done = true; return res.status(403).json({ error: selfErr }); }
+        w.status = P2P.STATUS.RESERVED; w.reservedBy = taker; w.reservedUntil = now + WG_RESERVE_MS;
+        await wgSave(w);
+        await kvZrem('wgopen:' + wgLobbyKey(w.region, w.lobby), wid).catch(() => {}); // leaves the book at once
+        wgPush(w.region, w.lobby, 'reserved', wgPublic(w));
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true, stake: w.stakeLamports, expiresTs: w.reservedUntil, wager: wgPublic(w) });
+      } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
+    }
+
+    // ── wager-accept: acceptor's deposit landed → MATCH the wager and lock it ────────────────────
+    if (action === 'wager-accept') {
+      const taker = playerAddress;
+      const wid   = String(body.wagerId || '');
+      const txSig = body.txSig;
+      if (!taker || !wid || !txSig) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wagerId + txSig required' }); }
+      const lock = await kvSetNX('lock:wg:' + wid, '1', 45);
+      if (!lock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'busy' }); }
+      try {
+        const w = await wgLoad(wid);
+        if (!w) { clearTimeout(guard); done = true; return res.status(404).json({ error: 'wager not found' }); }
+        if (await kvGet('wgtx:' + txSig) !== null) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Deposit already used' }); }
+        // The deposit is real regardless of whether the match still stands — verify it first.
+        await verifyBetDepositTx(txSig, taker, w.stakeLamports, esc.pubkeyB58);
+        await kvSet('wgtx:' + txSig, '1', WG_TTL);
+
+        const now = Date.now();
+        const claimOk = (w.status === P2P.STATUS.RESERVED && w.reservedBy === taker && Number(w.reservedUntil || 0) >= now);
+        if (!claimOk || !(now < Number(w.lockTs))) {
+          // Their money landed but the wager is no longer theirs to take → return it immediately.
+          await kvHincrby(BET_LEDGER, 'betLiability', w.stakeLamports);   // briefly owed to them
+          const back = await wgPayOne(esc, taker, w.stakeLamports, 'wager-accept-refund');
+          if (back.ok) { await kvHincrby(BET_LEDGER, 'betLiability', -w.stakeLamports).catch(() => {}); await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {}); }
+          clearTimeout(guard); done = true;
+          return res.status(409).json({ error: 'That wager was taken first — your deposit was returned', refundTx: back.sig || null });
+        }
+        w.status = P2P.STATUS.MATCHED; w.acceptor = taker;
+        w.acceptorName = String(body.acceptorName || '').replace(/[^A-Za-z0-9_\- ]/g, '').slice(0, 16);
+        w.matchedTs = now; w.acceptTx = txSig; w.reservedBy = null; w.reservedUntil = 0;
+        // A "survive N" wager's clock starts when both sides are locked in — fair to creator and taker.
+        if (w.type === 'survive' && w.durationMs > 0) w.resolveTs = now + w.durationMs;
+        await wgSave(w);
+        const lk = wgLobbyKey(w.region, w.lobby);
+        await kvZrem('wgopen:' + lk, wid).catch(() => {});
+        await kvZadd('wglive:' + lk, w.createdTs, wid);
+        await kvExpire('wglive:' + lk, WG_TTL).catch(() => {});
+        await kvZadd('wgu:' + taker, w.createdTs, wid);
+        await kvExpire('wgu:' + taker, WG_TTL).catch(() => {});
+        await kvHincrby(BET_LEDGER, 'betLiability', w.stakeLamports);   // pot is now 2× stake
+        wgPush(w.region, w.lobby, 'matched', wgPublic(w));
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true, wager: wgPublic(w) });
+      } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
+    }
+
+    // ── wager-cancel: creator withdraws an UNMATCHED wager → 100% back, no fee ───────────────────
+    if (action === 'wager-cancel') {
+      const requester = playerAddress;
+      const wid = String(body.wagerId || '');
+      if (!requester || !wid) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wagerId required' }); }
+      const lock = await kvSetNX('lock:wg:' + wid, '1', 45);
+      if (!lock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'busy' }); }
+      try {
+        const w = await wgLoad(wid);
+        const cErr = P2P.validateCancel({ wager: w, requester, nowMs: Date.now() });
+        if (cErr) { clearTimeout(guard); done = true; return res.status(409).json({ error: cErr }); }
+        const claimed = await kvSetNX('wgpaid:' + wid, '1', WG_TTL);
+        if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+        const amt = P2P.returnAmount(w.stakeLamports);
+        const back = await wgPayOne(esc, w.creator, amt, 'wager-cancel');
+        if (!back.ok) {
+          await kvDel('wgpaid:' + wid).catch(() => {});
+          clearTimeout(guard); done = true;
+          return res.status(503).json({ error: 'refund held: ' + (back.reason || 'unknown'), retry: true });
+        }
+        await kvHincrby(BET_LEDGER, 'betLiability', -amt).catch(() => {});
+        await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
+        w.status = P2P.STATUS.CANCELLED; w.payoutTx = back.sig; w.settledTs = Date.now(); w.fee = 0;
+        await wgSave(w);
+        await kvZrem('wgopen:' + wgLobbyKey(w.region, w.lobby), wid).catch(() => {});
+        wgPush(w.region, w.lobby, 'cancelled', wgPublic(w));
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true, wager: wgPublic(w), tx: back.sig });
+      } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
     }
 
     // ── balance ───────────────────────────────────────────────────────────────

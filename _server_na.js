@@ -1812,7 +1812,7 @@ function ssTick(lid, io) {
   }
 
   // Spectator betting: drive market state machine + resolutions (additive, never blocks the tick).
-  try { ssBetTick(lid, sg, io); } catch (_) {}
+  try { ssWagerTick(lid, sg, io); } catch (_) {}
 
   // 5. Broadcast state to all clients
 
@@ -2959,212 +2959,191 @@ function ssKill(victim, killer, lid, io, diag) {
 
 
 
-// ═══════════════════════════ SPECTATOR BETTING (pari-mutuel) ═══════════════════════════
-// The server is ONLY the market STATE MACHINE + odds/meta broadcaster + resolution TRIGGER. It never
-// moves money: every SOL flow goes through /api/settle (clients call bet-place; this code calls
-// bet-resolve / bet-refund via the GAME_SECRET-HMAC server-to-server pattern, exactly like elim-lock).
-// Fully additive — the only hooks into the game are ssBetTick() (called once per ssTick) and
-// ssBetSendTo() (one snapshot to a spectator on connect). No socket input listener is ever added, so a
-// modified client can never drive this — it can only READ broadcasts and place bets through the signed,
-// on-chain-verified settle path.
-// Default = TEST LOBBY ONLY (safe default: a crash/reboot never silently enables paid). Broaden to
-// paid deliberately by setting SS_BET_LOBBIES, e.g. 'ss-test-lobby,ss-paid-lobby-1,ss-paid-lobby-5'.
-const SS_BET_ENABLED    = new Set((process.env.SS_BET_LOBBIES || 'ss-test-lobby').split(',').map(s => s.trim()).filter(Boolean));
-const SS_BET_SETTLE_URL = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
-const BET_SURVIVAL_MS    = 90000;   // a survival market resolves after this many ms of survival
-const BET_SURVIVAL_OPEN  = 30000;   // survival betting window
-const BET_SURVIVAL_EVERY = 150000;  // don't open another survival market more often than this
-const BET_FLASH_OPEN     = 2000;    // cashout-flash betting window
-const BET_LMS_OPEN       = 30000;   // last-man-standing betting window
-const BET_LMS_EVERY      = 210000;  // min gap between LMS markets
-const BET_LMS_MAXMS      = 300000;  // hard cap on an LMS market (declare longest-survivor-so-far)
-const BET_MKT_CLEAN_MS   = 60000;   // keep a resolved market around this long (late spectators see result)
+// ═══════════════════════════ P2P BETTING EXCHANGE (server side) ═══════════════════════════
+// The server is authoritative for OUTCOMES ONLY — it never moves money. Its three jobs:
+//   1. Sign the bettable-snake roster (so a client can't invent a subject that could never settle,
+//      and so /api/settle can catch someone betting on their own snake from a second account).
+//   2. Watch every live wager's subject and tell /api/settle who won (GAME_SECRET-HMAC).
+//   3. Relay wager events from Vercel to spectators over the socket, so the UI is push-driven
+//      with NO client polling.
+// Additive: hooks are ssWagerTick() (once per ssTick) and ssWagerSendTo() (spectator connect).
+const WG_ENABLED    = new Set((process.env.SS_WAGER_LOBBIES || 'ss-test-lobby,ss-paid-lobby-1,ss-paid-lobby-5').split(',').map(s => s.trim()).filter(Boolean));
+const WG_SETTLE_URL = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
+const WG_REGION     = String(process.env.WG_REGION || 'NA').toUpperCase() === 'EU' ? 'EU' : 'NA';
+const WG_ROSTER_MS  = 4000;    // how often the signed roster is rebroadcast
+const WG_ROSTER_TTL = 180000;  // how long a signed roster entry stays valid
+const WG_RECON_MS   = 20000;   // backstop re-sync of live wagers (survives a server restart)
 
-const ssBet = new Map(); // lid -> { markets: Map<id,m>, seenCash:Set<pid>, lastSurvival, lastLMS }
-function ssBetLobby(lid) {
-  let s = ssBet.get(lid);
-  if (!s) { s = { markets: new Map(), seenCash: new Set(), lastSurvival: 0, lastLMS: 0 }; ssBet.set(lid, s); }
+const wgState   = new Map();   // lid -> { live:Map(id->w), fate:Map(pid->{outAt,how}), lastRoster, lastRecon }
+const wgIpByPid = new Map();   // pid -> ipHash (populated on connect; used for self-bet detection)
+
+function wgLobby(lid) {
+  let s = wgState.get(lid);
+  if (!s) { s = { live: new Map(), fate: new Map(), lastRoster: 0, lastRecon: 0 }; wgState.set(lid, s); }
   return s;
 }
-function betSign(canon) { return crypto.createHmac('sha256', GAME_SECRET).update(canon).digest('hex'); }
-function betMarketCanon(m) { return 'betmkt:' + m.id + ':' + m.lobby + ':' + m.type + ':' + m.outcomes.join(',') + ':' + m.openTs + ':' + m.lockTs; }
-function betDescriptor(m) {
-  return { id: m.id, lobby: m.lobby, type: m.type, outcomes: m.outcomes, openTs: m.openTs, lockTs: m.lockTs, sig: betSign(betMarketCanon(m)) };
+function wgHmac(str) { return crypto.createHmac('sha256', GAME_SECRET).update(str).digest('hex'); }
+// Same construction as api/settle.js clientIpHash — raw IPs are never stored or transmitted.
+function wgIpHash(ip) { return ip ? wgHmac('ip:' + String(ip).split(',')[0].trim()).slice(0, 16) : ''; }
+function wgNoteIp(pid, socket) {
+  if (!GAME_SECRET || !pid) return;
+  try {
+    const h = socket.handshake || {};
+    const ip = (h.headers && (h.headers['x-forwarded-for'] || h.headers['x-real-ip'])) || h.address || '';
+    const hash = wgIpHash(ip);
+    if (hash) wgIpByPid.set(String(pid), hash);
+  } catch (_) {}
 }
-function betPayload(m) {
-  return {
-    market: betDescriptor(m), question: m.question, labels: m.labels || null,
-    phase: m.phase, result: m.result || null, resolveTs: m.resolveTs || null,
-    runners: m.runners || null,
-  };
-}
-function betBroadcast(lid, io, m) { try { io.to(lid).emit('ss-bet', betPayload(m)); } catch (_) {} }
 
-// A snake's "notability" — money dominates (paid lobbies), size breaks ties (free/test lobby).
-function betMetric(sn) { return (Number(sn.usd) || 0) * 1e6 + (Number(sn.ns) || Number(sn.size) || 0); }
-function betAliveRealSnakes(sg) {
+// A snake is bettable once it is a real (non-bot) alive wallet snake.
+function wgBettableSnakes(sg) {
   const out = [];
   for (const sn of sg.snakes.values()) {
     if (!sn.alive) continue;
-    if (String(sn.pid || '').indexOf('bot-') === 0) continue; // bots don't count as bettable runners
-    if (!sn.pid || String(sn.pid).length < 20) continue;      // must be a real wallet-pid
+    if (!sn.pid || String(sn.pid).indexOf('bot-') === 0 || String(sn.pid).length < 20) continue;
     out.push(sn);
   }
   return out;
 }
+// Signed roster entry — the exact canon api/settle.js verifySnakeSig() recomputes.
+function wgRosterEntry(lid, sn, exp) {
+  const name = sn.name || 'SNAKE';
+  const ipHash = wgIpByPid.get(String(sn.pid)) || '';
+  return {
+    pid: sn.pid, name, color: sn.color || '#39FF14', usd: sn.usd || 0, ipHash, exp,
+    sig: wgHmac('snake:' + WG_REGION + ':' + lid + ':' + sn.pid + ':' + name + ':' + ipHash + ':' + exp),
+  };
+}
+function wgBroadcastRoster(lid, sg, io) {
+  const exp = Date.now() + WG_ROSTER_TTL;
+  const snakes = wgBettableSnakes(sg).map(sn => wgRosterEntry(lid, sn, exp));
+  try { io.to(lid).emit('ss-wager-roster', { region: WG_REGION, lobby: lid, snakes }); } catch (_) {}
+}
+function wgSendRosterTo(socket, lid, sg) {
+  const exp = Date.now() + WG_ROSTER_TTL;
+  const snakes = wgBettableSnakes(sg).map(sn => wgRosterEntry(lid, sn, exp));
+  try { socket.emit('ss-wager-roster', { region: WG_REGION, lobby: lid, snakes }); } catch (_) {}
+}
 
-// POST bet-resolve (a winner) or bet-refund (void) to settle. Idempotent + retry-safe on that side, so
-// we just mark _needRetry on any non-ok reply and ssBetTick re-fires until _done.
-function betPostResolve(m) {
+// ── outcome reporting (server → settle) ──────────────────────────────────────
+function wgPostSettle(w, winningSide) {
   if (!GAME_SECRET) return;
   const ts = Date.now();
-  m._lastPost = ts; m._needRetry = false;
-  const action = m.result ? 'bet-resolve' : 'bet-refund';
-  const canon  = m.result ? ('bet-resolve:' + m.id + ':' + m.result + ':' + ts) : ('bet-refund:' + m.id + ':' + ts);
-  const proof  = betSign(canon);
-  fetch(SS_BET_SETTLE_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
-    body: JSON.stringify({ action, mkt: m.id, result: m.result || undefined, type: m.type, outcomes: m.outcomes, lobbyId: m.lobby }),
+  const proof = wgHmac('wager-settle:' + w.id + ':' + winningSide + ':' + ts);
+  w._retryAt = ts + 15000;
+  fetch(WG_SETTLE_URL, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
+    body: JSON.stringify({ action: 'wager-settle', wagerId: w.id, winningSide }),
     signal: AbortSignal.timeout(20000),
+  }).then(r => r.json()).then(d => { if (d && d.ok) w._settled = true; }).catch(() => {});
+}
+function wgPostReturn(w) {
+  if (!GAME_SECRET) return;
+  const ts = Date.now();
+  const proof = wgHmac('wager-return:' + w.id + ':' + ts);
+  w._retryAt = ts + 15000;
+  fetch(WG_SETTLE_URL, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
+    body: JSON.stringify({ action: 'wager-return', wagerId: w.id }),
+    signal: AbortSignal.timeout(20000),
+  }).then(r => r.json()).then(d => { if (d && d.ok) w._settled = true; }).catch(() => {});
+}
+// Pull the authoritative open/live wager set for this arena (backstop after a server restart).
+function wgReconcile(lid) {
+  fetch(WG_SETTLE_URL, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'wager-list', region: WG_REGION, lobby: lid }),
+    signal: AbortSignal.timeout(10000),
   }).then(r => r.json()).then(d => {
-    if (d && d.ok && d.allPaid !== false) { m._done = true; }
-    else { m._needRetry = true; }
-  }).catch(() => { m._needRetry = true; });
-}
-function betResolve(lid, io, m, result) {
-  if (m.phase === 'resolved' || m.phase === 'void') return;
-  m.phase = result ? 'resolved' : 'void';
-  m.result = result || null;
-  m.resolvedAt = Date.now();
-  betBroadcast(lid, io, m);
-  betPostResolve(m);
+    if (!d || !d.ok) return;
+    const s = wgLobby(lid);
+    const all = [].concat(d.live || [], d.open || []);
+    for (const w of all) {
+      const cur = s.live.get(w.id);
+      s.live.set(w.id, Object.assign({}, cur || {}, w));
+    }
+  }).catch(() => {});
 }
 
-// ── market openers ──────────────────────────────────────────────────────────
-function betOpenSurvival(lid, sg, io, s) {
-  const alive = betAliveRealSnakes(sg);
-  if (!alive.length) return;
-  let best = alive[0]; for (const sn of alive) if (betMetric(sn) > betMetric(best)) best = sn;
-  const now = Date.now();
-  const m = {
-    id: lid + ':surv:' + now, lobby: lid, type: 'binary', outcomes: ['YES', 'NO'],
-    labels: { YES: 'Survives', NO: 'Dies' },
-    question: 'Will ' + (best.name || 'SNAKE') + ' survive ' + Math.round(BET_SURVIVAL_MS / 1000) + 's?',
-    openTs: now, lockTs: now + BET_SURVIVAL_OPEN, resolveTs: now + BET_SURVIVAL_OPEN + BET_SURVIVAL_MS,
-    phase: 'open', targetPid: best.pid, targetName: best.name, kind: 'survival', cashed: false,
-  };
-  s.markets.set(m.id, m); s.lastSurvival = now;
-  betBroadcast(lid, io, m);
-}
-function betOpenFlash(lid, io, s, sn) {
-  const now = Date.now();
-  const m = {
-    id: lid + ':flash:' + sn.pid + ':' + now, lobby: lid, type: 'binary', outcomes: ['YES', 'NO'],
-    labels: { YES: '✅ Completes', NO: '❌ Fails' },
-    question: 'Does ' + (sn.name || 'SNAKE') + ' complete the cash-out?',
-    openTs: now, lockTs: now + BET_FLASH_OPEN, resolveTs: 0,
-    phase: 'open', targetPid: sn.pid, kind: 'flash',
-  };
-  s.markets.set(m.id, m); s.seenCash.add(sn.pid);
-  betBroadcast(lid, io, m);
-}
-function betOpenLMS(lid, sg, io, s) {
-  const alive = betAliveRealSnakes(sg);
-  if (alive.length < 2) return;
-  alive.sort((a, b) => betMetric(b) - betMetric(a));
-  const roster = alive.slice(0, 6); // cap the field so the outcome list stays small
-  const now = Date.now();
-  const m = {
-    id: lid + ':lms:' + now, lobby: lid, type: 'lms',
-    outcomes: roster.map(sn => sn.pid),
-    labels: Object.fromEntries(roster.map(sn => [sn.pid, sn.name || 'SNAKE'])),
-    runners: roster.map(sn => ({ pid: sn.pid, name: sn.name || 'SNAKE', color: sn.color || '#39FF14' })),
-    question: 'Last snake standing — who outlasts the rest?',
-    openTs: now, lockTs: now + BET_LMS_OPEN, resolveTs: now + BET_LMS_OPEN + BET_LMS_MAXMS,
-    phase: 'open', kind: 'lms', outAt: {},
-  };
-  s.markets.set(m.id, m); s.lastLMS = now;
-  betBroadcast(lid, io, m);
-}
-
-// ── the tick — drive every market's phase + resolution; open new ones on schedule/events ──
-function ssBetTick(lid, sg, io) {
-  if (!GAME_SECRET || !SS_BET_ENABLED.has(lid) || !sg) return;
-  const now = Date.now();
-  const s = ssBetLobby(lid);
-
-  // 1) cashout-flash detection: a snake that just began (and wound into) its cash-out circle.
+// Record how/when each snake left the arena — the raw material for every bet type.
+function wgTrackFate(lid, sg) {
+  const s = wgLobby(lid);
   for (const sn of sg.snakes.values()) {
-    if (sn.alive && sn.cashing && sn._cashStart && !s.seenCash.has(sn.pid) &&
-        String(sn.pid || '').indexOf('bot-') !== 0 && sn.pid && String(sn.pid).length >= 20) {
-      betOpenFlash(lid, io, s, sn);
-    }
+    const pid = String(sn.pid || ''); if (!pid) continue;
+    if (sn.alive) continue;
+    if (s.fate.has(pid)) continue;
+    // 'paid' = completed a cash-out (banked the money); anything else = died/forfeited.
+    s.fate.set(pid, { outAt: Date.now(), how: sn._cashResolved === 'paid' ? 'paid' : 'died' });
   }
+}
+// Has this snake left, and how? Returns null while it is still in the arena.
+function wgFateOf(s, sg, pid) {
+  const f = s.fate.get(String(pid));
+  if (f) return f;
+  const sn = sg.snakes.get(pid);
+  if (!sn) return { outAt: Date.now(), how: 'died' };   // gone entirely counts as out
+  return null;
+}
 
-  // 2) drive each live market
-  for (const m of s.markets.values()) {
-    if (m.phase === 'open' && now >= m.lockTs) { m.phase = 'locked'; betBroadcast(lid, io, m); }
-
-    if (m.phase === 'locked') {
-      if (m.kind === 'survival') {
-        const sn = sg.snakes.get(m.targetPid);
-        const cashedPaid = (sn && sn._cashResolved === 'paid') || m.cashed;
-        if (sn && sn._cashResolved === 'paid') m.cashed = true;
-        if (cashedPaid) betResolve(lid, io, m, 'YES');                 // cashed out ⇒ survived
-        else if (!sn || !sn.alive) betResolve(lid, io, m, 'NO');       // died (not a paid cash-out)
-        else if (now >= m.resolveTs) betResolve(lid, io, m, 'YES');    // still alive at the bell
-      } else if (m.kind === 'flash') {
-        const sn = sg.snakes.get(m.targetPid);
-        if (sn && sn._cashResolved === 'paid') betResolve(lid, io, m, 'YES');
-        else if (!sn || sn._cashResolved === 'died' || (!sn.cashing && !sn.alive)) betResolve(lid, io, m, 'NO');
-        else if (now - m.openTs > 20000) betResolve(lid, io, m, 'NO'); // safety cap: cash-out can't take this long
-      } else if (m.kind === 'lms') {
-        // record each runner's exit time (first time we see it gone/paid)
-        let aliveCount = 0;
-        for (const pid of m.outcomes) {
-          const sn = sg.snakes.get(pid);
-          const gone = !sn || !sn.alive;
-          if (gone) { if (!m.outAt[pid]) m.outAt[pid] = now; }
-          else { aliveCount++; }
-        }
-        if (aliveCount <= 1 || now >= m.resolveTs) {
-          // winner = the runner who left LATEST; a still-alive runner counts as "latest".
-          const runners = m.outcomes.map(pid => ({ addr: pid, outAt: (sg.snakes.get(pid) && sg.snakes.get(pid).alive) ? Infinity : (m.outAt[pid] || 0) }));
-          let best = -Infinity, winners = [];
-          for (const r of runners) { if (r.outAt > best) { best = r.outAt; winners = [r.addr]; } else if (r.outAt === best) winners.push(r.addr); }
-          const winner = (winners.length === 1) ? winners[0] : null; // tie ⇒ void/refund
-          betResolve(lid, io, m, winner);
-        }
-      }
-    }
-
-    // 3) retry a resolution whose payout wasn't fully confirmed (idempotent on settle's side)
-    if ((m.phase === 'resolved' || m.phase === 'void') && m._needRetry && !m._done && now - (m._lastPost || 0) > 15000) {
-      betPostResolve(m);
-    }
+// Decide a wager from live game truth. Returns the winning side, or null if not decided yet.
+function wgDecide(s, sg, w) {
+  const now = Date.now();
+  if (w.type === 'cashout') {
+    const f = wgFateOf(s, sg, w.subject);
+    if (!f) return null;
+    return f.how === 'paid' ? 'YES' : 'NO';
   }
+  if (w.type === 'survive') {
+    const f = wgFateOf(s, sg, w.subject);
+    const deadline = Number(w.resolveTs || 0);
+    if (f && f.how === 'died' && (!deadline || f.outAt < deadline)) return 'NO';   // died before the bell
+    if (f && f.how === 'paid') return 'YES';                                       // banked it = survived
+    if (deadline && now >= deadline) return 'YES';                                 // still in at the bell
+    return null;
+  }
+  if (w.type === 'outlast') {
+    const fa = wgFateOf(s, sg, w.subject), fb = wgFateOf(s, sg, w.subject2);
+    if (!fa && !fb) return null;
+    if (fa && !fb) return 'B';               // A left first, B still in → B outlasted A
+    if (fb && !fa) return 'A';
+    if (fa.outAt === fb.outAt) return null;  // exact tie — wait a tick
+    return fa.outAt > fb.outAt ? 'A' : 'B';
+  }
+  return null;
+}
 
-  // 4) open new scheduled markets (only when none of that kind is live)
-  const kinds = new Set(); for (const m of s.markets.values()) if (m.phase === 'open' || m.phase === 'locked') kinds.add(m.kind);
-  if (!kinds.has('survival') && now - s.lastSurvival > BET_SURVIVAL_EVERY) betOpenSurvival(lid, sg, io, s);
-  if (!kinds.has('lms')      && now - s.lastLMS      > BET_LMS_EVERY)      betOpenLMS(lid, sg, io, s);
+// ── the tick ─────────────────────────────────────────────────────────────────
+function ssWagerTick(lid, sg, io) {
+  if (!GAME_SECRET || !WG_ENABLED.has(lid) || !sg) return;
+  const now = Date.now();
+  const s = wgLobby(lid);
 
-  // 5) cleanup finished markets (and free the seenCash slot so a snake can trigger a future flash)
-  for (const [id, m] of s.markets) {
-    if (m.phase === 'resolved' || m.phase === 'void') {
-      if (m.kind === 'flash' && (m._done || now - (m.resolvedAt || now) > BET_MKT_CLEAN_MS)) s.seenCash.delete(m.targetPid);
-      if (now - (m.resolvedAt || now) > BET_MKT_CLEAN_MS) s.markets.delete(id);
+  wgTrackFate(lid, sg);
+
+  if (now - s.lastRoster > WG_ROSTER_MS) { s.lastRoster = now; wgBroadcastRoster(lid, sg, io); }
+  if (now - s.lastRecon  > WG_RECON_MS)  { s.lastRecon  = now; wgReconcile(lid); }
+
+  for (const [id, w] of s.live) {
+    if (w._settled) { s.live.delete(id); continue; }
+    if (w._retryAt && now < w._retryAt) continue;
+    if (w.status === 'matched') {
+      const side = wgDecide(s, sg, w);
+      if (side) wgPostSettle(w, side);
+    } else if (w.status === 'open') {
+      // Nobody took it before the window closed → creator gets 100% back, no fee.
+      if (now >= Number(w.lockTs || 0)) wgPostReturn(w);
+    } else if (w.status === 'settled' || w.status === 'returned' || w.status === 'cancelled') {
+      s.live.delete(id);
     }
   }
 }
 
-// Snapshot the lobby's current open/locked markets to a single spectator on connect.
-function ssBetSendTo(socket, lid) {
+// Give a newly-connected spectator the current roster so they can bet immediately.
+function ssWagerSendTo(socket, lid) {
   try {
-    if (!SS_BET_ENABLED.has(lid)) return;
-    const s = ssBet.get(lid); if (!s) return;
-    for (const m of s.markets.values()) if (m.phase === 'open' || m.phase === 'locked') socket.emit('ss-bet', betPayload(m));
+    if (!WG_ENABLED.has(lid)) return;
+    const sg = ssGames.get(lid); if (!sg) return;
+    wgSendRosterTo(socket, lid, sg);
   } catch (_) {}
 }
 
@@ -3541,6 +3520,36 @@ app.use((req, res, next) => {
 
 app.get('/health', (_, res) => res.json({ ok: true, rooms: rooms.size }));
 
+// ── /wager-event — Vercel pushes betting-exchange events here; we relay to spectators ────────────
+// This is what makes the betting UI push-driven (NO client polling). Authenticated with the same
+// GAME_SECRET-HMAC as elim-lock, so only our own /api/settle can publish. Touches no money: it only
+// mirrors an already-committed state change into the socket room and our in-memory live set.
+app.post('/wager-event', express.json({ limit: '64kb' }), (req, res) => {
+  try {
+    const gp  = (req.headers['x-game-proof'] || '').toString().trim();
+    const gts = Number(req.headers['x-game-ts'] || 0);
+    const body = req.body || {};
+    const lobby = String(body.lobby || '');
+    if (!GAME_SECRET || !gp || !gts || Math.abs(Date.now() - gts) > 300000) return res.status(403).json({ error: 'Forbidden' });
+    const expected = crypto.createHmac('sha256', GAME_SECRET).update('wager-event:' + lobby + ':' + gts).digest('hex');
+    let okAuth = false;
+    try { okAuth = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(gp)); } catch (_) {}
+    if (!okAuth) return res.status(403).json({ error: 'Forbidden' });
+
+    const event = String(body.event || '');
+    const wager = body.wager || null;
+    if (wager && wager.id) {
+      const s = wgLobby(lobby);
+      if (event === 'settled' || event === 'returned' || event === 'cancelled') s.live.delete(wager.id);
+      else s.live.set(wager.id, Object.assign({}, s.live.get(wager.id) || {}, wager));
+    }
+    io.to(lobby).emit('ss-wager', { event, wager });   // every spectator sees it instantly
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: 'wager-event failed' });
+  }
+});
+
 app.get('/counts', (_, res) => {
 
   const LOBBY_IDS = ['free-lobby', 'ss-free-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-25'];
@@ -3631,7 +3640,7 @@ io.on('connection', socket => {
 
       }
 
-      ssBetSendTo(socket, watchLobbyId);               // hand this spectator any live betting markets
+      ssWagerSendTo(socket, watchLobbyId);             // hand this spectator the bettable-snake roster
 
     } else {
 
@@ -3680,6 +3689,10 @@ io.on('connection', socket => {
 
 
   socket.walletAddress = (socket.handshake.auth && socket.handshake.auth.pid) || null;
+
+  // Fingerprint this player's network (hashed, never stored raw) so the betting exchange can tell
+  // when someone tries to back their own snake from a second account. See wgSelfBetCheck in settle.
+  try { wgNoteIp(socket.walletAddress, socket); } catch (_) {}
 
   socket.playerName    = (socket.handshake.auth && socket.handshake.auth.name) || '';
 
