@@ -3855,6 +3855,11 @@ function _wgSlipHtml(w){
   else if(w.status==='returned'||w.status==='cancelled')h+='<span style="color:#FFD700;font-weight:800">'+_wgUsdStr(w.stake)+' back</span>';
   else h+='<span>to win <b style="color:#39FF14">'+_wgUsdStr(w.potentialWin)+'</b></span>';
   h+='</div>';
+  if(w.settledTs){
+    const _d=new Date(Number(w.settledTs));
+    const _st=_d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    h+='<div style="font-size:8px;color:#8a7c54;margin-top:4px">Settled '+_wgEsc(_st)+' · '+_wgEsc(_d.toLocaleDateString())+'</div>';
+  }
   if(w.payoutTx)h+='<div style="font-size:8px;color:#5a5238;margin-top:4px;overflow:hidden;text-overflow:ellipsis">tx '+_wgEsc(String(w.payoutTx).slice(0,22))+'…</div>';
   h+='</div>';
   return h;
