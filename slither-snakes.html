@@ -1309,6 +1309,12 @@ let _voiceStream=null,_voiceEnabled=false,_voiceCapCtx=null,_voiceProc=null,_voi
 let _peerAudioCtxs=new Map(),_voiceAnalysers=new Map(),_voiceSpeaking=new Set(),_voiceLocalAnalyser=null,_voiceReadyPids=new Set(),_voiceHearFirst=new Set();
 let myPid=null,isHost=false,isSpectating=false;
 let _joiningLobby=false,_lobbyIsPaid=false,_joinStartedAt=0;
+// Monotonic id for each join attempt. A paid join can grind for ~90s on on-chain confirmation, and
+// its failure path clears _joiningLobby and THEN waits 3s before navigating — so a player who
+// retries in that window gets into the game and is then thrown to the wager-select screen by the
+// OLD attempt's timer, with their snake left behind on the server (it keeps circling for everyone
+// else). Every attempt captures its id and must re-check it before touching shared state.
+let _joinGen=0;
 // Breadcrumb for the "random boot after joining" bug. The join path is one big try/catch, so when it
 // throws, the red ❌ only ever showed e.message — no name, no stack, no indication of WHERE it died,
 // and the player was sent home 3s later before they could read it. _joinStage narrows the throw to a
@@ -2059,6 +2065,50 @@ function signSettleMsg(action,playerAddress,wagerLamports){
   return{sig:btoa(String.fromCharCode(...sig)),ts};
 }
 
+// Hand a deposit to api/join.js and let IT decide whether the money landed — it re-verifies on-chain
+// with its own retry loop, so it sees transactions the browser's RPC lookups often miss. Retried a
+// few times because each attempt does real chain work; a tx that needed a few more seconds still
+// gets in instead of the player being told to "try again" after already paying.
+async function _redeemDeposit(lamps,sig,roomId,playerName,alreadyConfirmed){
+  let lastErr=null;
+  const tries=alreadyConfirmed?2:4;   // unconfirmed client-side ⇒ give the server more chances
+  for(let i=0;i<tries;i++){
+    if(i>0){ lg('mm-log','Still verifying deposit… ('+(i+1)+'/'+tries+')','lwarn'); await new Promise(r=>setTimeout(r,2500)); }
+    try{
+      const res=await recordWager(ST.address,lamps,sig,roomId,playerName);
+      try{ localStorage.removeItem('ss_pending_dep'); }catch(_){}   // redeemed — never reuse it
+      return res;
+    }catch(e){
+      lastErr=e;
+      // A deposit that was already registered means we're done — the wager is on record.
+      if(/already registered/i.test(e.message||'')){ try{ localStorage.removeItem('ss_pending_dep'); }catch(_){} throw e; }
+    }
+  }
+  throw new Error((lastErr&&lastErr.message)||'Could not verify deposit');
+}
+
+// If a previous attempt paid but never completed, the SOL is already in escrow. Redeem THAT instead
+// of charging again. api/join.js only sets its replay guard after a SUCCESSFUL verification, so an
+// unredeemed signature is still valid to submit.
+async function _tryPendingDeposit(usd,lamps,roomId){
+  let p=null;
+  try{ p=JSON.parse(localStorage.getItem('ss_pending_dep')||'null'); }catch(_){}
+  if(!p||!p.sig)return null;
+  // Only reuse it for the SAME wallet, SAME tier and SAME amount, and only while it's recent.
+  if(p.addr!==ST.address||Number(p.usd)!==Number(usd)||Number(p.lamps)!==Number(lamps))return null;
+  if(Date.now()-Number(p.ts||0)>3600000){ try{ localStorage.removeItem('ss_pending_dep'); }catch(_){} return null; }
+  lg('mm-log','Found an unused deposit — reusing it (not charging again)…','lwarn');
+  try{
+    const res=await _redeemDeposit(lamps,p.sig,roomId,getMyName(),false);
+    lg('mm-log','Previous deposit recovered ✓','lok');
+    return res;
+  }catch(e){
+    lg('mm-log','Could not reuse it ('+e.message+') — making a new deposit','lwarn');
+    try{ localStorage.removeItem('ss_pending_dep'); }catch(_){}
+    return null;
+  }
+}
+
 async function recordWager(walletAddress,wagerLamports,txSig,lobbyId,playerName){
   if(!_keypair)throw new Error('No wallet loaded');
   const ts=Math.floor(Date.now()/1000); // seconds — api/join.js verifyPlayerSig checks Math.floor(Date.now()/1000)
@@ -2615,6 +2665,7 @@ async function joinLobby(usd){
   if(_joiningLobby)return;
   if(rafHandle){cancelAnimationFrame(rafHandle);rafHandle=null;}
   _joiningLobby=true;_joinStartedAt=Date.now();
+  const _myGen=++_joinGen;   // identifies THIS attempt; re-checked before anything destructive
   // Fresh user-initiated join: clear any leftover death/spectate/game state from a prior round.
   // Otherwise the server's 'init' handler early-returns (SG set → treated as reconnect, or
   // _localDead → dead) and never launches the game, leaving you stuck forever on "Connecting…".
@@ -2646,6 +2697,19 @@ async function joinLobby(usd){
     const from=new solanaWeb3.PublicKey(ST.address);
     const lamps=Math.floor(ST.wagerSol*solanaWeb3.LAMPORTS_PER_SOL);
     ST.cashoutLamports=lamps;
+    const _roomId=usd===1?'ss-paid-lobby-1':'ss-paid-lobby-5';
+    // Did a previous attempt already pay without completing? Redeem that deposit instead of taking
+    // the player's money a second time.
+    const _recovered=await _tryPendingDeposit(usd,lamps,_roomId);
+    if(_recovered){
+      if(_myGen!==_joinGen)return;
+      ST.hasEscrow=true; ST.entryToken=_recovered.gameToken||null;
+      document.getElementById('mm-sub').textContent='Wager locked · Joining live lobby…';
+      await refreshBal();
+      if(_myGen!==_joinGen)return;
+      pkConnect(_roomId,ST.entryToken);
+      return;
+    }
     const tx=new solanaWeb3.Transaction().add(
       solanaWeb3.SystemProgram.transfer({fromPubkey:from,toPubkey:escPubkey,lamports:lamps})
     );
@@ -2664,12 +2728,22 @@ async function joinLobby(usd){
     const _sndr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:2,method:'sendTransaction',params:[_rawB64,{encoding:'base64',preflightCommitment:'confirmed'}]})});
     const _sndd=await _sndr.json();if(_sndd.error)throw new Error('Send failed: '+_sndd.error.message);
     const sig=_sndd.result;
+    // The SOL has left the wallet the moment this signature exists. Remember it BEFORE we start
+    // waiting: if anything below fails, the deposit is real and sitting in escrow, and a retry must
+    // REDEEM it rather than paying a second time (see the pending-deposit check at the top of the
+    // paid flow). Without this, a failed confirmation cost the player their stake twice.
+    try{ localStorage.setItem('ss_pending_dep', JSON.stringify({sig,lamps,usd,addr:ST.address,ts:Date.now()})); }catch(_){}
     lg('mm-log','Confirming on-chain…','lwarn');
     let _txConfirmed=false;
     // Poll FAST at first (Solana usually confirms in 0.4–0.8s) then ease off, instead of a flat
     // 1.5s × 60 = 90s grind that made a normal join feel broken. Same ~90s worst case, but a healthy
     // confirmation is now seen in well under a second.
-    for(let _ci=0;_ci<70&&!_txConfirmed;_ci++){
+    // Only ~18 polls (~15s) here, NOT 70 (~90s). This loop is a courtesy: api/join.js re-verifies the
+    // deposit on-chain itself (verifyWagerTx, its own retries) and is the AUTHORITY on whether the
+    // money landed. Blocking the player for 90s on a client-side lookup that public RPCs often answer
+    // "not found" to — while the tx was actually fine — is what made joining take forever and
+    // sometimes never complete. If we can't see it in 15s we hand off to the server instead of failing.
+    for(let _ci=0;_ci<18&&!_txConfirmed;_ci++){
       await new Promise(r=>setTimeout(r, _ci<6?400:(_ci<14?800:1500)));
       // After the first ~12 polls the tx may have aged out of the nodes' recent-signature cache, so
       // a plain lookup keeps answering "not found" forever. Escalate to a history search — this is
@@ -2682,24 +2756,45 @@ async function joinLobby(usd){
       if(_ci===12)lg('mm-log','Still confirming — searching history…','lwarn');
       if(_ci>0&&_ci%8===0){const _bhr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:4,method:'getBlockHeight',params:[]})});const _bhd=await _bhr.json().catch(()=>({}));if(typeof _bhd.result==='number'&&_bhd.result>lb.lastValidBlockHeight)throw new Error('Transaction expired — please try again');}
     }
-    if(!_txConfirmed)throw new Error('Confirmation timeout — check your wallet then try again');
+    // NOT confirmed client-side? Carry on anyway. Throwing here was the single biggest cause of
+    // "paid but never got in": the deposit had usually landed and we abandoned it.
     ST.hasEscrow=true;
-    lg('mm-log','Deposit confirmed ✓','lok');
+    lg('mm-log',_txConfirmed?'Deposit confirmed ✓':'Verifying with server…','lok');
     lg('mm-log','Recording wager…','lhi');
     // ss- prefix routes paid lobbies through the authoritative snake sim (same path as ss-free-lobby),
     // not the legacy relay. Without this the server never simulates food/collisions for paid rooms.
     const roomId=usd===1?'ss-paid-lobby-1':'ss-paid-lobby-5';
     const _pName=getMyName();
-    const joinResult=await recordWager(ST.address,lamps,sig,roomId,_pName);
+    // api/join.js is the authority — it re-checks the chain with its own retries. Give it a few goes
+    // (each call does real on-chain work) so a tx that just needed a few more seconds still gets in.
+    const joinResult=await _redeemDeposit(lamps,sig,roomId,_pName,_txConfirmed);
     const gameToken=joinResult.gameToken||null;
+    // Same generation guard on the SUCCESS path: a slow attempt that finally completes after the
+    // player already retried must not connect a second socket over the live session.
+    if(_myGen!==_joinGen){ console.warn('[join] superseded attempt completed late — not connecting'); return; }
     ST.entryToken=gameToken;
     document.getElementById('mm-sub').textContent='Wager locked · Joining live lobby…';
     await refreshBal();
+    if(_myGen!==_joinGen)return;
     pkConnect(roomId,gameToken);
   }catch(e){
+    // ── A SUPERSEDED ATTEMPT MUST DO NOTHING ────────────────────────────────────────────────────
+    // A paid join can grind ~90s on on-chain confirmation. This handler used to clear _joiningLobby
+    // (unblocking a retry), wait 3s, and then navigate — UNCONDITIONALLY. So: attempt #1 hangs,
+    // times out, unblocks; the player immediately retries and gets into the game; then attempt #1's
+    // 3s timer fires and throws them to the wager-select screen. Their socket from attempt #2 stays
+    // connected, so the server keeps the snake alive and everyone else watches it circle on its own.
+    // That is the "randomly booted but my snake is still in the game" report. Never let an old
+    // attempt touch state owned by a newer one.
+    if(_myGen!==_joinGen){ console.warn('[join] superseded attempt aborted:',e&&e.message); return; }
     _joiningLobby=false;
     lg('mm-log','Error: '+e.message,'lerr');
     await new Promise(r=>setTimeout(r,3000));
+    // Re-check AFTER the grace: the player very likely retried during it (that is exactly what the
+    // 3s is for). Also never yank anyone out of a live game.
+    if(_myGen!==_joinGen)return;
+    if(_joiningLobby)return;
+    if(SG&&!SG.over)return;
     go('scr-lobby');
   }
 }
@@ -2950,7 +3045,15 @@ async function pkConnect(roomId,gameToken,spectate){
       const runOver=(_localDead||!SG||SG.over);
       _joiningLobby=false; _lobbyIsPaid=false;
       if(wasJoining&&!isSpectating){
-        setTimeout(()=>{try{go('scr-lobby');}catch(_){}},3000);
+        const _errGen=_joinGen;
+        setTimeout(()=>{
+          // Same rule as the join catch: during these 3s the player may have retried and landed in
+          // a game. Never navigate away from a live session, or we strand their snake on the server.
+          if(_errGen!==_joinGen)return;
+          if(_joiningLobby)return;
+          if(SG&&!SG.over)return;
+          try{go('scr-lobby');}catch(_){}
+        },3000);
       }else if(!runOver){
         // Kicked out of a LIVE run — surface it, but don't teleport them mid-frame.
         addToast(String(msg||'Disconnected by server'),'#FF4444',6000);
