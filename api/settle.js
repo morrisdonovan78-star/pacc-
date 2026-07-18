@@ -828,6 +828,7 @@ module.exports = async function handler(req, res) {
       const now = Date.now();
       const keys = await kvScan('wg:*', 2000);
       let reverted = 0, returned = 0, checked = 0;
+      const detail = [];   // read-only picture of what is actually in KV, so a stuck stake can be diagnosed
       const esc = getEscrow();
       for (const k of keys) {
         if (returned >= 10) break;                       // bound the work per sweep
@@ -835,6 +836,12 @@ module.exports = async function handler(req, res) {
         try { const raw = await kvGet(k); if (raw) w = JSON.parse(raw); } catch (_) {}
         if (!w || !w.id) continue;
         checked++;
+        // No addresses, no signatures — just enough to see WHY something is not settling.
+        if (detail.length < 25) detail.push({ id: w.id, st: w.status, lob: w.lobby, reg: w.region,
+          stake: w.stakeLamports, ageS: Math.round((now - Number(w.createdTs || 0)) / 1000),
+          lockInS: Math.round((Number(w.lockTs || 0) - now) / 1000),
+          resInS: w.reservedUntil ? Math.round((Number(w.reservedUntil) - now) / 1000) : null,
+          matched: !!w.acceptor, paidLock: null });
         // 1) lapsed reservation → back on the book
         if (w.status === P2P.STATUS.RESERVED && Number(w.reservedUntil || 0) < now) {
           w.status = P2P.STATUS.OPEN; w.reservedBy = null; w.reservedUntil = 0;
@@ -875,7 +882,7 @@ module.exports = async function handler(req, res) {
         }
       }
       clearTimeout(guard); done = true;
-      return res.status(200).json({ ok: true, checked, reverted, returned });
+      return res.status(200).json({ ok: true, checked, reverted, returned, detail });
     }
 
     // ── wager-mine: PUBLIC read of one address's bet slip (all statuses). No money. ──────────────
