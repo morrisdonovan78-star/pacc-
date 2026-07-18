@@ -488,6 +488,11 @@ const WG_TTL       = 604800;   // wager records live 7 days (history)
 const WG_PAY_LOCK_TTL = 180;
 const WG_OPEN_WINDOW_MS = 60000; // how long a new wager stays takeable before it's returned unmatched
 const WG_RESERVE_MS = 90000;   // an acceptor has 90s to land their deposit before the claim expires
+// A matched wager that the game never resolved is VOIDED after this long and both stakes are
+// returned in full with no fee. Owner's call at 1h: long enough that no real round is still running,
+// short enough that nobody's money is held overnight. This is what stops a duel that never got its
+// decisive kill (third-party kill, someone left, a settle POST that failed) from stranding funds.
+const WG_VOID_AFTER_MS = 3600000;
 const WG_MIN_STAKE = 1_000_000;      // 0.001 SOL floor
 const WG_MAX_STAKE = 100_000_000_000; // 100 SOL ceiling (sanity)
 
@@ -827,7 +832,7 @@ module.exports = async function handler(req, res) {
       if (!verifyGameProof(req, 'wager-sweep:' + gts)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
       const now = Date.now();
       const keys = await kvScan('wg:*', 2000);
-      let reverted = 0, returned = 0, checked = 0;
+      let reverted = 0, returned = 0, voided = 0, checked = 0;
       const detail = [];   // read-only picture of what is actually in KV, so a stuck stake can be diagnosed
       const esc = getEscrow();
       for (const k of keys) {
@@ -880,9 +885,54 @@ module.exports = async function handler(req, res) {
             betAlert('swept stranded wager ' + cur.id + ' → returned ' + amt + ' to ' + String(cur.creator).slice(0, 8));
           } finally { await kvDel('lock:wg:' + w.id).catch(() => {}); }
         }
+        // 3) MATCHED but still unsettled an hour later → VOID: both sides get 100% back, no fee.
+        // A duel only settles when one duellist actually kills the other, so a duel where a third
+        // party intervened (or someone never came back) would otherwise hold both stakes forever.
+        // This is the release valve, and it is deliberately the LAST resort: it only fires long
+        // after any real game has ended.
+        //
+        // "Make sure it wasn't already paid out or lost first" — three independent guards:
+        //   a) re-load under a lock and require status === 'matched'. A wager that settled is
+        //      'settled', so a decided bet can never be voided out from under its winner.
+        //   b) claim 'wgpaid:<id>' with SETNX. Unlike case 2 we do NOT clear a lock we find held,
+        //      because here a held lock may be a real payout in flight — we skip and retry later.
+        //   c) pay each side under its own 'wgvoid:<id>:<side>' guard, so a void interrupted after
+        //      the first transfer resumes without paying the same person twice.
+        if (w.status === P2P.STATUS.MATCHED && w.acceptor &&
+            now - Number(w.matchedTs || w.createdTs || 0) >= WG_VOID_AFTER_MS) {
+          const lock = await kvSetNX('lock:wg:' + w.id, '1', 45);
+          if (!lock) continue;
+          try {
+            const cur = await wgLoad(w.id);
+            if (!cur || cur.status !== P2P.STATUS.MATCHED || !cur.acceptor) continue;   // (a)
+            const claimed = await kvSetNX('wgpaid:' + w.id, '1', WG_PAY_LOCK_TTL);      // (b)
+            if (!claimed) continue;
+            const amt = P2P.returnAmount(cur.stakeLamports);
+            let paidBoth = true, txs = [];
+            for (const [who, side] of [[cur.creator, 'c'], [cur.acceptor, 'a']]) {       // (c)
+              const g = await kvSetNX('wgvoid:' + w.id + ':' + side, '1', WG_PAY_LOCK_TTL);
+              if (!g) continue;                       // already refunded on an earlier pass
+              const pay = await wgPayOne(esc, who, amt, 'wager-void-refund');
+              if (!pay.ok) { await kvDel('wgvoid:' + w.id + ':' + side).catch(() => {}); paidBoth = false; break; }
+              txs.push(pay.sig);
+              await kvHincrby(BET_LEDGER, 'betLiability', -amt).catch(() => {});
+              await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
+            }
+            if (!paidBoth) { await kvDel('wgpaid:' + w.id).catch(() => {}); continue; }  // retry next sweep
+            cur.status = P2P.STATUS.RETURNED; cur.voided = true; cur.fee = 0;
+            cur.payoutTx = txs[0] || null; cur.settledTs = Date.now();
+            await wgSave(cur);
+            await kvZrem('wglive:' + wgLobbyKey(cur.region, cur.lobby), cur.id).catch(() => {});
+            await wgPush(cur.region, cur.lobby, 'returned', wgPublic(cur));
+            voided++;
+            betAlert('VOIDED unsettled wager ' + cur.id + ' after ' +
+                     Math.round((now - Number(cur.matchedTs || cur.createdTs || 0)) / 60000) +
+                     'min — refunded ' + amt + ' to BOTH sides');
+          } finally { await kvDel('lock:wg:' + w.id).catch(() => {}); }
+        }
       }
       clearTimeout(guard); done = true;
-      return res.status(200).json({ ok: true, checked, reverted, returned, detail });
+      return res.status(200).json({ ok: true, checked, reverted, returned, voided, detail });
     }
 
     // ── wager-mine: PUBLIC read of one address's bet slip (all statuses). No money. ──────────────
