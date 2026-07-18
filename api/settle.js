@@ -988,7 +988,9 @@ module.exports = async function handler(req, res) {
     // ── Wallet signature auth — required for all fund-moving actions ─────────
     // The player signs the request with their Solana private key.
     // Only the real wallet owner can produce a valid signature.
-    if (action !== 'balance') {
+    // 'solvency' joins 'balance' as unsigned: both are READ-ONLY views of public on-chain state
+    // plus aggregate liability totals. No wallet is named, nothing is mutated, no funds move.
+    if (action !== 'balance' && action !== 'solvency') {
       const sig = req.headers['x-settle-sig'] || '';
       const ts  = req.headers['x-settle-ts']  || '';
       if (!verifyPlayerSig(sig, ts, action, playerAddress || '', wagerLamportsRaw)) {
