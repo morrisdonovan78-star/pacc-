@@ -104,6 +104,56 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // ── action:'settings-get' / 'settings-set' — ACCOUNT-LEVEL client settings ────────────────
+      // The account (Privy sub) is the source of truth for every Settings-panel option, including the
+      // preferred game server. localStorage is only a cache, so settings follow the player across
+      // refreshes, logouts and devices.
+      //
+      // Deliberately SCHEMA-AGNOSTIC: the server never enumerates the individual settings, it just
+      // stores a bounded flat string map. Adding a future setting is a one-line client registry entry
+      // with NO server change. Bounds (below) are what keeps that safe.
+      if (action === 'settings-get' || action === 'settings-set') {
+        if (!sub) return res.status(401).json({ error: 'jwt required' });
+        const sKey = 'us:' + sub;
+
+        if (action === 'settings-get') {
+          let cur = {};
+          try { cur = JSON.parse((await kvGet(sKey)) || '{}') || {}; } catch (_) { cur = {}; }
+          return res.status(200).json({ ok: true, settings: cur });
+        }
+
+        // settings-set — MERGE, never replace. Two devices editing different settings must not
+        // clobber each other, and a client that only knows about 3 of 6 keys must not delete the
+        // other 3 (that's exactly how a stale tab would wipe a newer device's preferences).
+        const patch = (req.body && req.body.settings) || {};
+        if (typeof patch !== 'object' || Array.isArray(patch)) {
+          return res.status(400).json({ error: 'settings must be an object' });
+        }
+        let cur = {};
+        try { cur = JSON.parse((await kvGet(sKey)) || '{}') || {}; } catch (_) { cur = {}; }
+
+        // Bounds — a settings blob is user-controlled input, so cap every dimension.
+        for (const k of Object.keys(patch)) {
+          if (typeof k !== 'string' || k.length > 40) continue;          // key length
+          if (!/^[A-Za-z0-9_]+$/.test(k)) continue;                       // key charset
+          const v = patch[k];
+          if (v === null || v === undefined) { delete cur[k]; continue; } // explicit clear
+          const s = String(v);
+          if (s.length > 2000) continue;                                  // value size
+          cur[k] = s;
+        }
+        if (Object.keys(cur).length > 60) {                               // total key count
+          return res.status(400).json({ error: 'too many settings' });
+        }
+        const blob = JSON.stringify(cur);
+        if (blob.length > 16000) return res.status(400).json({ error: 'settings too large' });
+
+        await kvSetPerm(sKey, blob);
+        // Keep the account<->wallet link fresh when we have an address (same as setname does).
+        if (address) await recordLink(sub, address).catch(() => {});
+        return res.status(200).json({ ok: true, settings: cur });
+      }
+
       if (action !== 'setname' || !address || !name) {
         return res.status(400).json({ error: 'Bad request' });
       }

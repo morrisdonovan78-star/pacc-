@@ -794,7 +794,26 @@ body.mctl #voice-speakers{left:150px;}
   </div>
   <div id="leaderboard" style="position:fixed;top:8px;right:10px;min-width:190px;background:rgba(7,7,15,0.88);border:1px solid rgba(255,215,0,0.35);border-radius:10px;padding:8px 12px;z-index:100;font-family:'Exo 2',sans-serif;pointer-events:none;display:none;"></div>
   <button id="voice-btn" onclick="voiceToggle()" title="Voice chat — X (controller) / M (keyboard) to mute" style="position:fixed;bottom:148px;right:14px;z-index:200;display:none;width:46px;height:46px;border-radius:50%;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.3);color:#fff;font-size:20px;cursor:pointer;">🎙️</button>
-  <div id="voice-speakers" style="position:fixed;bottom:16px;left:12px;z-index:200;display:none;flex-direction:column;gap:4px;pointer-events:none;"></div>
+  <!-- Bottom-left stack, from the floor up: chat (16px) → bot-bar (170px) → voice-speakers (272px).
+       voice-speakers and bot-bar were both anchored at the very bottom-left; chat now owns that
+       corner, so they move UP rather than overlap. Only their `bottom:` values changed.
+       Offsets are MEASURED at worst case (6-line log WITH the input row open — the row is ~35px and
+       is easy to forget): chat reaches 191px above the floor, bot-bar is 90px tall. Every chat line
+       is nowrap+ellipsis so none can wrap and grow this. voice-speakers is topmost, so it is the
+       only one free to grow with speaker count. -->
+  <div id="voice-speakers" style="position:fixed;bottom:315px;left:12px;z-index:200;display:none;flex-direction:column;gap:4px;pointer-events:none;"></div>
+  <!-- In-game text chat — bottom left, opened with T. The log grows upward from the floor and
+       auto-hides; the input row only exists while actually typing, so this is invisible in normal
+       play. pointer-events:none on the wrapper so it never eats a click meant for the arena. -->
+  <div id="ss-chat" style="position:fixed;bottom:16px;left:12px;z-index:201;width:320px;max-width:46vw;display:flex;flex-direction:column;gap:3px;pointer-events:none;">
+    <div id="ss-chat-msgs" style="display:none;flex-direction:column;gap:2px;align-items:flex-start;"></div>
+    <div id="ss-chat-row" style="display:none;align-items:center;width:100%;pointer-events:auto;">
+      <input id="ss-chat-inp" type="text" maxlength="100" autocomplete="off" spellcheck="false"
+        placeholder="say something…  (ENTER send · ESC cancel)"
+        style="background:rgba(7,7,15,0.94);border:1px solid rgba(57,255,20,0.55);border-radius:6px;color:#e0e0ff;font-family:'Exo 2',sans-serif;font-size:12px;padding:7px 10px;width:100%;outline:none;"
+        onkeydown="onChatKey(event)"/>
+    </div>
+  </div>
   <div id="join-sync" style="display:none;position:fixed;inset:0;z-index:300;background:rgba(6,6,18,0.82);align-items:center;justify-content:center;flex-direction:column;gap:10px;pointer-events:none;">
     <div style="font-family:'Press Start 2P',monospace;font-size:13px;color:#39ff14;letter-spacing:3px;">JOINING…</div>
     <div style="font-family:'Press Start 2P',monospace;font-size:7px;color:rgba(255,255,255,0.35);letter-spacing:2px;">SYNCING WITH HOST</div>
@@ -808,7 +827,7 @@ body.mctl #voice-speakers{left:150px;}
     <div id="m-zoom-box"><input id="m-zoom" type="range" min="-2" max="2" step="0.05" value="0"/></div>
     <span class="m-zlab">−</span>
   </div>
-  <div id="bot-bar" style="display:none;position:fixed;bottom:72px;left:12px;z-index:200;flex-direction:column;gap:5px;">
+  <div id="bot-bar" style="display:none;position:fixed;bottom:210px;left:12px;z-index:200;flex-direction:column;gap:5px;">
     <button onclick="spawnBotSnake('circle')" style="padding:7px 10px;background:#0055AA;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">⭕ CIRCLE (N)</button>
     <button onclick="spawnBotSnake('fight')" style="padding:7px 10px;background:#AA3300;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">⚔ FIGHTER</button>
     <button onclick="clearBotSnakes()" style="padding:7px 10px;background:#1a0000;border:1px solid #FF4444;color:#FF4444;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">✕ BOTS (C)</button>
@@ -1290,6 +1309,11 @@ let _voiceStream=null,_voiceEnabled=false,_voiceCapCtx=null,_voiceProc=null,_voi
 let _peerAudioCtxs=new Map(),_voiceAnalysers=new Map(),_voiceSpeaking=new Set(),_voiceLocalAnalyser=null,_voiceReadyPids=new Set(),_voiceHearFirst=new Set();
 let myPid=null,isHost=false,isSpectating=false;
 let _joiningLobby=false,_lobbyIsPaid=false,_joinStartedAt=0;
+// Breadcrumb for the "random boot after joining" bug. The join path is one big try/catch, so when it
+// throws, the red ❌ only ever showed e.message — no name, no stack, no indication of WHERE it died,
+// and the player was sent home 3s later before they could read it. _joinStage narrows the throw to a
+// phase; _ssJoinFail() below captures the rest and PERSISTS it so a booted player can report it.
+let _joinStage='idle';
 let GAME_SERVER=localStorage.getItem('ss_server')||'NA';
 let REGION=localStorage.getItem('ss_region')||'US';
 
@@ -1937,7 +1961,7 @@ function _onSnakeColorPick(col){
     if(p){const s=localStorage.getItem('ss_snake_color');if(s)p.value=s;}
     return;
   }
-  localStorage.setItem('ss_snake_color',col);
+  ssSetSetting('ss_snake_color',col);
   if(myPid)_playerMeta.set(myPid,{...(_playerMeta.get(myPid)||{}),color:col});
   const my=SG&&SG.snakes.get(myPid);if(my)my.color=col;
   const pick=document.getElementById('snake-color-pick');if(pick)pick.value=col;
@@ -1968,11 +1992,15 @@ function syncServerBtns(){
     b.style.borderColor=active?'var(--g)':'var(--c)';
   });
 }
-function setGameServer(r){
-  GAME_SERVER=r; localStorage.setItem('ss_server',r);
-  REGION=(r==='EU')?'EU':'US'; localStorage.setItem('ss_region',REGION);
+// `quiet` = restoring the saved preference from the account, not a fresh user click: apply it
+// silently (no toast) and don't echo it straight back to the server it just came from.
+function setGameServer(r,quiet){
+  GAME_SERVER=r;
+  REGION=(r==='EU')?'EU':'US'; localStorage.setItem('ss_region',REGION); // derived, cache-only
+  if(quiet){ try{ localStorage.setItem('ss_server',r); }catch(_){} }
+  else ssSetSetting('ss_server',r);                                      // account-backed
   syncServerBtns();
-  addToast('Server: '+GAME_SERVERS[r].label,'#00FFFF');
+  if(!quiet)addToast('Server: '+GAME_SERVERS[r].label,'#00FFFF');
 }
 
 // ══ WALLET / AUTH ════════════════════════════════════════════
@@ -2450,6 +2478,10 @@ function _linkAccountWallet(){
   if(!_jwt||!ST.address)return;
   try{ fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'link',jwt:_jwt,address:ST.address})}).catch(()=>{}); }catch(_){}
+  // Same moment, same identity: pull this account's settings (preferred server, graphics, binds…)
+  // and push anything that was changed while logged out. Called from BOTH login and session
+  // restore, so settings follow the player across refreshes, logouts and devices.
+  try{ ssLoadSettings().catch(()=>{}); }catch(_){}
 }
 async function scanAndShowWallets(){
   const section=document.getElementById('found-wallets-section');
@@ -2740,6 +2772,7 @@ async function pkConnect(roomId,gameToken,spectate){
   document.getElementById('mm-sub').textContent='Connecting to server…';
   lg('mm-log','Connecting…','lhi');
 
+  _joinStage='socket-create';
   try{
     _sio=io(getSioUrl(),{
       auth:spectate?{spectate:true,lobbyId:roomId}
@@ -2841,6 +2874,7 @@ async function pkConnect(roomId,gameToken,spectate){
       }
       // Don't auto-reinitialize if the player is on the result screen after death (prevents auto-rejoin)
       if(_localDead)return;
+      _joinStage='init';
       try{
         (data.players||[]).forEach(h=>_playerMeta.set(h.id,{color:h.color||colorFromId(h.id),name:h.name||'SNAKE'}));
         const allPlayers=(data.players||[]).filter(h=>h.alive!==false).map((h,i)=>({
@@ -2853,7 +2887,7 @@ async function pkConnect(roomId,gameToken,spectate){
         lg('mm-log','Joined! Role: '+(isHost?'HOST':'GUEST'),'lok');
         initSnakeGame(allPlayers);
         launchSnakeGame();
-      }catch(e){lg('mm-log','❌ Game init error: '+e.message,'lerr');console.error('[init]',e);}
+      }catch(e){ _ssJoinFail(e,roomId,spectate); }
     });
 
     await new Promise((res,rej)=>{
@@ -2884,6 +2918,7 @@ async function pkConnect(roomId,gameToken,spectate){
     });
 
     _sio.off('connect_error');
+    _joinStage='handlers';
     ablyChannel={publish:(type,data,cb)=>{if(_sio)_sio.emit(type,data);if(cb)cb();}};
 
     // 'err' is FATAL — it disconnects and boots the player back to the lobby. Only join failures
@@ -2892,6 +2927,15 @@ async function pkConnect(roomId,gameToken,spectate){
     // used to do: hitting the cap disconnected you).
     _sio.on('err',(msg)=>{
       lg('mm-log','❌ '+(msg||'Server rejected'),'lerr');
+      // Persist server rejections alongside client throws — a booted player can only tell us "it
+      // said something red", so both ❌ paths must leave evidence behind. Same key, `source` tells
+      // them apart. (Server causes were already ruled out for this bug; this is here so a future
+      // report can be attributed to the right side without another investigation.)
+      try{ localStorage.setItem('ss_lastJoinErr',JSON.stringify({
+        ts:new Date().toISOString(), source:'server-err', stage:_joinStage,
+        msg:String(msg||'Server rejected'), lobby:pkRoomId||null, paid:!!_lobbyIsPaid,
+        server:GAME_SERVER, wasJoining:!!_joiningLobby, pid:myPid||null,
+      })); }catch(_){}
       _hideReconnectPrompt(); _reconnTimes=[];
       // Always drop the socket — whatever the server refused, this connection is finished.
       if(_sio){try{_sio.io.reconnection(false);}catch(_){}try{_sio.disconnect();}catch(_){}} _sio=null;
@@ -3213,7 +3257,12 @@ async function pkConnect(roomId,gameToken,spectate){
 
     _sio.on('chat',(data)=>{
       if(!data)return;
-      addToast('💬 '+(data.name||'?')+': '+(data.text||'').slice(0,40),'#AAAAAA');
+      // Colour the name with that player's actual snake colour when we know it, so chat reads like
+      // the arena does. Falls back to the same id-hash colour the renderer uses.
+      const id=(data.id||'').toString();
+      const meta=_playerMeta.get(id);
+      const col=(meta&&meta.color)||(id?colorFromId(id):'#39FF14');
+      addChatMessage(data.name||'?', data.text||'', col);
     });
 
     _sio.on('disconnect',(reason)=>{
@@ -3238,19 +3287,55 @@ async function pkConnect(roomId,gameToken,spectate){
     // snake is ever created (initSnakeGame() is NOT called), so SG.snakes only ever fills with
     // real players as their state broadcasts arrive.
     if(spectate){
+      _joinStage='spectate-launch';
       SG={snakes:new Map(),food:[],tick:0,over:false};
       document.getElementById('mm-sub').textContent='Watching live…';
       launchSnakeGame();
     }
+    _joinStage='joined';
 
   }catch(e){
-    lg('mm-log','❌ '+e.message,'lerr');
-    if(e.message.includes('timeout')||e.message.includes('internet'))
+    _ssJoinFail(e,roomId,spectate);
+    if(String(e&&e.message||'').includes('timeout')||String(e&&e.message||'').includes('internet'))
       lg('mm-log','Check your internet connection','lwarn');
     if(_sio){try{_sio.disconnect();}catch(_){}} _sio=null;
     ablyChannel=null; _joiningLobby=false; _lobbyIsPaid=false;
     setTimeout(()=>{try{go('scr-lobby');}catch(_){}},3000);
   }
+}
+
+// ── JOIN FAILURE CAPTURE (open bug: "random boot after joining") ─────────────────────────────
+// The join path's single try/catch used to print only `e.message` and then send the player home
+// after 3s — so the one piece of evidence we need was on screen for 3 seconds and then gone, with
+// no stack and no clue which phase threw. This records the FULL error plus context, keeps it in
+// localStorage (survives the boot AND a refresh), and shows the player a copyable code.
+// Read it back from the console with:  JSON.parse(localStorage.getItem('ss_lastJoinErr'))
+function _ssJoinFail(e,roomId,spectate){
+  let rec;
+  try{
+    rec={
+      ts:new Date().toISOString(),
+      stage:_joinStage,                       // WHERE in the join it died
+      name:(e&&e.name)||'Error',
+      msg:String((e&&e.message)||e||'unknown'),
+      stack:String((e&&e.stack)||'').split('\n').slice(0,8).join('\n'),
+      lobby:roomId||null, spectate:!!spectate, paid:!!_lobbyIsPaid,
+      server:GAME_SERVER, pid:myPid||null,
+      hadSocket:!!_sio, sioConnected:!!(_sio&&_sio.connected),
+      online:(typeof navigator!=='undefined'&&'onLine' in navigator)?navigator.onLine:null,
+      msSinceJoinStart:_joinStartedAt?(Date.now()-_joinStartedAt):null,
+      ua:(navigator.userAgent||'').slice(0,120),
+    };
+  }catch(_){ rec={ts:new Date().toISOString(),stage:_joinStage,msg:'capture failed'}; }
+  try{ console.error('[JOIN-FAIL]',rec,e); }catch(_){}
+  try{ localStorage.setItem('ss_lastJoinErr',JSON.stringify(rec)); }catch(_){}
+  // Show the real message AND the stage, and hold it long enough to be read/screenshotted.
+  try{
+    lg('mm-log','❌ '+rec.name+': '+rec.msg,'lerr');
+    lg('mm-log','stage: '+rec.stage+' · lobby: '+(rec.lobby||'?')+' · '+(rec.online===false?'OFFLINE':'online'),'lwarn');
+    lg('mm-log','Please screenshot this and send it to support','lwarn');
+    addToast('Join failed at "'+rec.stage+'": '+rec.msg,'#FF4444',9000);
+  }catch(_){}
 }
 
 function pkSend(data){if(ablyChannel)ablyChannel.publish(data.t,data,()=>{});}
@@ -3265,6 +3350,7 @@ function pkDisconnect(){
   if(_hostWatch){clearInterval(_hostWatch);_hostWatch=null;}
   voiceCleanup();
   try{ _wgReset(); }catch(_){}
+  try{ _chatReset(); }catch(_){}
   _killFeed=[];
   ablyChannel=null;
   if(_sio){try{_sio.io.reconnection(false);}catch(_){}try{_sio.disconnect();}catch(_){}} _sio=null;
@@ -3302,6 +3388,93 @@ async function enterWatchMode(region,tier){
   try{ _wgRender(); }catch(_){}   // surface the betting tab immediately
 }
 
+// ══ IN-GAME TEXT CHAT (bottom-left · T to open) ══════════════════════════════════════
+// Transport is the EXISTING server relay — `socket.on('chat')` → `io.to(lobbyId).emit('chat',…)` —
+// which lives in the SHARED connection handler (same level as 'ssin'/'ss-cashed'), so snake sockets
+// already had it. This is therefore a CLIENT-ONLY feature: no game-server change, no Vultr deploy.
+// Snake already RECEIVED chat but rendered it as an anonymous grey toast and had no way to send.
+//
+// ⚠️ Unlike the Pac-Man build this is ported from, do NOT echo your own message locally: that one
+// used Ably with echoMessages:false, whereas `io.to(lobbyId)` includes the sender, so a local echo
+// would show every one of your own messages twice.
+let _chatTyping=false, _chatFadeTimer=null, _chatLastSend=0;
+const _chatLog=[];
+const _CHAT_MAX=6;         // lines kept on screen — bottom-left has finite room above the floor
+const _CHAT_COOLDOWN=600;  // ms between sends; stops a stuck ENTER flooding the lobby
+
+// Players only. Spectator sockets deliberately have NO listeners registered server-side (see the
+// spectate branch of the connection handler), so a spectator's 'chat' emit would vanish silently —
+// better to not offer the box than to let someone type into a void. Spectators still SEE messages,
+// because they ARE joined to the lobby room and io.to(lobby) reaches them.
+function _chatCanUse(){
+  const sc=document.getElementById('scr-game');
+  return !!(SG && !SG.over && !isSpectating && !_localDead && sc && sc.classList.contains('on'));
+}
+function openChat(){
+  if(_chatTyping||!_chatCanUse())return;
+  _chatTyping=true;
+  clearTimeout(_chatFadeTimer);
+  const msgs=document.getElementById('ss-chat-msgs');
+  const row=document.getElementById('ss-chat-row');
+  const inp=document.getElementById('ss-chat-inp');
+  if(msgs&&_chatLog.length)msgs.style.display='flex';
+  if(row)row.style.display='flex';
+  if(inp){ inp.value=''; setTimeout(()=>{try{inp.focus();}catch(_){}} ,0); }
+}
+function closeChat(){
+  _chatTyping=false;
+  const row=document.getElementById('ss-chat-row');
+  const inp=document.getElementById('ss-chat-inp');
+  if(row)row.style.display='none';
+  if(inp){ inp.value=''; try{ inp.blur(); }catch(_){} }
+  _chatFade();
+}
+function _chatFade(){
+  clearTimeout(_chatFadeTimer);
+  _chatFadeTimer=setTimeout(()=>{
+    if(!_chatTyping){ const el=document.getElementById('ss-chat-msgs'); if(el)el.style.display='none'; }
+  },8000);
+}
+function sendChat(){
+  const inp=document.getElementById('ss-chat-inp');
+  if(!inp)return;
+  const text=(inp.value||'').trim().slice(0,100);
+  closeChat();
+  if(!text||!_sio)return;
+  const now=Date.now();
+  if(now-_chatLastSend<_CHAT_COOLDOWN)return;   // silent throttle — no scolding toast mid-fight
+  _chatLastSend=now;
+  // Server stamps the authoritative id/name from the socket; it only reads `text` off the payload.
+  try{ _sio.emit('chat',{text}); }catch(_){}
+}
+// Inline onkeydown on the input. stopPropagation is what keeps the game from reacting while you
+// type — both onGameKey and the global shortcut handler listen on `document`, so stopping the
+// bubble here means SPACE doesn't boost, Q doesn't cash out, and F8/T don't fire.
+function onChatKey(e){
+  e.stopPropagation();
+  if(e.key==='Enter'){ e.preventDefault(); sendChat(); }
+  else if(e.key==='Escape'){ e.preventDefault(); closeChat(); }
+}
+function addChatMessage(name,text,col){
+  _chatLog.push({name:String(name||'?').slice(0,14), text:String(text||'').slice(0,100), col:col||'#39FF14'});
+  while(_chatLog.length>_CHAT_MAX)_chatLog.shift();
+  const msgs=document.getElementById('ss-chat-msgs');
+  if(!msgs)return;
+  msgs.style.display='flex';
+  msgs.innerHTML=_chatLog.map(m=>
+    '<div style="font-family:\'Exo 2\',sans-serif;font-size:12px;line-height:1.5;background:rgba(0,0,0,0.72);border-radius:5px;padding:2px 8px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:none;">'
+    +'<span style="color:'+_wgEsc(m.col)+';font-weight:700;">'+_wgEsc(m.name)+'</span>'
+    +'<span style="color:rgba(255,255,255,0.9);">: '+_wgEsc(m.text)+'</span></div>').join('');
+  if(!_chatTyping)_chatFade();
+}
+// Wipe the log between rounds so a new match never opens with the last one's conversation.
+function _chatReset(){
+  _chatTyping=false; _chatLog.length=0; clearTimeout(_chatFadeTimer);
+  const m=document.getElementById('ss-chat-msgs'); if(m){ m.innerHTML=''; m.style.display='none'; }
+  const r=document.getElementById('ss-chat-row');  if(r)r.style.display='none';
+  const i=document.getElementById('ss-chat-inp');  if(i){ i.value=''; try{i.blur();}catch(_){} }
+}
+
 // ═══════════════════ P2P BETTING EXCHANGE (client — sportsbook UI) ═══════════════════
 // Player-vs-player wagers on live snakes. Stakes are shown in USD but escrowed/settled in SOL.
 // Everything is PUSH-driven: the order book updates from socket events ('ss-wager') and the
@@ -3310,6 +3483,7 @@ async function enterWatchMode(region,tier){
 const _wg = {
   region: 'NA', lobby: null,
   roster: [],                 // bettable snakes (server-signed)
+  _rosterSig: '',             // content hash of the drawn roster fields — skips no-op re-renders
   open: new Map(),            // id -> wager (takeable)
   live: new Map(),            // id -> wager (matched, awaiting settlement)
   mine: [],                   // my bet slip
@@ -3362,7 +3536,16 @@ function _wgOnRoster(d){
   if(!d||!Array.isArray(d.snakes))return;
   _wg.region=d.region||'NA'; _wg.lobby=d.lobby||pkRoomId;
   _wg.roster=d.snakes;
-  if(_wg.panel)_wgRender();
+  // The server REBROADCASTS the signed roster every WG_ROSTER_MS (4s) whether or not anything
+  // changed — each entry is re-signed, so the payload differs every time even when the content
+  // doesn't. Re-rendering on that is a full innerHTML rebuild of the panel every 4s for nothing,
+  // and now that live players can have the panel open it would land mid-gameplay. Compare only the
+  // fields the panel actually draws (pid/colour/name — never `usd`, which changes constantly and is
+  // not rendered) and skip the rebuild when they're unchanged.
+  const sig=d.snakes.map(s=>s.pid+''+(s.color||'')+''+(s.name||'')).join('');
+  const changed=(sig!==_wg._rosterSig);
+  _wg._rosterSig=sig;
+  if(_wg.panel&&changed)_wgRender();
 }
 function _wgOnEvent(d){
   if(!d||!d.wager||!d.wager.id)return;
@@ -3406,11 +3589,27 @@ async function _wgLoad(){
 }
 
 // ── panel open/close (slides in; never blocks spectating) ────────────────────
+// True while actually playing a live round (not spectating, not dead, game screen up). Mirrors the
+// _plWant() conditions so the panel and the pointer lock always agree about "in a match".
+function _wgInMatch(){
+  const sc=document.getElementById('scr-game');
+  return !!(SG && !SG.over && !isSpectating && !_localDead && sc && sc.classList.contains('on'));
+}
+// The ONE entry point for opening/closing the panel — the side tab, the × and the F8 key all use it,
+// so there is a single code path and no duplicated open/close logic.
 function _wgTogglePanel(){ _wg.panel?_wgClosePanel():_wgOpenPanel(); }
-function _wgOpenPanel(){ _wg.panel=true; _wgRender(); if(!_wg.loaded)_wgLoad(); }
+function _wgOpenPanel(){
+  // Opened from inside a live match there's no spectator hand-off to set these, so seed the market
+  // from where the player actually is. A server roster push ('ss-wager-roster') overwrites both.
+  if(!isSpectating){
+    if(!_wg.lobby)_wg.lobby=pkRoomId;
+    if(!_wg.roster.length)_wg.region=(GAME_SERVER==='EU')?'EU':'NA';
+  }
+  _wg.panel=true; _wgRender(); if(!_wg.loaded)_wgLoad();
+}
 function _wgClosePanel(){ _wg.panel=false; _wgRender(); }
 function _wgReset(){
-  _wg.roster=[]; _wg.open.clear(); _wg.live.clear(); _wg.mine=[];
+  _wg.roster=[]; _wg._rosterSig=''; _wg.open.clear(); _wg.live.clear(); _wg.mine=[];
   _wg.panel=false; _wg.form=null; _wg.loaded=false; _wg.busy=false;
   const p=document.getElementById('wg-panel'); if(p)p.style.display='none';
   const t=document.getElementById('wg-tab'); if(t)t.style.display='none';
@@ -3553,11 +3752,15 @@ function _wgFormHtml(){
 function _wgRender(){
   // floating tab (always available while spectating)
   let tab=document.getElementById('wg-tab');
-  const show=!!isSpectating;
-  if(!tab&&show){ tab=document.createElement('div'); tab.id='wg-tab'; document.body.appendChild(tab);
+  // Spectators get the persistent side TAB (they have nothing else to do with the screen).
+  // Live players get the panel too, but F8-only — a permanent tab over the arena would sit on top
+  // of gameplay, and the HUD is deliberately not changed here.
+  const showTab=!!isSpectating;
+  const show=!!isSpectating||_wgInMatch();
+  if(!tab&&showTab){ tab=document.createElement('div'); tab.id='wg-tab'; document.body.appendChild(tab);
     tab.style.cssText='position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:9000;background:#FFD700;color:#1a1200;font-weight:800;font-size:11px;padding:12px 8px;border-radius:10px 0 0 10px;cursor:pointer;writing-mode:vertical-rl;letter-spacing:.1em;box-shadow:-3px 0 14px rgba(0,0,0,.5)';
     tab.textContent='🎲 BETS'; tab.onclick=_wgTogglePanel; }
-  if(tab)tab.style.display=(show&&!_wg.panel)?'block':'none';
+  if(tab)tab.style.display=(showTab&&!_wg.panel)?'block':'none';
 
   let p=document.getElementById('wg-panel');
   if(!show||!_wg.panel){ if(p)p.style.display='none'; return; }
@@ -3569,7 +3772,9 @@ function _wgRender(){
   let h='';
   h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 13px;border-bottom:1px solid #2c2a1f;flex:none">';
   h+='<span style="font-size:12px;font-weight:800;color:#FFD700;letter-spacing:.08em">🎲 LIVE BETS</span>';
-  h+='<span id="wg-x" style="cursor:pointer;color:#b8a97a;font-size:20px;line-height:1;font-weight:700">×</span></div>';
+  h+='<span id="wg-x" title="Close (F8)" style="cursor:pointer;color:#b8a97a;font-size:20px;line-height:1;font-weight:700">×</span></div>';
+  // Shortcut hint — keyboard only; on touch there is no F8 to press.
+  if(SS_IS_PC)h+='<div style="flex:none;padding:6px 13px;border-bottom:1px solid #2c2a1f;font-size:9px;color:#8a7c54;letter-spacing:.03em">Press <b style="color:#FFD700">F8</b> to open/close Betting</div>';
   // tabs
   h+='<div style="display:flex;gap:6px;padding:9px 13px 0;flex:none">';
   for(const [id,label] of [['market','MARKET'],['mine','MY BETS']]){ const on=(_wg.tab===id);
@@ -4758,6 +4963,94 @@ function _applyGfx(){
   _gfxParticles    = _gfx==='high';     // money pickup sparkles
   _gfxGlow         = _gfx!=='low';      // shadowBlur glow on rings/badges
 }
+
+// ══ ACCOUNT-BACKED SETTINGS SYNC ══════════════════════════════════════════════════
+// The ACCOUNT is the source of truth for every setting; localStorage is only a cache. That's what
+// makes settings survive a refresh, a logout, and a login on a different device.
+//
+// To add a future setting: append ONE entry below and write it through ssSetSetting() instead of
+// localStorage.setItem(). Nothing else changes — the API stores an opaque string map, so there is
+// no server-side schema to update.
+//   k     = the localStorage key (also the account key)
+//   def   = value that counts as "unset" (used when seeding a fresh account)
+//   apply = re-apply the value to live state on restore; omit for settings that are only ever
+//           read straight from localStorage at the point of use (e.g. clip toggle, snake colour).
+const SS_SET_DEFS = [
+  {k:'ss_server',      def:'NA',   apply:v=>{ if(v==='NA'||v==='EU') setGameServer(v,true); }},
+  {k:'ss_gfx',         def:'high', apply:v=>{ _gfx=v; _applyGfx(); }},
+  {k:'ss_clip_on',     def:'',     apply:null},
+  {k:'ss_keybinds',    def:'{}',   apply:v=>{ try{ _ssBinds=JSON.parse(v)||{}; }catch(_){ _ssBinds={}; } }},
+  {k:'ss_gpbinds',     def:'{}',   apply:v=>{ try{ _gpBinds=JSON.parse(v)||{}; }catch(_){ _gpBinds={}; } }},
+  {k:'ss_snake_color', def:'',     apply:null},
+];
+let _ssSetDirty={}, _ssSetTimer=null;
+
+// Write a setting: cache locally NOW (so the UI is instant and works logged-out) and push to the
+// account on a short debounce (so dragging/clicking through options isn't one request per click).
+function ssSetSetting(k,v){
+  const s=(v==null?'':String(v));
+  try{ localStorage.setItem(k,s); }catch(_){}
+  _ssSetDirty[k]=s;
+  if(_ssSetTimer)clearTimeout(_ssSetTimer);
+  _ssSetTimer=setTimeout(ssPushSettings,600);
+}
+
+// Push pending changes. On ANY failure (offline, logged out, server error) the patch is put back in
+// the dirty map rather than dropped, so it goes up with the next change or the next login.
+async function ssPushSettings(){
+  _ssSetTimer=null;
+  const patch=_ssSetDirty; _ssSetDirty={};
+  if(!Object.keys(patch).length)return;
+  if(!_jwt||!ST.address){ Object.assign(_ssSetDirty,patch); return; }
+  try{
+    const r=await fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'settings-set',address:ST.address,jwt:_jwt,settings:patch})});
+    if(!r.ok)Object.assign(_ssSetDirty,patch);
+  }catch(_){ Object.assign(_ssSetDirty,patch); }
+}
+
+// Pull the account's settings and apply them. Called on login AND on session restore.
+async function ssLoadSettings(){
+  if(!_jwt||!ST.address)return;
+  // Flush anything changed while logged out FIRST. Those edits are the player's most recent intent,
+  // so they must land before we read the account back — otherwise the load returns the pre-change
+  // value and silently reverts what they just set.
+  if(_ssSetTimer){ clearTimeout(_ssSetTimer); _ssSetTimer=null; }
+  if(Object.keys(_ssSetDirty).length) await ssPushSettings();
+  let d={};
+  try{
+    const r=await fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'settings-get',address:ST.address,jwt:_jwt})});
+    if(!r.ok)return;
+    d=await r.json().catch(()=>({}));
+  }catch(_){ return; }                       // offline: keep the localStorage cache as-is
+  if(!d.ok)return;
+  const got=d.settings||{};
+
+  // EXISTING PLAYER, FIRST SYNC: the account has nothing stored yet. Seed it from this device
+  // instead of applying an empty set — otherwise everyone's current settings would be wiped the
+  // first time they load a build with sync in it.
+  if(!Object.keys(got).length){
+    const seed={};
+    for(const s of SS_SET_DEFS){ const lv=localStorage.getItem(s.k); if(lv!=null&&lv!==s.def)seed[s.k]=lv; }
+    if(Object.keys(seed).length){ Object.assign(_ssSetDirty,seed); ssPushSettings(); }
+    return;
+  }
+  for(const s of SS_SET_DEFS){
+    if(!(s.k in got))continue;
+    const v=got[s.k];
+    try{ localStorage.setItem(s.k,v); }catch(_){}
+    if(s.apply)try{ s.apply(v); }catch(_){}
+  }
+  // Anything the account did NOT have (a setting this player has never touched, or one added in a
+  // later build) keeps its local/default value and is pushed up so the account converges.
+  const miss={};
+  for(const s of SS_SET_DEFS){ if(!(s.k in got)){ const lv=localStorage.getItem(s.k); if(lv!=null&&lv!==s.def)miss[s.k]=lv; } }
+  if(Object.keys(miss).length){ Object.assign(_ssSetDirty,miss); ssPushSettings(); }
+
+  try{ syncServerBtns(); }catch(_){}
+  try{ _renderSettings(); }catch(_){}
+}
 _applyGfx();
 
 // ── Rolling clip buffer (lightweight) ────────────────────────────────────────────
@@ -4895,16 +5188,16 @@ function _renderSettings(){
       +'</div>').join('');
   }
 }
-function _setGfx(v){ _gfx=v; try{localStorage.setItem('ss_gfx',v);}catch(_){} _applyGfx(); _renderSettings(); try{window.getSelection&&window.getSelection().removeAllRanges();}catch(_){} addToast('Graphics: '+(v==='low'?'Performance':v==='med'?'Balanced':'Best Look'),'#8cf'); }
+function _setGfx(v){ _gfx=v; ssSetSetting('ss_gfx',v); _applyGfx(); _renderSettings(); try{window.getSelection&&window.getSelection().removeAllRanges();}catch(_){} addToast('Graphics: '+(v==='low'?'Performance':v==='med'?'Balanced':'Best Look'),'#8cf'); }
 function _startGpRebind(act){ _gpCapAct=act; _renderSettings(); }
-function _resetGpBinds(){ _gpBinds={}; _gpCapAct=null; try{localStorage.removeItem('ss_gpbinds');}catch(_){} _renderSettings(); }
+function _resetGpBinds(){ _gpBinds={}; _gpCapAct=null; ssSetSetting('ss_gpbinds','{}'); _renderSettings(); }
 function _startRebind(act, btn){ _cancelRebind(); _kbCapturing=true; _kbCapAct=act; _kbCapBtn=btn; btn.textContent='PRESS…'; btn.style.color='#FFD700'; }
 function _cancelRebind(){ if(_kbCapBtn) _kbCapBtn.style.color=''; _kbCapturing=false; _kbCapAct=null; _kbCapBtn=null; }
-function _resetBinds(){ _ssBinds={}; try{localStorage.removeItem('ss_keybinds');}catch(_){}; _renderSettings(); }
+function _resetBinds(){ _ssBinds={}; ssSetSetting('ss_keybinds','{}'); _renderSettings(); }
 function _toggleClip(){
   if(!SS_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
-  if(localStorage.getItem('ss_clip_on')==='1'){ localStorage.removeItem('ss_clip_on'); _clipStop(); }
-  else{ localStorage.setItem('ss_clip_on','1'); if(SG&&!SG.over&&!isSpectating)_clipStart(); }
+  if(localStorage.getItem('ss_clip_on')==='1'){ ssSetSetting('ss_clip_on',''); _clipStop(); }
+  else{ ssSetSetting('ss_clip_on','1'); if(SG&&!SG.over&&!isSpectating)_clipStart(); }
   _renderSettings();
 }
 // Global capture-phase listener: while rebinding, the next key press becomes the new binding.
@@ -4915,7 +5208,7 @@ document.addEventListener('keydown', function(e){
   const k=_ssNormKey(e.key);
   for(const a in _ssBinds){ if(_ssBinds[a]===k) delete _ssBinds[a]; } // key can only map to one action
   _ssBinds[_kbCapAct]=k;
-  try{ localStorage.setItem('ss_keybinds', JSON.stringify(_ssBinds)); }catch(_){}
+  ssSetSetting('ss_keybinds', JSON.stringify(_ssBinds));
   _cancelRebind(); _renderSettings();
 }, true);
 
@@ -5313,6 +5606,10 @@ function _plActive(){ const t=_plTarget(); return !!t && document.pointerLockEle
 function _plWant(){
   // Only while actually playing. Spectators pan by dragging with real clientX/clientY, so locking
   // them would break spectate; menus obviously must keep a usable cursor.
+  // The betting panel counts as a menu: a held lock makes every DOM button inside it unclickable,
+  // so opening it must give the cursor back. rafDraw's auto-release picks this up on the next frame,
+  // and the next canvas click re-locks — the player never has to press Esc.
+  if(_wg.panel) return false;
   return !!(SG && !SG.over && !isSpectating && !_localDead &&
             document.getElementById('scr-game') && document.getElementById('scr-game').classList.contains('on'));
 }
@@ -5363,6 +5660,10 @@ function onTouchMove(e){e.preventDefault();if(_mobileCtl)return;if(e.touches.len
 function onGameKey(e){
   if(e.repeat)return;
   if(_kbCapturing)return; // Settings is capturing a rebind — ignore game actions
+  // Typing a chat message must never drive the snake. onChatKey already stopPropagation()s, so this
+  // is a second line of defence for any path where the event still reaches document (e.g. focus
+  // lost to the body while the box is open) — SPACE would otherwise boost mid-sentence.
+  if(_chatTyping||_ssTypingInField())return;
   // 'H' hitboxes stays hardcoded (dev tool, not in the remap list) unless the key is bound elsewhere.
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
@@ -5694,7 +5995,7 @@ function pollGamepad(){
     for(let i=0;i<btns.length;i++){ if(pressed(i)){
       for(const a in _gpBinds){ if(_gpBinds[a]===i) delete _gpBinds[a]; } // a button maps to one action
       _gpBinds[_gpCapAct]=i;
-      try{ localStorage.setItem('ss_gpbinds', JSON.stringify(_gpBinds)); }catch(_){}
+      ssSetSetting('ss_gpbinds', JSON.stringify(_gpBinds));
       _gpCapAct=null; if(typeof _renderSettings==='function')_renderSettings();
       break;
     } }
@@ -5787,8 +6088,49 @@ function gpadFocus(dir){
 // Global T key — opens tuning panel from anywhere (lobby, result screen, in-game)
 // (The Shift+O own-head-correction A/B toggle was removed — own-correct is now permanently locked
 // at its shipped value and can never be changed at runtime; see _OWN_CORRECT above.)
+// True when the player is typing — a shortcut must never fire into a text field. Covers <input>,
+// <textarea>, <select> and any contenteditable (chat).
+function _ssTypingInField(){
+  const a=document.activeElement;
+  if(!a)return false;
+  if(a.isContentEditable)return true;
+  const t=(a.tagName||'').toUpperCase();
+  return t==='INPUT'||t==='TEXTAREA'||t==='SELECT';
+}
+
 document.addEventListener('keydown',function(e){
-  if((e.key==='t'||e.key==='T')&&!e.repeat&&localStorage.getItem('ss_owner')==='1')_toggleTuning();
+  // ── F8 — open/close the betting panel ──────────────────────────────────────────────────────
+  // F8 chosen deliberately: it is not a game bind (see SS_BIND_DEFS), not a browser shortcut, and
+  // not a DevTools shortcut that fires on the page (F12 opens DevTools; F8's debugger resume only
+  // applies once DevTools itself has focus). Routes through _wgTogglePanel() — the same single
+  // entry point the side tab and the × use — so there is no duplicate open/close path.
+  if(e.key==='F8'&&!e.repeat){
+    if(_ssTypingInField())return;                      // typing in chat / name / amount fields
+    if(_kbCapturing||_gpCapAct)return;                 // Settings is capturing a rebind
+    if(!isSpectating&&!_wgInMatch()&&!_wg.panel)return; // not in a match and not watching — nothing to show
+    e.preventDefault();
+    _wgTogglePanel();
+    return;
+  }
+  // ── T — open in-game chat ──────────────────────────────────────────────────────────────────
+  // Players only, and never while a field already has focus. Once the box is open the input's own
+  // onChatKey stopPropagation keeps every other key away from the game, so typing "t" mid-message
+  // does not re-trigger this.
+  if((e.key==='t'||e.key==='T')&&!e.repeat){
+    if(_ssTypingInField()||_chatTyping)return;
+    if(_kbCapturing||_gpCapAct)return;
+    if(!_chatCanUse())return;
+    e.preventDefault();
+    openChat();
+    return;
+  }
+  // ── F9 — owner tuning panel ────────────────────────────────────────────────────────────────
+  // MOVED OFF 'T', which is now chat for everyone. Not Shift+T: Shift is the BOOST key, so any
+  // Shift combo would boost at the same time. F9 is unused, matches the F8 betting shortcut, and
+  // can't collide with a chat message.
+  if(e.key==='F9'&&!e.repeat&&localStorage.getItem('ss_owner')==='1'&&!_ssTypingInField()){
+    e.preventDefault(); _toggleTuning();
+  }
   // Shift+P — dump the circle-probe trace (render-vs-server same-frame geometry). Test lobby only.
   if((e.key==='p'||e.key==='P')&&!e.repeat&&_isTestLobby()){
     const withSrv=_cpBuf.filter(r=>r.srv);
