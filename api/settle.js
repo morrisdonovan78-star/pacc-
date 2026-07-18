@@ -1220,6 +1220,42 @@ module.exports = async function handler(req, res) {
     // wager back via the API either, which also closes the free-option abuse: post a wager, watch how
     // the snake starts doing, then yank it before anyone can take the other side.
 
+    // ── solvency: READ-ONLY view of escrow vs every claim against it ──────────────────────────
+    // There was no way to see this from outside, which is exactly why "it says he won but nobody
+    // got the money" was a mystery: a payout is refused when
+    //     escrow < playerDeposits + betLiability + accruedFee
+    // so a perfectly small bet still fails if the escrow is short against TOTAL obligations. That
+    // refusal is silent to the player. This exposes the same figures assertSolvency() uses, plus
+    // what a hypothetical payout would do. Moves no money, mutates nothing, reveals no secrets —
+    // the escrow balance is already public via action:'balance'.
+    if (action === 'solvency') {
+      const probe = Math.max(0, Math.floor(Number(body.payoutLamports) || 0));
+      const inv = await assertSolvency(esc.pubkeyB58, probe);
+      const sol = l => (Number(l) || 0) / 1e9;
+      clearTimeout(guard); done = true;
+      return res.status(200).json({
+        ok: true,
+        escrowPubkey: esc.pubkeyB58,
+        lamports: {
+          escrow: inv.onChainBalance,
+          playerDeposits: inv.wagerLiability,
+          betLiability: inv.betLiability,
+          accruedFee: inv.accruedFee,
+        },
+        sol: {
+          escrow: sol(inv.onChainBalance),
+          playerDeposits: sol(inv.wagerLiability),
+          betLiability: sol(inv.betLiability),
+          accruedFee: sol(inv.accruedFee),
+        },
+        probePayoutLamports: probe,
+        payoutsWouldSucceed: !!inv.ok,
+        deficitLamports: inv.deficit || 0,
+        deficitSol: sol(inv.deficit || 0),
+        reason: inv.reason || null,
+      });
+    }
+
     // ── balance ───────────────────────────────────────────────────────────────
     if (action === 'balance') {
       const bal = await rpc('getBalance', [esc.pubkeyB58, { commitment: 'confirmed' }]);

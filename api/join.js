@@ -99,6 +99,42 @@ async function rpcCall(method, params) {
   throw new Error('All RPCs failed');
 }
 
+// ── LOOKUP THAT PREFERS THE NODE THAT ACTUALLY FOUND IT ────────────────────────────────────────
+// rpcCall races with Promise.any, which resolves on the fastest SUCCESSFUL response. For a lookup
+// like getTransaction that is fatal, because a node which has not indexed the signature yet answers
+// `null` — successfully. So the fastest un-indexed node wins the race and reports "not found" while
+// a slower node already has the transaction. That is the "Still verifying deposit… (2/4)(3/4)(4/4)"
+// failure: the SOL is on chain, we just kept asking whoever was quickest to say no.
+//
+// This is the same trap already fixed in api/rpc.js for getSignatureStatuses; api/join.js has its
+// own rpcCall and never got it. Here we resolve on the first node that returns a NON-NULL result,
+// and only conclude "not found" once every node has answered.
+async function rpcCallFound(method, params) {
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
+  const one = async url => {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (d.error) throw new Error(d.error.message);
+    return d.result;
+  };
+  return await new Promise(resolve => {
+    let left = RPCS.length;
+    let settled = false;
+    if (!left) return resolve(null);
+    for (const url of RPCS) {
+      one(url).then(res => {
+        if (settled) return;
+        if (res != null) { settled = true; return resolve(res); }   // this node HAS it — take it
+        if (--left === 0) { settled = true; resolve(null); }        // everyone says not-found
+      }).catch(() => {
+        if (settled) return;
+        if (--left === 0) { settled = true; resolve(null); }
+      });
+    }
+  });
+}
+
 function verifyPlayerSig(sig, ts, action, playerAddress, wagerLamports) {
   try {
     const now = Math.floor(Date.now() / 1000);
@@ -111,11 +147,14 @@ function verifyPlayerSig(sig, ts, action, playerAddress, wagerLamports) {
 
 // Confirms txSig paid at least wagerLamports to ESCROW_PUBKEY from walletAddress.
 async function verifyWagerTx(txSig, walletAddress, wagerLamports) {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt > 0) await sleep(1500);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    // Short early waits (a confirmed tx is usually indexed within a couple of seconds), then longer
+    // ones. The old flat 1500ms x4 gave up after ~6s, which is inside the window where public RPCs
+    // are still catching up — that is why a real, paid deposit reported "not confirmed".
+    if (attempt > 0) await sleep(attempt <= 2 ? 900 : 2200);
     try {
-      const tx = await rpcCall('getTransaction', [txSig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]);
-      if (!tx) continue; // not indexed yet — retry
+      const tx = await rpcCallFound('getTransaction', [txSig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]);
+      if (!tx) continue; // genuinely not indexed on ANY node yet — retry
       if (tx.meta && tx.meta.err) throw new Error('Transaction failed on-chain');
 
       const keys = tx.transaction.message.accountKeys;
