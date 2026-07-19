@@ -18,12 +18,19 @@ module.exports = async function handler(req, res) {
   // tx, and the join dies after retrying — the "long wait, verified 4 times, never let in, never
   // charged" report. api/settle.js already prefers Helius; this path was left behind.
   // Set HELIUS_RPC_URL in the Vercel env (free tier, 50 req/s) — without it this stays flaky.
+  // Endpoint list, best first. HELIUS_RPC_URL is optional — the two public entries below were
+  // MEASURED healthy on 2026-07-18 and need no API key, so the deposit path is no longer riding on a
+  // single node. The three that used to be here were verified BROKEN the same day and are removed:
+  //   solana.public-rpc.com          -> non-JSON garbage
+  //   solana-mainnet.g.alchemy.com/v2/demo -> demo key, unusable under load
+  //   solana.drpc.org                -> "chain is not available on freetier"
+  // Adding HELIUS_RPC_URL still helps (dedicated 50 req/s, no shared rate limit) but is no longer
+  // required for a working join.
   const rpcs = [
-    process.env.HELIUS_RPC_URL,                     // PRIMARY when configured
-    process.env.SOLANA_RPC_URL,                     // optional second private endpoint
-    'https://api.mainnet-beta.solana.com',
-    'https://solana.public-rpc.com',
-    'https://solana-mainnet.g.alchemy.com/v2/demo',
+    process.env.HELIUS_RPC_URL,                      // best when configured (dedicated capacity)
+    process.env.SOLANA_RPC_URL,                      // optional second private endpoint
+    'https://solana-rpc.publicnode.com',             // free, no key, verified healthy
+    'https://api.mainnet-beta.solana.com',           // official, rate-limited under load
   ].filter(Boolean);
 
   // RPC error codes that mean "this node can't help us" — that node is discarded and we take
