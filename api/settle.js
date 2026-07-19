@@ -692,12 +692,30 @@ async function wgPayWinnerAndFee(esc, winner, payout, fee, tag) {
     return { ok: false, reason: 'insolvent', inv };
   }
   try {
-    const { blockhash } = await fetchBalAndHash(esc.pubkeyB58);
+    const { bal, blockhash } = await fetchBalAndHash(esc.pubkeyB58);
+    // ── KEEP ESCROW RENT-VALID, AND NOTHING MORE ────────────────────────────────────────────────
+    // Solana requires a system account to hold >= RENT_MIN (890880 lamports) or be exactly 0 — land
+    // it anywhere in between and the transfer is rejected outright (InsufficientFundsForRent). So
+    // escrow must retain RENT_MIN plus this tx's 5000-lamport network fee. That is the ENTIRE
+    // structural requirement; no buffer beyond it is kept.
+    //
+    // If the sweep would breach that floor, the FEE is trimmed — never the winner's payout. The
+    // winner is owed their money; the platform cut is what should absorb the shortfall.
+    const spendable = bal - RENT_MIN - TX_FEE;          // most we can move and stay rent-valid
+    let feeCut = cut;
+    if (win > spendable) {
+      // Can't even cover the winner while staying rent-valid — refuse rather than send a doomed tx.
+      return { ok: false, reason: 'insufficient escrow for a rent-valid payout' };
+    }
+    if (win + feeCut > spendable) {
+      feeCut = Math.max(0, spendable - win);
+      console.warn('[wg] ' + tag + ' fee trimmed ' + cut + ' -> ' + feeCut + ' to keep escrow rent-exempt');
+    }
     const transfers = [{ to: b58Decode(winner), lamports: win }];
-    if (cut > 0) transfers.push({ to: b58Decode(CREATOR_WALLET), lamports: cut });
+    if (feeCut > 0) transfers.push({ to: b58Decode(CREATOR_WALLET), lamports: feeCut });
     const tx = buildTx(esc, blockhash, transfers);
     const result = await sendAndConfirm(tx);
-    return { ok: true, sig: result.sig, confirmed: result.confirmed, feeSent: cut };
+    return { ok: true, sig: result.sig, confirmed: result.confirmed, feeSent: feeCut };
   } catch (e) {
     console.error('[wg] ' + tag + ' payout failed — ' + (e && e.message || e));
     return { ok: false, reason: (e && e.message) || 'send failed' };
