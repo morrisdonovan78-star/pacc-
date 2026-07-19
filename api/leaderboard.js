@@ -1,5 +1,6 @@
 'use strict';
 // api/leaderboard.js — GET top-20 players; POST to register/update display name
+const crypto = require('crypto');   // private-lobby handshake token (see the lobby-* actions)
 const { kvGet, kvSetPerm, kvDel, kvZadd, kvZrem, kvZrevrange,
         kvHget, kvHset, kvHgetall, kvLrange } = require('../lib/kv');
 
@@ -102,6 +103,159 @@ module.exports = async function handler(req, res) {
         if (!sub || !address) return res.status(400).json({ error: 'jwt and address required' });
         await recordLink(sub, address);
         return res.status(200).json({ ok: true });
+      }
+
+      // ══ PRIVATE, INVITE-ONLY LOBBIES ═══════════════════════════════════════════════════════════
+      // Rules live in lib/privlobby.js (pure, 63 offline tests). This layer is storage + identity.
+      //
+      // ISOLATION: private lobbies use the `ss-priv-` prefix, which no public lobby id can match.
+      // The game-server gate becomes `LOBBY_IDS.has(id) || isPrivateLobbyId(id)` — purely additive,
+      // so every public lobby keeps its exact-string match and its existing code path. The public
+      // lobby-count and admin-listing arrays are untouched, so private rooms never appear in them.
+      //
+      // KV:  pl:<id> = lobby record | plc:<CODE> = id (join-by-code) | plu:<addr> = zset of my ids
+      if (action && action.indexOf('lobby-') === 0) {
+        const PL = require('../lib/privlobby');
+        const body = req.body || {};   // the handler destructures req.body above; alias it back
+        const now = Date.now();
+        // Every lobby action is account-authenticated AND bound to a wallet: the jwt proves the
+        // account, and a2c/c2a proves that account currently owns the address being acted as. That
+        // stops someone driving a lobby as a wallet that is not theirs.
+        if (!sub) { return res.status(401).json({ error: 'jwt required' }); }
+        const me = String(address || '');
+        if (!me) return res.status(400).json({ error: 'address required' });
+        const owns = await kvGet('a2c:' + me);
+        if (owns && owns !== sub) return res.status(403).json({ error: 'that wallet belongs to another account' });
+        if (!owns) await recordLink(sub, me).catch(() => {});
+
+        const loadLobby = async id => {
+          if (!PL.isPrivateLobbyId(String(id || ''))) return null;
+          try { const raw = await kvGet('pl:' + id); return raw ? JSON.parse(raw) : null; } catch (_) { return null; }
+        };
+        const saveLobby = async l => { await kvSetPerm('pl:' + l.id, JSON.stringify(l)); };
+        // Resolve display names for the roster in one pass.
+        const namesFor = async addrs => {
+          const out = {};
+          for (const a of addrs) { try { out[a] = (await kvHget('ph:' + a, 'name')) || ''; } catch (_) { out[a] = ''; } }
+          return out;
+        };
+        const viewOf = async l => PL.publicView(l, await namesFor(l.invited || []));
+
+        // ── create ──────────────────────────────────────────────────────────────────────────────
+        if (action === 'lobby-create') {
+          const id = PL.makeLobbyId();
+          const code = PL.makeJoinCode();
+          const lobby = PL.newLobby({ id, code, host: me,
+            region: String(body.region || 'NA').toUpperCase() === 'EU' ? 'EU' : 'NA',
+            usd: body.usd, nowMs: now });
+          await saveLobby(lobby);
+          await kvSetPerm('plc:' + code, id);
+          await kvZadd('plu:' + me, now, id).catch(() => {});
+          return res.status(200).json({ ok: true, lobby: await viewOf(lobby) });
+        }
+
+        // ── invite (by wallet address OR by display name) ────────────────────────────────────────
+        if (action === 'lobby-invite') {
+          const lobby = await loadLobby(body.lobbyId);
+          let target = String(body.invitee || '').trim();
+          if (target && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(target)) {
+            // Not an address — treat it as a display name and look it up, then resolve it forward
+            // to that account's CURRENT wallet (names are account-level, wallets can change).
+            const reg = await kvGet('nameReg:' + target.toUpperCase());
+            if (!reg) return res.status(404).json({ error: 'no player found with that name' });
+            target = await currentAddr(reg);
+          }
+          const err = PL.validateInvite({ lobby, byAddr: me, invitee: target, nowMs: now });
+          if (err) return res.status(err === 'lobby not found' ? 404 : 403).json({ error: err });
+          const next = PL.applyInvite(lobby, target);
+          await saveLobby(next);
+          await kvZadd('plu:' + target, now, next.id).catch(() => {});
+          return res.status(200).json({ ok: true, lobby: await viewOf(next) });
+        }
+
+        // ── kick ────────────────────────────────────────────────────────────────────────────────
+        if (action === 'lobby-kick') {
+          const lobby = await loadLobby(body.lobbyId);
+          const target = String(body.target || '');
+          const err = PL.validateKick({ lobby, byAddr: me, target });
+          if (err) return res.status(err === 'lobby not found' ? 404 : 403).json({ error: err });
+          const next = PL.applyKick(lobby, target);
+          await saveLobby(next);
+          await kvZrem('plu:' + target, next.id).catch(() => {});
+          return res.status(200).json({ ok: true, lobby: await viewOf(next) });
+        }
+
+        // ── set the stake (host only, OPEN only) ────────────────────────────────────────────────
+        // Resets every ready flag, so nobody stays "agreed" to a price that changed under them.
+        if (action === 'lobby-setprice') {
+          const lobby = await loadLobby(body.lobbyId);
+          const err = PL.validateSetPrice({ lobby, byAddr: me, usd: body.usd });
+          if (err) return res.status(err === 'lobby not found' ? 404 : 403).json({ error: err });
+          const next = PL.applySetPrice(lobby, body.usd);
+          await saveLobby(next);
+          return res.status(200).json({ ok: true, lobby: await viewOf(next) });
+        }
+
+        // ── ready up (each member agrees to the stake) ───────────────────────────────────────────
+        if (action === 'lobby-ready') {
+          const lobby = await loadLobby(body.lobbyId);
+          const err = PL.validateReady({ lobby, addr: me });
+          if (err) return res.status(err === 'lobby not found' ? 404 : 403).json({ error: err });
+          const next = PL.applyReady(lobby, me, body.ready !== false);
+          await saveLobby(next);
+          return res.status(200).json({ ok: true, lobby: await viewOf(next) });
+        }
+
+        // ── start ───────────────────────────────────────────────────────────────────────────────
+        if (action === 'lobby-start') {
+          const lobby = await loadLobby(body.lobbyId);
+          const err = PL.validateStart({ lobby, byAddr: me });
+          if (err) return res.status(err === 'lobby not found' ? 404 : 403).json({ error: err });
+          const next = PL.applyStart(lobby, now);
+          await saveLobby(next);
+          return res.status(200).json({ ok: true, lobby: await viewOf(next) });
+        }
+
+        // ── read one (members only) ─────────────────────────────────────────────────────────────
+        if (action === 'lobby-get') {
+          let lobby = await loadLobby(body.lobbyId);
+          if (!lobby && body.code) {                       // join-by-code
+            const id = await kvGet('plc:' + String(body.code).toUpperCase());
+            if (id) lobby = await loadLobby(id);
+          }
+          if (!lobby) return res.status(404).json({ error: 'lobby not found' });
+          if (!PL.isInvited(lobby, me)) return res.status(403).json({ error: 'you need an invite to see this lobby' });
+          return res.status(200).json({ ok: true, lobby: await viewOf(lobby) });
+        }
+
+        // ── my lobbies ──────────────────────────────────────────────────────────────────────────
+        if (action === 'lobby-mine') {
+          const z = await kvZrevrange('plu:' + me, 0, 20);
+          const ids = []; if (Array.isArray(z)) for (let i = 0; i < z.length; i += 2) ids.push(z[i]);
+          const out = [];
+          for (const id of ids) {
+            const l = await loadLobby(id);
+            if (l && PL.isInvited(l, me) && !PL.isExpired(l, now) && l.status !== PL.STATUS.CLOSED) out.push(await viewOf(l));
+          }
+          return res.status(200).json({ ok: true, lobbies: out });
+        }
+
+        // ── handshake token ─────────────────────────────────────────────────────────────────────
+        // Short-lived HMAC the GAME SERVER verifies locally with the GAME_SECRET it already holds —
+        // no API call on the join path, same trust model as the existing entry token. Bound to BOTH
+        // the lobby and the wallet, so it cannot be handed to someone else or reused elsewhere.
+        if (action === 'lobby-token') {
+          const lobby = await loadLobby(body.lobbyId);
+          const err = PL.canJoin({ lobby, addr: me, nowMs: now });
+          if (err) return res.status(err === 'lobby not found' ? 404 : 403).json({ error: err });
+          const secret = process.env.GAME_SECRET;
+          if (!secret) return res.status(500).json({ error: 'server not configured for private lobbies' });
+          const expTs = now + 120000;                       // 2 min: long enough to connect, no more
+          const sig = crypto.createHmac('sha256', secret).update(PL.inviteCanon(lobby.id, me, lobby.usd, expTs)).digest('hex');
+          return res.status(200).json({ ok: true, lobbyId: lobby.id, expTs, sig, region: lobby.region, usd: lobby.usd });
+        }
+
+        return res.status(400).json({ error: 'unknown lobby action' });
       }
 
       // ── action:'settings-get' / 'settings-set' — ACCOUNT-LEVEL client settings ────────────────
