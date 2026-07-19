@@ -522,6 +522,24 @@ body.mctl #voice-speakers{left:150px;}
     <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:1.1rem;">
       Records the last 20 seconds in your browser. Press <b>G</b> (keyboard) or click the <b>right stick</b> (controller) to save a clip. <b>PC only</b> — off on phones. Runs on your device, never on the game server.
     </div>
+    <!-- Voice chat -->
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">🎙 VOICE CHAT</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:7px;">
+      <span style="font-family:'Press Start 2P',monospace;font-size:8px;color:#fff;">PUSH-TO-TALK</span>
+      <button id="ptt-toggle-btn" class="copy-btn" style="min-width:64px;" onclick="_togglePtt()">OFF</button>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:9px;">
+      <span style="font-family:'Press Start 2P',monospace;font-size:8px;color:#fff;">MUTE EVERYONE ELSE</span>
+      <button id="deaf-toggle-btn" class="copy-btn" style="min-width:64px;" onclick="voiceDeafToggle()">OFF</button>
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:3px;">MIC SENSITIVITY — <span id="gate-val" style="color:var(--c);"></span></div>
+    <input id="gate-slider" type="range" min="1" max="50" step="1" oninput="_setGate(this.value)" style="width:100%;margin-bottom:9px;"/>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:3px;">VOICE VOLUME — <span id="vol-val" style="color:var(--c);"></span></div>
+    <input id="vol-slider" type="range" min="0" max="100" step="1" oninput="_setVoiceVol(this.value)" style="width:100%;margin-bottom:7px;"/>
+    <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:1.1rem;">
+      <b>Echo when you're also in Discord?</b> Your browser can only cancel its own sound, not Discord's — so Discord comes out your speakers, back in your mic, and everyone hears it twice. <b>Push-to-talk</b> plus a <b>lower sensitivity</b> (slider right) cut most of it. <b>Headphones remove it completely.</b><br>
+      Your mic and what you hear are separate: muting yourself never silences anyone else.
+    </div>
     <!-- Graphics preset -->
     <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">GRAPHICS</div>
     <div id="gfx-row" style="display:flex;gap:6px;margin-bottom:6px;">
@@ -810,7 +828,8 @@ body.mctl #voice-speakers{left:150px;}
     <div class="gi"><span class="gl">FPS</span><span class="gv" id="hud-fps" style="color:var(--g)">--</span></div>
   </div>
   <div id="leaderboard" style="position:fixed;top:8px;right:10px;min-width:190px;background:rgba(7,7,15,0.88);border:1px solid rgba(255,215,0,0.35);border-radius:10px;padding:8px 12px;z-index:100;font-family:'Exo 2',sans-serif;pointer-events:none;display:none;"></div>
-  <button id="voice-btn" onclick="voiceToggle()" title="Voice chat — X (controller) / M (keyboard) to mute" style="position:fixed;bottom:148px;right:14px;z-index:200;display:none;width:46px;height:46px;border-radius:50%;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.3);color:#fff;font-size:20px;cursor:pointer;">🎙️</button>
+  <button id="voice-deaf-btn" onclick="voiceDeafToggle()" title="Mute everyone else — your mic stays on" style="position:fixed;bottom:96px;right:14px;z-index:200;display:none;width:46px;height:46px;border-radius:50%;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.3);color:#fff;font-size:20px;cursor:pointer;">🔊</button>
+  <button id="voice-btn" onclick="voiceToggle()" title="Your mic — X (controller) / M (keyboard)" style="position:fixed;bottom:148px;right:14px;z-index:200;display:none;width:46px;height:46px;border-radius:50%;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.3);color:#fff;font-size:20px;cursor:pointer;">🎙️</button>
   <!-- Bottom-left stack, from the floor up: chat (16px) → bot-bar (170px) → voice-speakers (272px).
        voice-speakers and bot-bar were both anchored at the very bottom-left; chat now owns that
        corner, so they move UP rather than overlap. Only their `bottom:` values changed.
@@ -1327,6 +1346,20 @@ const ST={email:'',address:'',balance:0,solPrice:0,wagerSol:0,lobbyUsd:0,conn:nu
 let _keypair=null,_jwt='',_pendingBackupKp=null;
 let _sio=null,ablyChannel=null,pkRoomId=null;
 let _voiceStream=null,_voiceEnabled=false,_voiceCapCtx=null,_voiceProc=null,_voicePlayCtx=null;
+// ── Voice options ────────────────────────────────────────────────────────────────
+// Echo when a player is in the game AND Discord at once is NOT fixable by the browser: its echo
+// canceller can only subtract audio the BROWSER renders, and Discord is a separate process it
+// cannot see. Push-to-talk (mic shut unless held) and a higher gate are what actually cut it.
+// MIC (what you send) and EARS (what you hear) are deliberately independent — muting yourself must
+// never silence everyone else, and vice versa.
+let _voicePtt   = localStorage.getItem('ss_voice_ptt')==='1';
+let _voiceGate  = (()=>{ const n=parseFloat(localStorage.getItem('ss_voice_gate')||''); return (isNaN(n)||n<=0)?0.005:n; })();
+let _voiceVol   = (()=>{ const n=parseFloat(localStorage.getItem('ss_voice_vol')||''); return isNaN(n)?1:Math.max(0,Math.min(1,n)); })();
+let _voiceMicOff=false;   // your mic muted — you can still hear everyone
+let _voiceDeaf  =false;   // others muted — your mic still works. Session-only on purpose: persisting
+                          // it means a player returns tomorrow to silence with no idea why.
+let _pttHeld    =false;
+let _voiceMaster=null;    // master gain on everything you HEAR (volume + deafen)
 let _peerAudioCtxs=new Map(),_voiceAnalysers=new Map(),_voiceSpeaking=new Set(),_voiceLocalAnalyser=null,_voiceReadyPids=new Set(),_voiceHearFirst=new Set();
 let myPid=null,isHost=false,isSpectating=false;
 let _joiningLobby=false,_lobbyIsPaid=false,_joinStartedAt=0;
@@ -5306,7 +5339,11 @@ const SS_BIND_DEFS = [
   {act:'clip',       label:'Save 20s Clip',    keys:['g']},
   {act:'zoomIn',     label:'Zoom In',          keys:['=','+']},
   {act:'zoomOut',    label:'Zoom Out',         keys:['-','_']},
-  {act:'voice',      label:'Voice Chat',       keys:['m']},
+  {act:'voice',      label:'Mic Mute',         keys:['m']},
+  // V and J are free: space/shift=boost, q=cashout, g=clip, m=mic, e=auto-circle, t=chat,
+  // n/c=bots, 9/`=perf, F8=bets, F9=tuning.
+  {act:'voicePtt',   label:'Push-to-Talk',     keys:['v']},
+  {act:'voiceDeaf',  label:'Mute Others',      keys:['j']},
   {act:'autoCircle', label:'Auto-Circle',      keys:['e']},
 ];
 let _ssBinds = {};
@@ -5334,7 +5371,9 @@ function _ssBindKey(act){
 const GP_DEFS = [
   {act:'boost',      label:'Boost',       def:0},   // A
   {act:'cashout',    label:'Cash Out',    def:1},   // B
-  {act:'voice',      label:'Voice Chat',  def:2},   // X
+  {act:'voice',      label:'Mic Mute',    def:2},   // X
+  {act:'voicePtt',   label:'Push-to-Talk',def:4},   // LB — held, not edge-triggered
+  {act:'voiceDeaf',  label:'Mute Others', def:3},   // Y
   {act:'autoCircle', label:'Auto-Circle', def:10},  // L3
   {act:'clip',       label:'Save Clip',   def:11},  // R3
 ];
@@ -5375,6 +5414,10 @@ const SS_SET_DEFS = [
   {k:'ss_keybinds',    def:'{}',   apply:v=>{ try{ _ssBinds=JSON.parse(v)||{}; }catch(_){ _ssBinds={}; } }},
   {k:'ss_gpbinds',     def:'{}',   apply:v=>{ try{ _gpBinds=JSON.parse(v)||{}; }catch(_){ _gpBinds={}; } }},
   {k:'ss_snake_color', def:'',     apply:null},
+  {k:'ss_voice_ptt',   def:'',      apply:v=>{ _voicePtt = v==='1'; _pttHeld=false; }},
+  {k:'ss_voice_gate',  def:'0.005', apply:v=>{ const n=parseFloat(v); if(!isNaN(n)&&n>0)_voiceGate=n; }},
+  {k:'ss_voice_vol',   def:'1',     apply:v=>{ const n=parseFloat(v); if(!isNaN(n))_voiceVol=Math.max(0,Math.min(1,n)); _voiceApplyVol(); }},
+  {k:'ss_clip_mic',    def:'',      apply:null},
 ];
 let _ssSetDirty={}, _ssSetTimer=null;
 
@@ -5606,6 +5649,19 @@ function _renderSettings(){
       +'<button class="copy-btn" style="min-width:64px;" onclick="_startRebind(\''+d.act+'\',this)">'+_keyLabel(_ssBindKey(d.act))+'</button>'
       +'</div>').join('');
   }
+  // Voice options
+  const pb=document.getElementById('ptt-toggle-btn');
+  if(pb){ pb.textContent=_voicePtt?'ON':'OFF'; pb.style.color=_voicePtt?'#39FF14':'#FF4444'; }
+  const db=document.getElementById('deaf-toggle-btn');
+  if(db){ db.textContent=_voiceDeaf?'ON':'OFF'; db.style.color=_voiceDeaf?'#FF4444':'#39FF14'; }
+  const gs=document.getElementById('gate-slider'), gv=document.getElementById('gate-val');
+  if(gs){ gs.value=String(Math.round(_voiceGate*1000)); }
+  // Higher gate = mic ignores more, so present it as sensitivity DOWN — "sensitivity 5%" reading
+  // backwards from the raw threshold is what a player actually expects from the slider.
+  if(gv){ gv.textContent=(_voiceGate<=0.004?'HIGH (picks up quiet talking)':_voiceGate<=0.012?'NORMAL':_voiceGate<=0.025?'LOW (cuts background)':'VERY LOW (loud voices only)'); }
+  const vs=document.getElementById('vol-slider'), vv=document.getElementById('vol-val');
+  if(vs){ vs.value=String(Math.round(_voiceVol*100)); }
+  if(vv){ vv.textContent=_voiceDeaf?'MUTED':(Math.round(_voiceVol*100)+'%'); }
   // Graphics preset — highlight the active option
   document.querySelectorAll('.gfx-opt').forEach(b=>{ const on=b.getAttribute('data-gfx')===_gfx;
     b.style.background=on?'var(--g)':''; b.style.color=on?'#000':''; b.style.fontWeight=on?'700':''; });
@@ -5623,6 +5679,23 @@ function _renderSettings(){
   }
 }
 function _setGfx(v){ _gfx=v; ssSetSetting('ss_gfx',v); _applyGfx(); _renderSettings(); try{window.getSelection&&window.getSelection().removeAllRanges();}catch(_){} addToast('Graphics: '+(v==='low'?'Performance':v==='med'?'Balanced':'Best Look'),'#8cf'); }
+function _togglePtt(){
+  _voicePtt=!_voicePtt; ssSetSetting('ss_voice_ptt',_voicePtt?'1':'');
+  _pttHeld=false;                       // switching modes must never leave the mic latched open
+  _clipMicSet(_voiceTxOpen()?0.85:0);
+  _voiceUpdateBtns(); _renderSettings();
+  addToast(_voicePtt?('🎙️ Push-to-talk ON — hold '+_keyLabel(_ssBindKey('voicePtt'))+' to talk'):'🎤 Push-to-talk OFF — mic is open','#FFD700');
+}
+function _setGate(v){
+  const n=Math.max(1,Math.min(50,parseInt(v,10)||5));
+  _voiceGate=n/1000; ssSetSetting('ss_voice_gate',String(_voiceGate)); _renderSettings();
+}
+function _setVoiceVol(v){
+  const n=Math.max(0,Math.min(100,parseInt(v,10)||0));
+  _voiceVol=n/100; ssSetSetting('ss_voice_vol',String(_voiceVol));
+  if(_voiceDeaf&&n>0){ _voiceDeaf=false; }   // dragging volume up is an obvious "un-deafen" intent
+  _voiceApplyVol(); _voiceUpdateBtns(); _renderSettings();
+}
 function _startGpRebind(act){ _gpCapAct=act; _renderSettings(); }
 function _resetGpBinds(){ _gpBinds={}; _gpCapAct=null; ssSetSetting('ss_gpbinds','{}'); _renderSettings(); }
 function _startRebind(act, btn){ _cancelRebind(); _kbCapturing=true; _kbCapAct=act; _kbCapBtn=btn; btn.textContent='PRESS…'; btn.style.color='#FFD700'; }
@@ -5725,6 +5798,7 @@ function launchSnakeGame(){
   // Host migration only applies in practice mode; live games use server authority
   if(_isPractice)_hostWatch=setInterval(_checkHost,300);
   const _vb=document.getElementById('voice-btn');if(_vb)_vb.style.display='flex';
+  const _vd=document.getElementById('voice-deaf-btn');if(_vd)_vd.style.display='flex';
   // Mobile touch controls: joystick (steer), hold-button (cashout), slider (zoom)
   _mobileCtl=!!(window.matchMedia&&matchMedia('(pointer:coarse)').matches);
   if(_mobileCtl){
@@ -6142,14 +6216,20 @@ function onGameKey(e){
   else if(a==='zoomIn')_zoomOffset=Math.min(2.0,_zoomOffset+0.12);   // rafDraw re-clamps to visible range
   else if(a==='zoomOut')_zoomOffset=Math.max(-2.0,_zoomOffset-0.12);
   else if(a==='voice')voiceToggle();
+  else if(a==='voiceDeaf')voiceDeafToggle();
+  else if(a==='voicePtt'){ if(!_voicePtt)addToast('Push-to-talk is off — turn it on in ⚙ Settings','#FFD700'); else _pttSet(true); }
   else if(a==='autoCircle')toggleAutoCircle();
   else if(a==='clip')_clipSave();
 }
 function onGameKeyUp(e){
   const a=_ssKeyAction(e.key);
   if(a==='boost')_mouseBoost=false;
+  else if(a==='voicePtt')_pttSet(false);
   // cashout is server-locked once started — releasing the key does NOT cancel it (see startCashout)
 }
+// Losing focus while holding push-to-talk (alt-tab to Discord, exactly when this matters) never
+// delivers the keyup — the mic would stay open and broadcast the whole conversation.
+window.addEventListener('blur',()=>_pttSet(false));
 
 // ── Server-authoritative cash-out. Pressing 9 (or B / on-screen button) starts a FORCED auto-circle
 // that CANNOT be cancelled. The game SERVER runs the 6s timer and decides the outcome:
@@ -6326,6 +6406,7 @@ async function endSnakeGame(reason,killerId){
 
   _gpadSnapshot(); _gpadNavTs=0; // held buttons (e.g. A) recorded as down so they don't auto-confirm
   const _vb=document.getElementById('voice-btn');if(_vb)_vb.style.display='none';
+  const _vd=document.getElementById('voice-deaf-btn');if(_vd)_vd.style.display='none';
   const _bb2=document.getElementById('bot-bar');if(_bb2)_bb2.style.display='none';
   const _payoutEl=document.getElementById('rs-payout');
   if(_payoutEl)_payoutEl.style.display='none';
@@ -6472,6 +6553,8 @@ function pollGamepad(){
     if(Math.abs(rsx)>GPAD_DEADZONE) _zoomOffset=Math.max(-2.0,Math.min(2.0,_zoomOffset-rsx*0.004));
     // Remappable controller actions (defaults: X=voice, L3=auto-circle, R3=clip, B=cashout)
     if(pressed(_gpBtn('voice'))) voiceToggle();
+    if(pressed(_gpBtn('voiceDeaf'))) voiceDeafToggle();
+    if(_voicePtt){ const pb=_gpBtn('voicePtt'); if(pb>=0) _pttSet(cur(pb)); }  // HELD, not edge-triggered
     if(pressed(_gpBtn('autoCircle'))) toggleAutoCircle();
     if(pressed(_gpBtn('clip'))) _clipSave();
     if(pressed(_gpBtn('cashout'))&&!_cashoutActive&&!_localDead){ startCashout(); }
@@ -7793,13 +7876,64 @@ function drawMinimap(mySnake){
 
 // ── Voice chat (relay-based PCM over socket — ported from the other game) ──────
 function _closeVoicePeer(pid){_peerAudioCtxs.delete(pid);_voiceAnalysers.delete(pid);_voiceReadyPids.delete(pid);}
+// Everything you hear passes through one gain node, so volume and deafen are a single value and
+// neither touches the mic path. Peers feed the master; the CLIP mix is tapped BEFORE it, so turning
+// your own volume down (or deafening) never silences the recording.
+function _voiceEnsureMaster(){
+  if(!_voicePlayCtx)return null;
+  if(!_voiceMaster){
+    _voiceMaster=_voicePlayCtx.createGain();
+    _voiceMaster.gain.value=_voiceDeaf?0:_voiceVol;
+    _voiceMaster.connect(_voicePlayCtx.destination);
+  }
+  return _voiceMaster;
+}
+function _voiceApplyVol(){ if(_voiceMaster){ try{ _voiceMaster.gain.value=_voiceDeaf?0:_voiceVol; }catch(_){} } }
+// Is the mic actually transmitting right now? Mute and push-to-talk both close it; the RMS gate is
+// applied separately per-frame so a held PTT key still sounds natural between words.
+function _voiceTxOpen(){ return !!(_voiceEnabled && !_voiceMicOff && (!_voicePtt || _pttHeld)); }
+// Keep the clip recording honest: it captures your mic only while you are actually transmitting,
+// so a clip never contains something the other players did not hear.
+function _clipMicSet(v){ if(_clipMicGain && _clipMicGain.gain.value!==v){ try{ _clipMicGain.gain.value=v; }catch(_){} } }
+function _pttSet(down){
+  if(!_voicePtt || _pttHeld===down) return;
+  _pttHeld=down;
+  _clipMicSet(_voiceTxOpen()?0.85:0);
+  _voiceUpdateBtns();
+}
 function _getOrMakePeerAudio(pid){
   if(!_voicePlayCtx)return null;
   let s=_peerAudioCtxs.get(pid);
-  if(!s){const an=_voicePlayCtx.createAnalyser();an.fftSize=256;an.connect(_voicePlayCtx.destination);
+  if(!s){const an=_voicePlayCtx.createAnalyser();an.fftSize=256;
+    an.connect(_voiceEnsureMaster()||_voicePlayCtx.destination);
     if(_clipMixDest){try{an.connect(_clipMixDest);}catch(_){}}   // so late joiners land in clips too
     s={analyser:an,nextTime:0};_peerAudioCtxs.set(pid,s);_voiceAnalysers.set(pid,an);}
   return s;
+}
+// Mic on/off — independent of hearing. Starts voice if it was never enabled.
+function voiceMicToggle(){
+  if(!_voiceEnabled){ voiceToggle(); return; }
+  _voiceMicOff=!_voiceMicOff;
+  if(_voiceStream)_voiceStream.getAudioTracks().forEach(t=>t.enabled=!_voiceMicOff);
+  _clipMicSet(_voiceTxOpen()?0.85:0);
+  addToast(_voiceMicOff?'🔇 Mic off — you can still hear everyone':'🎤 Mic on','#FFD700');
+  _voiceUpdateBtns();
+}
+// Deafen — silences everyone else WITHOUT muting your mic.
+function voiceDeafToggle(){
+  _voiceDeaf=!_voiceDeaf; _voiceApplyVol();
+  addToast(_voiceDeaf?'🔇 Others muted — your mic is still on':'🔊 Hearing others again','#FFD700');
+  _voiceUpdateBtns(); if(document.getElementById('settings-modal').style.display==='flex')_renderSettings();
+}
+function _voiceUpdateBtns(){
+  const b=document.getElementById('voice-btn');
+  if(b){
+    const talking=_voiceTxOpen();
+    b.textContent=!_voiceEnabled?'🎙️':(_voiceMicOff?'🔇':(_voicePtt&&!_pttHeld?'🎙️':'🎤'));
+    b.style.borderColor=!_voiceEnabled?'rgba(255,215,0,0.3)':(talking?'rgba(57,255,20,0.6)':'rgba(255,68,68,0.5)');
+  }
+  const d=document.getElementById('voice-deaf-btn');
+  if(d){ d.textContent=_voiceDeaf?'🔇':'🔊'; d.style.borderColor=_voiceDeaf?'rgba(255,68,68,0.5)':'rgba(255,215,0,0.3)'; }
 }
 function _playVoiceChunk(from,ab){
   if(!_voicePlayCtx)return;
@@ -7849,9 +7983,14 @@ async function voiceToggle(){
         const silence=_voiceCapCtx.createGain();silence.gain.value=0;_voiceProc.connect(silence);silence.connect(_voiceCapCtx.destination);
         _voiceProc.onaudioprocess=(e)=>{
           if(!_voiceEnabled||!_sio)return;
+          // Mic closed (muted, or push-to-talk not held) — send nothing at all.
+          if(!_voiceTxOpen()){ _clipMicSet(0); return; }
+          _clipMicSet(0.85);
           const pcm=e.inputBuffer.getChannelData(0);
           let sum=0;for(let i=0;i<pcm.length;i++)sum+=pcm[i]*pcm[i];
-          if(Math.sqrt(sum/pcm.length)<0.005)return;
+          // Adjustable gate. The old hardcoded 0.005 was low enough that speaker bleed from a
+          // Discord call cleared it and got rebroadcast — which is the echo players reported.
+          if(Math.sqrt(sum/pcm.length)<_voiceGate)return;
           const ratio=_voiceCapCtx.sampleRate/16000,outLen=Math.floor(pcm.length/ratio);
           const i16=new Int16Array(outLen);
           for(let i=0;i<outLen;i++){const v=pcm[Math.floor(i*ratio)];i16[i]=Math.max(-32768,Math.min(32767,v*32767));}
@@ -7859,17 +7998,19 @@ async function voiceToggle(){
           _sio.emit('voice-audio',btoa(s));
         };
       }catch(e){console.warn('[voice-cap]',e);}
-      if(btn){btn.textContent='🎤';btn.style.borderColor='rgba(57,255,20,0.6)';}
+      _voiceEnsureMaster();          // route peers through the volume/deafen gain
+      _voiceMicOff=false; _pttHeld=false;
+      _voiceUpdateBtns();
       _clipWireAudio(); // voice came up after clips started — fold it into the recording now
-      addToast('🎤 Voice ON — X (controller) / M (keyboard) to mute','#39FF14');
+      _clipMicSet(_voiceTxOpen()?0.85:0);
+      addToast(_voicePtt
+        ? ('🎙️ Voice ON — hold '+_keyLabel(_ssBindKey('voicePtt'))+' to talk')
+        : ('🎤 Voice ON — '+_keyLabel(_ssBindKey('voice'))+' mutes your mic, '+_keyLabel(_ssBindKey('voiceDeaf'))+' mutes everyone else'),'#39FF14');
       if(_clipStream)addToast('🎙️ Voice chat will be recorded in clips','#FFD700');
       if(_sio)_sio.emit('voice-ready',{});
     }catch(e){addToast('Microphone access denied — check browser settings','#FF4444');}
   }else{
-    const muted=_voiceStream&&_voiceStream.getAudioTracks().some(t=>!t.enabled);
-    if(_voiceStream)_voiceStream.getAudioTracks().forEach(t=>t.enabled=muted);
-    if(btn){btn.textContent=muted?'🎤':'🔇';btn.style.borderColor=muted?'rgba(57,255,20,0.6)':'rgba(255,68,68,0.5)';}
-    addToast(muted?'🎤 Mic unmuted':'🔇 Mic muted','#FFD700');
+    voiceMicToggle();   // mic only — deafen is a separate control (voiceDeafToggle)
   }
 }
 function voiceCleanup(){
@@ -7879,6 +8020,10 @@ function voiceCleanup(){
   _peerAudioCtxs.clear();_voiceAnalysers.clear();_voiceSpeaking.clear();_voiceLocalAnalyser=null;_voiceReadyPids.clear();_voiceHearFirst.clear();
   if(_voiceStream){_voiceStream.getTracks().forEach(t=>t.stop());_voiceStream=null;}
   _voiceEnabled=false;
+  // _voicePlayCtx is closed above, so the master gain is dead with it — drop the ref or the next
+  // session reuses a node from a closed context and nobody can be heard.
+  _voiceMaster=null; _voiceMicOff=false; _voiceDeaf=false; _pttHeld=false;
+  _voiceUpdateBtns();
   const btn=document.getElementById('voice-btn');
   if(btn){btn.textContent='🎙️';btn.style.borderColor='rgba(255,215,0,0.2)';}
   const vs=document.getElementById('voice-speakers');if(vs)vs.style.display='none';
