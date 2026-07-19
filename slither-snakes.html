@@ -567,8 +567,8 @@ body.mctl #voice-speakers{left:150px;}
     </div>
     <div id="wd-preview" style="font-size:10px;color:var(--muted);margin-bottom:1rem;min-height:14px;"></div>
     <div style="display:flex;gap:8px;">
-      <button class="btn btn-g btn-sm" onclick="doWithdraw()" style="flex:1;">SEND</button>
-      <button class="btn btn-r btn-sm" onclick="document.getElementById('wd-modal').style.display='none'" style="flex:1;">CANCEL</button>
+      <button id="wd-send-btn" class="btn btn-g btn-sm" onclick="doWithdraw()" style="flex:1;">SEND</button>
+      <button id="wd-cancel-btn" class="btn btn-r btn-sm" onclick="wdClose()" style="flex:1;">CANCEL</button>
     </div>
   </div>
 </div>
@@ -2397,11 +2397,33 @@ function wdPreview(){
   } else { el.textContent=''; }
 }
 const RENT_MIN_LAMPS=890880; // lamports — Solana rent-exempt minimum; balance must be 0 or >= this
+// Re-entrancy guard for withdrawals. doWithdraw() awaits for up to ~30s (price -> balance+blockhash
+// -> send -> up to 20 confirmation polls) and SEND used to stay live the whole time. A second click
+// built a SECOND transaction with a FRESH blockhash — a different signature, so the chain does NOT
+// dedupe it — against a balance that had not settled yet, so both landed. That is the double-send.
+// The flag is module-level on purpose: closing and reopening the modal must not clear it.
+let _wdBusy=false;
+function _wdSetBusy(b){
+  _wdBusy=b;
+  const s=document.getElementById('wd-send-btn');
+  if(s){ s.disabled=b; s.textContent=b?'SENDING…':'SEND'; s.style.opacity=b?'.55':''; s.style.cursor=b?'not-allowed':''; }
+  const c=document.getElementById('wd-cancel-btn');
+  if(c){ c.disabled=b; c.style.opacity=b?'.55':''; c.style.cursor=b?'not-allowed':''; }
+}
+// Closing mid-send would hide the modal while the tx is still in flight, and reopening it is the
+// other way people ended up firing twice. The guard blocks the send either way; this stops the UI
+// from ever suggesting the withdrawal was cancelled when it was not.
+function wdClose(){
+  if(_wdBusy){ addToast('Withdrawal in progress — please wait','#FFD700'); return; }
+  document.getElementById('wd-modal').style.display='none';
+}
 async function doWithdraw(){
+  if(_wdBusy){ addToast('Withdrawal already in progress — please wait','#FFD700'); return; }
   const toAddr=document.getElementById('wd-addr').value.trim();
   const amtUsd=parseFloat(document.getElementById('wd-amt').value);
   if(!toAddr||isNaN(amtUsd)||amtUsd<=0){addToast('Enter a valid address and amount','#f55');return;}
   if(!_keypair){addToast('Wallet not loaded','#f55');return;}
+  _wdSetBusy(true);   // must latch BEFORE the first await, or two clicks in the same tick both pass
   try{
     await fetchPrice().catch(()=>{});
     if(!ST.solPrice||ST.solPrice<=0){addToast('SOL price unavailable — try again','#f55');return;}
@@ -2471,6 +2493,7 @@ async function doWithdraw(){
     document.getElementById('wd-modal').style.display='none';
     await refreshBal();
   }catch(e){addToast('Withdraw failed: '+(e.message||e),'#f55');console.warn('[withdraw]',e);}
+  finally{ _wdSetBusy(false); }   // released on EVERY exit path — a stuck flag would lock withdrawals
 }
 
 function doLogout(){
