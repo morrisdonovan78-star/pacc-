@@ -806,7 +806,11 @@ body.mctl #voice-speakers{left:150px;}
        auto-hides; the input row only exists while actually typing, so this is invisible in normal
        play. pointer-events:none on the wrapper so it never eats a click meant for the arena. -->
   <div id="ss-chat" style="position:fixed;bottom:16px;left:12px;z-index:201;width:320px;max-width:46vw;display:flex;flex-direction:column;gap:3px;pointer-events:none;">
-    <div id="ss-chat-msgs" style="display:none;flex-direction:column;gap:2px;align-items:flex-start;"></div>
+    <!-- column-REVERSE + max-height: messages wrap to their full length instead of being cut with
+         an ellipsis, and the stack fills from the FLOOR UP. Overflow then clips the OLDEST line off
+         the top rather than the newest off the bottom, so the latest message is always visible and
+         the box can never grow past its reserved space into the bot-bar above it. -->
+    <div id="ss-chat-msgs" style="display:none;flex-direction:column-reverse;gap:2px;align-items:flex-start;max-height:150px;overflow:hidden;"></div>
     <div id="ss-chat-row" style="display:none;align-items:center;width:100%;pointer-events:auto;">
       <input id="ss-chat-inp" type="text" maxlength="100" autocomplete="off" spellcheck="false"
         placeholder="say something…  (ENTER send · ESC cancel)"
@@ -3602,8 +3606,12 @@ function addChatMessage(name,text,col){
   const msgs=document.getElementById('ss-chat-msgs');
   if(!msgs)return;
   msgs.style.display='flex';
-  msgs.innerHTML=_chatLog.map(m=>
-    '<div style="font-family:\'Exo 2\',sans-serif;font-size:12px;line-height:1.5;background:rgba(0,0,0,0.72);border-radius:5px;padding:2px 8px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:none;">'
+  // Newest FIRST in the DOM: the container is column-reverse, so index 0 renders at the bottom.
+  // Long messages now WRAP to their full text (they used to be cut off with an ellipsis, which is
+  // why anyone typing more than a few words just saw "…"). The container's max-height keeps the
+  // box inside its reserved space no matter how much anyone writes.
+  msgs.innerHTML=_chatLog.slice().reverse().map(m=>
+    '<div style="font-family:\'Exo 2\',sans-serif;font-size:12px;line-height:1.45;background:rgba(0,0,0,0.72);border-radius:5px;padding:3px 8px;max-width:100%;white-space:normal;overflow-wrap:anywhere;word-break:break-word;pointer-events:none;">'
     +'<span style="color:'+_wgEsc(m.col)+';font-weight:700;">'+_wgEsc(m.name)+'</span>'
     +'<span style="color:rgba(255,255,255,0.9);">: '+_wgEsc(m.text)+'</span></div>').join('');
   if(!_chatTyping)_chatFade();
@@ -3654,13 +3662,12 @@ function _wgTypeName(t){ const x=_WG_TYPES.find(y=>y.id===t); return x?x.name:t;
 // Human label for a side, matching lib/p2pbet.js semantics.
 function _wgSideLabel(w, side){
   // A duel's side B has no name until someone takes it — never render a bare 'B'.
-  if(w.duel) return side==='A' ? (w.subjectName||'Challenger') : (w.subject2Name||'The challenger');
   if(w.type==='outlast') return side==='A' ? (w.subjectName||'A') : (w.subject2Name||'B');
   if(w.type==='survive') return side==='YES' ? 'Survives' : 'Dies';
   return side==='YES' ? 'Cashes out' : 'Dies';
 }
 function _wgTitle(w){
-  if(w.duel) return '⚔ '+(w.subjectName||'?')+' vs '+(w.subject2Name||'anyone who accepts');
+  if(w.duel) return '⚔ '+(w.subjectName||'?')+' vs '+(w.subject2Name||'?');
   if(w.type==='outlast') return (w.subjectName||'?')+' outlasts '+(w.subject2Name||'?');
   if(w.type==='survive') return (w.subjectName||'?')+' survives '+Math.round((w.durationMs||0)/1000)+'s';
   return (w.subjectName||'?')+' cashes out';
@@ -3883,32 +3890,14 @@ function _wgFormHtml(){
   if(!r.length){ h+='<div style="font-size:10px;color:#8a7c54;text-align:center;padding:10px 0">No snakes to bet on yet — wait for players to join.</div></div>'; return h; }
   // bet type
   h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">BET TYPE</div><div style="display:flex;gap:5px;margin-bottom:9px">';
-  // A DUEL is your snake vs theirs, so it can only be offered to someone who HAS a snake here.
-  // Spectators and dead players still get every other market — betting never requires being in the
-  // game, only duelling does. Hiding it beats showing a button whose only outcome is an error.
-  const _canDuel=!!_wgMySnake();
-  const _types=_WG_TYPES.filter(t=>t.id!=='duel'||_canDuel);
-  if(f.duel&&!_canDuel){ f.duel=false; f.type='cashout'; f.side='YES'; }   // lost your snake mid-form
-  for(const t of _types){ const on=(f.type===t.id);
+  // Every market is open to everyone, including spectators — you never have to be in the game to
+  // bet. The only protection is directional: you may back your own snake to win, never to lose.
+  for(const t of _WG_TYPES){ const on=(f.type===t.id);
     h+='<button data-wg-type="'+t.id+'" style="flex:1;background:'+(on?'#FFD700':'transparent')+';color:'+(on?'#1a1200':'#b8a97a')+';border:1px solid '+(on?'#FFD700':'#3a3115')+';border-radius:7px;font-size:9px;font-weight:700;padding:7px 4px;cursor:pointer">'+t.name+'</button>'; }
   h+='</div>';
-  // DUEL: no picker at all — side A is your snake, side B is whoever accepts. Showing a chooser
-  // would imply you can nominate someone else, which is exactly what the shape forbids.
-  if(f.duel){
-    const me=_wgMySnake();
-    h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">THE CHALLENGE</div>';
-    if(!me){
-      h+='<div style="font-size:10px;color:#FF6600;background:rgba(255,102,0,.08);border:1px solid #5a3a10;border-radius:7px;padding:9px;margin-bottom:9px">You need a live snake in this arena to post a duel.</div>';
-    }else{
-      h+='<div style="display:flex;align-items:center;gap:7px;padding:8px;margin-bottom:6px;border-radius:7px;border:1px solid #FFD700;background:rgba(255,215,0,.10)">';
-      h+='<span style="width:9px;height:9px;border-radius:50%;background:'+_wgEsc(me.color||'#39FF14')+';flex:none"></span>';
-      h+='<span style="font-size:11px;font-weight:700;color:#f4e9c8;flex:1">'+_wgEsc(me.name||'YOUR SNAKE')+'</span>';
-      h+='<span style="font-size:9px;color:#8a7c54">vs whoever accepts</span></div>';
-      h+='<div style="font-size:9px;color:#8a7c54;line-height:1.5;margin-bottom:9px">Whoever takes this puts up their OWN snake. Last one left in the arena wins. Neither of you can win by dying, so there is nothing to rig.</div>';
-    }
-    h+=_wgFormTail(f);
-    return h;
-  }
+  // A duel uses the same two-snake pickers as outlast — it differs only in HOW it settles (one of
+  // them has to actually kill the other), so there is no separate form.
+  if(f.duel)h+='<div style="font-size:9px;color:#8a7c54;line-height:1.5;margin-bottom:9px;background:rgba(255,215,0,.06);border:1px solid #3a3115;border-radius:7px;padding:7px">⚔ Settles only when one of these two <b style="color:#FFD700">kills the other</b>. A third-party kill or a cash-out leaves it open — if it never resolves, both sides are refunded in full after an hour.</div>';
   // snake picker
   h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">SNAKE</div><div style="max-height:96px;overflow-y:auto;margin-bottom:9px">';
   for(const s of r){ const on=(f.subject===s.pid);
@@ -3916,7 +3905,7 @@ function _wgFormHtml(){
     h+='<span style="width:9px;height:9px;border-radius:50%;background:'+_wgEsc(s.color||'#39FF14')+';flex:none"></span>';
     h+='<span style="font-size:11px;font-weight:600;color:#f4e9c8;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_wgEsc(s.name||'SNAKE')+'</span></div>'; }
   h+='</div>';
-  if(f.type==='outlast'){
+  if(f.type==='outlast'||f.duel){
     h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">…OUTLASTS</div><div style="max-height:84px;overflow-y:auto;margin-bottom:9px">';
     for(const s of r){ if(s.pid===f.subject)continue; const on=(f.subject2===s.pid);
       h+='<div data-wg-subj2="'+_wgEsc(s.pid)+'" style="display:flex;align-items:center;gap:7px;padding:6px 8px;margin-bottom:4px;border-radius:7px;cursor:pointer;border:1px solid '+(on?'#FFD700':'#2c2a1f')+';background:'+(on?'rgba(255,215,0,.12)':'rgba(255,255,255,.02)')+'">';
@@ -3931,7 +3920,7 @@ function _wgFormHtml(){
     h+='</div>';
   }
   // side
-  const sides=(f.type==='outlast')?['A','B']:['YES','NO'];
+  const sides=(f.type==='outlast'||f.duel)?['A','B']:['YES','NO'];
   // Friendly placeholders so the side buttons never show a raw 'A'/'B' before both snakes are picked.
   const fake={type:f.type,
     subjectName:((r.find(s=>s.pid===f.subject)||{}).name)||'this snake',
@@ -4062,7 +4051,6 @@ function _wgRender(){
     _wg.form.duel=(t==='duel');
     _wg.form.side=(t==='outlast'||t==='duel')?'A':'YES';
     if(t!=='outlast')_wg.form.subject2=null;
-    if(t==='duel')_wg.form.subject=myPid;              // a duel is always your own snake
     _wgRender(); });
   on('[data-wg-subj]',function(){
     _wg.form.subject=this.getAttribute('data-wg-subj');
@@ -4148,13 +4136,10 @@ function _wgGuard(){
 async function _wgCreate(){
   if(!_wgGuard())return;
   const f=_wg.form; if(!f)return;
-  // A DUEL is always YOUR snake vs whoever accepts — the subject is forced to your own snake so the
-  // UI can never post one on someone else's behalf.
-  if(f.duel){
-    const me=_wgMySnake();
-    if(!me){ addToast('You need a live snake in this arena to post a duel','#FFD700',5000); return; }
-    f.subject=me.pid; f.subject2=null; f.type='outlast'; f.side='A';
-  }
+  // A duel is an outlast that only settles on a decisive kill — you pick BOTH snakes and your
+  // winner, exactly like outlast. The only thing you may not do is back your own snake to lose,
+  // which the side buttons already block and the server enforces for real.
+  if(f.duel){ f.type='outlast'; if(!f.subject2){ addToast('Pick both snakes for the duel','#FFD700'); return; } }
   const snake=_wg.roster.find(s=>s.pid===f.subject);
   if(!snake){ addToast('Pick a snake','#FFD700'); return; }
   if(f.type==='outlast'&&!f.duel&&!f.subject2){ addToast('Pick the second snake','#FFD700'); return; }
@@ -4221,13 +4206,9 @@ async function _wgAccept(id){
     if(!rs){ addToast('That snake has left the arena — bet no longer takeable','#FF6600',5000); _wg.open.delete(id); _wgRender(); return; }
     const rs2=w.subject2?_wg.roster.find(s=>s.pid===w.subject2):null;
     if(w.subject2&&!rs2){ addToast('One of those snakes has left the arena — bet no longer takeable','#FF6600',5000); _wg.open.delete(id); _wgRender(); return; }
-    // A DUEL is answered with your OWN snake, so you must be in the arena to take one.
-    let mine=null;
-    if(w.duel){
-      mine=_wgMySnake();
-      if(!mine){ addToast('You need a live snake in this arena to accept a duel','#FFD700',5000); return; }
-      if(mine.pid===w.subject){ addToast('That is your own duel','#FFD700'); return; }
-    }
+    // A duel names both snakes up front, so taking one needs nothing extra — you simply take the
+    // other side, and the freshness signatures above already prove both snakes are still in play.
+    const mine=null;
     const rv=await fetch('/api/settle',{method:'POST',headers:_wgSignedHeaders('wager-reserve',0),
       body:JSON.stringify({action:'wager-reserve',playerAddress:ST.address,wagerId:id,
         subjExp:rs.exp,subjSig:rs.sig,
