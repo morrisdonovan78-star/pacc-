@@ -3644,7 +3644,7 @@ const _wg = {
   mine: [],                   // my bet slip
   panel: false, tab: 'market', myTab: 'all',
   filterUsd: 0, sort: 'new', search: '',
-  busy: false, form: null,    // form = { type, subject, subject2, side, durationMs, usd }
+  busy: false, form: null, rulesOpen: false,    // form = { type, subject, subject2, side, durationMs, usd }
   loaded: false,
 };
 const _WG_QUICK_USD = [1, 5, 10, 25, 50];
@@ -3965,6 +3965,32 @@ function _wgFormTail(f){
   h+='</div>';
   return h;
 }
+// Plain-English settlement rules, shown in the panel so nobody has to guess how a bet resolves.
+// Keep these EXACTLY in step with wgDecide() on the game server — if the rules change, change both.
+function _wgRulesHtml(){
+  const rows=[
+    ['Cash out','You win if that snake <b>banks its money</b> (completes a cash-out). You lose if it <b>dies</b> first.'],
+    ['Survives','You win if that snake is <b>still in the arena</b> when the timer ends (or banked its money before then). Dying before the bell loses.'],
+    ['Outlasts','You win if your snake <b>leaves the arena later</b> than the other one — by dying later, or by still being alive when the other is gone.'],
+    ['Duel','Only settles when <b>one of the two kills the other</b>. A third player getting the kill, a cash-out or a disconnect does <b>not</b> decide it.'],
+  ];
+  let h='<div style="border-top:1px solid #2c2a1f;margin-top:10px;padding-top:8px">';
+  h+='<div id="wg-rules-t" style="font-size:9px;letter-spacing:.08em;color:#8a7c54;cursor:pointer;user-select:none">ℹ HOW BETS ARE DECIDED <span style="float:right">'+(_wg.rulesOpen?'▲':'▼')+'</span></div>';
+  if(_wg.rulesOpen){
+    h+='<div style="margin-top:7px">';
+    for(const [n,d] of rows){
+      h+='<div style="margin-bottom:7px"><div style="font-size:10px;font-weight:800;color:#FFD700">'+n+'</div>'+
+         '<div style="font-size:9px;color:#c9bd92;line-height:1.45">'+d+'</div></div>';
+    }
+    h+='<div style="font-size:9px;color:#8a7c54;line-height:1.45;border-top:1px solid #2c2a1f;padding-top:6px">'+
+       'Every bet is <b>even money</b>: you and your opponent stake the same amount, and the winner takes both minus an <b>8% fee</b>. '+
+       'If nobody takes your bet before it closes you get <b>100% back, no fee</b>. '+
+       'If a matched bet can never be decided, both sides are refunded in full after an hour.</div>';
+    h+='</div>';
+  }
+  h+='</div>';
+  return h;
+}
 function _wgRender(){
   // floating tab (always available while spectating)
   let tab=document.getElementById('wg-tab');
@@ -4040,12 +4066,14 @@ function _wgRender(){
       else for(const w of arr)h+=_wgSlipHtml(w);
     }
   }
+  h+=_wgRulesHtml();
   h+='</div>';
   p.innerHTML=h;
 
   // ── wire events ──
   const on=(sel,fn,ev)=>p.querySelectorAll(sel).forEach(el=>el[ev||'onclick']=fn);
   const x=p.querySelector('#wg-x'); if(x)x.onclick=_wgClosePanel;
+  const _rt=p.querySelector('#wg-rules-t'); if(_rt)_rt.onclick=()=>{ _wg.rulesOpen=!_wg.rulesOpen; _wgRender(); };
   on('[data-wg-tab]',function(){ _wg.tab=this.getAttribute('data-wg-tab'); _wgRender(); });
   on('[data-wg-mt]',function(){ _wg.myTab=this.getAttribute('data-wg-mt'); _wgRender(); });
   on('[data-wg-hide]',function(){ _wgHide(this.getAttribute('data-wg-hide')); });
@@ -4150,6 +4178,12 @@ async function _wgCreate(){
   if(!snake){ addToast('Pick a snake','#FFD700'); return; }
   if(f.type==='outlast'&&!f.duel&&!f.subject2){ addToast('Pick the second snake','#FFD700'); return; }
   const s2=f.subject2?_wg.roster.find(s=>s.pid===f.subject2):null;
+  // The side must belong to the CURRENT bet type. Switching type (e.g. cash-out -> duel/outlast)
+  // could leave a stale 'YES' selected while the type is now 'outlast', and the server rightly
+  // answered "invalid side for this bet type" — which is what blocked duels where you back yourself
+  // to kill someone. Snap it to a valid side instead of shipping a mismatched one.
+  const _validSides = (f.type==='outlast') ? ['A','B'] : ['YES','NO'];
+  if(_validSides.indexOf(f.side)<0) f.side=_validSides[0];
   const usd=Number(f.usd)||0;
   if(usd<0.5){ addToast('Minimum bet is $0.50','#FFD700'); return; }
   _wg.busy=true;
