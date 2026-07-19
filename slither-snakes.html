@@ -5532,11 +5532,16 @@ function launchSnakeGame(){
   // Spectators have no snake of their own — hide the controls/HUD bits that only make sense
   // for an active player (boost hint, cash-out button, joystick, own length/score readout).
   // The top-right live leaderboard, minimap, and kill feed stay — all generically useful.
+  const _specOnly=['boost-hint','m-cashout','m-joy','m-zoom-wrap','game-hud'];
   if(isSpectating){
-    ['boost-hint','m-cashout','m-joy','m-zoom-wrap','game-hud'].forEach(id=>{
-      const el=document.getElementById(id); if(el)el.style.display='none';
-    });
+    _specOnly.forEach(id=>{ const el=document.getElementById(id); if(el)el.style.display='none'; });
   }else{
+    // RESTORE them. These were hidden with an INLINE display:none and nothing ever cleared it, so
+    // one spectate stuck the HUD off for the whole session — and the client parks you in spectate
+    // automatically after a cash-out, so cashing out once permanently lost your LENGTH/POT/PING/FPS
+    // readout. Clearing the inline value hands control back to the stylesheet; the mobile controls
+    // in this list are re-governed by _showMobileCtl() a few lines below either way.
+    _specOnly.forEach(id=>{ const el=document.getElementById(id); if(el)el.style.display=''; });
     document.getElementById('hud-pot').textContent=ST.lobbyUsd===0?'FREE':'$'+(ST.lobbyUsd*2);
   }
 
