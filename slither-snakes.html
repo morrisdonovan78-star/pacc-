@@ -2007,13 +2007,34 @@ function syncServerBtns(){
 }
 // `quiet` = restoring the saved preference from the account, not a fresh user click: apply it
 // silently (no toast) and don't echo it straight back to the server it just came from.
+// _serverPickedAt = when the user last EXPLICITLY chose a region. A quiet apply from an async
+// account-settings load must never override a choice the user made AFTER that load began, or the
+// region visibly snaps back a second or two later — the "I pick EU, it shows NA, then flips" bug.
+let _serverPickedAt=0;
 function setGameServer(r,quiet){
+  if(r!=='NA'&&r!=='EU')r='NA';
+  if(quiet){
+    // Stale restore: the user has since picked a server themselves — do not clobber it.
+    if(Date.now()-_serverPickedAt<8000) { syncServerBtns(); return; }
+    GAME_SERVER=r; REGION=(r==='EU')?'EU':'US';
+    try{ localStorage.setItem('ss_region',REGION); localStorage.setItem('ss_server',r); }catch(_){}
+    syncServerBtns();
+    return;
+  }
+  _serverPickedAt=Date.now();
   GAME_SERVER=r;
-  REGION=(r==='EU')?'EU':'US'; localStorage.setItem('ss_region',REGION); // derived, cache-only
-  if(quiet){ try{ localStorage.setItem('ss_server',r); }catch(_){} }
-  else ssSetSetting('ss_server',r);                                      // account-backed
+  REGION=(r==='EU')?'EU':'US'; try{ localStorage.setItem('ss_region',REGION); }catch(_){}
+  ssSetSetting('ss_server',r);                                          // account-backed
   syncServerBtns();
-  if(!quiet)addToast('Server: '+GAME_SERVERS[r].label,'#00FFFF');
+  addToast('Server: '+GAME_SERVERS[r].label,'#00FFFF');
+}
+// Point the connection at a region for THIS session (e.g. spectating an EU arena) WITHOUT changing
+// the player's saved preference. Watching EU must not permanently move someone off NA.
+function useGameServerForSession(r){
+  if(r!=='NA'&&r!=='EU')r='NA';
+  GAME_SERVER=r; REGION=(r==='EU')?'EU':'US';
+  try{ localStorage.setItem('ss_region',REGION); }catch(_){}
+  syncServerBtns();
 }
 
 // ══ WALLET / AUTH ════════════════════════════════════════════
@@ -3517,7 +3538,7 @@ async function enterWatchMode(region,tier){
   if(_lobbyIsPaid&&!isSpectating&&SG&&!SG.over){ addToast('Cash out or finish your run before spectating','#FFD700',4000); return; }
   if(_sio)pkDisconnect(); // switching lobbies from an existing watch session, or first entry
   document.getElementById('watch-switch').style.display='flex';
-  setGameServer(region==='EU'?'EU':'NA');
+  useGameServerForSession(region==='EU'?'EU':'NA');   // watch this region, keep the saved play preference
   // ONE automatic retry over polling if the first attempt times out. Watching is free and
   // read-only, so a retry can't cost anyone anything — and previously a stalled WebSocket just
   // failed the watch outright, which is why spectating sometimes took several manual attempts.
