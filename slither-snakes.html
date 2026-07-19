@@ -2055,7 +2055,11 @@ async function refreshBal(){
 // move as they bet, win and cash out without leaving the arena.
 let _walletHudTimer=null;
 function _walletHud(){
-  const show=!!(ST&&ST.address)&&((SG&&!SG.over)||isSpectating);
+  const _sc=document.getElementById('scr-game');
+  // NOT `SG && !SG.over`: joinLobby nulls SG until 'init' lands, so that condition hid the
+  // wallet the instant you joined (and again the moment you died). The game SCREEN being up is
+  // true for the whole time you are in an arena, which is exactly when the wallet should show.
+  const show=!!(ST&&ST.address)&&!!(_sc&&_sc.classList.contains('on'));
   let el=document.getElementById('wallet-hud');
   if(!show){ if(el)el.style.display='none'; return; }
   if(!el){
@@ -2075,7 +2079,8 @@ function _walletHud(){
 function _walletHudStart(){
   if(_walletHudTimer)return;
   _walletHudTimer=setInterval(()=>{
-    if(!((SG&&!SG.over)||isSpectating)){ clearInterval(_walletHudTimer); _walletHudTimer=null; _walletHud(); return; }
+    const _sc2=document.getElementById('scr-game');
+    if(!(_sc2&&_sc2.classList.contains('on'))){ clearInterval(_walletHudTimer); _walletHudTimer=null; _walletHud(); return; }
     refreshBal().catch(()=>{});
   },20000);
   _walletHud();
@@ -3486,6 +3491,7 @@ function pkDisconnect(){
   voiceCleanup();
   try{ _wgReset(); }catch(_){}
   try{ _chatReset(); }catch(_){}
+  try{ _walletHudStop(); }catch(_){}
   _killFeed=[];
   ablyChannel=null;
   if(_sio){try{_sio.io.reconnection(false);}catch(_){}try{_sio.disconnect();}catch(_){}} _sio=null;
@@ -5532,6 +5538,7 @@ function launchSnakeGame(){
   // Spectators have no snake of their own — hide the controls/HUD bits that only make sense
   // for an active player (boost hint, cash-out button, joystick, own length/score readout).
   // The top-right live leaderboard, minimap, and kill feed stay — all generically useful.
+  try{ _walletHudStart(); }catch(_){}   // live wallet, top-left — players AND spectators
   const _specOnly=['boost-hint','m-cashout','m-joy','m-zoom-wrap','game-hud'];
   if(isSpectating){
     _specOnly.forEach(id=>{ const el=document.getElementById(id); if(el)el.style.display='none'; });
