@@ -5376,6 +5376,10 @@ const GP_DEFS = [
   {act:'voiceDeaf',  label:'Mute Others', def:3},   // Y
   {act:'autoCircle', label:'Auto-Circle', def:10},  // L3
   {act:'clip',       label:'Save Clip',   def:11},  // R3
+  // Zoom is also on the right stick (continuous). These give it real buttons so every keyboard
+  // action has a controller equivalent; both paths coexist. Held, so it ramps like the keys.
+  {act:'zoomIn',     label:'Zoom In',     def:7},   // RT
+  {act:'zoomOut',    label:'Zoom Out',    def:6},   // LT
 ];
 let _gpBinds = {};
 try{ _gpBinds = JSON.parse(localStorage.getItem('ss_gpbinds')||'{}') || {}; }catch(_){ _gpBinds = {}; }
@@ -6558,6 +6562,11 @@ function pollGamepad(){
     if(pressed(_gpBtn('autoCircle'))) toggleAutoCircle();
     if(pressed(_gpBtn('clip'))) _clipSave();
     if(pressed(_gpBtn('cashout'))&&!_cashoutActive&&!_localDead){ startCashout(); }
+    // Zoom buttons: HELD so they ramp smoothly, matching the right-stick behaviour above rather
+    // than stepping once per press. rafDraw re-clamps to the visible range.
+    { const zi=_gpBtn('zoomIn'), zo=_gpBtn('zoomOut');
+      if(zi>=0&&cur(zi)) _zoomOffset=Math.min(2.0,_zoomOffset+0.03);
+      if(zo>=0&&cur(zo)) _zoomOffset=Math.max(-2.0,_zoomOffset-0.03); }
   } else {
     // Menu: stick/d-pad to navigate, A to confirm, B to back
     // When a modal (leaderboard/profile/friends/withdraw) is open, scope navigation to it —
