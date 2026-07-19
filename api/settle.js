@@ -676,6 +676,34 @@ async function wgPayOne(esc, toAddr, lamports, tag) {
   }
 }
 
+// Pay the winner AND send the platform's 8% to the fee wallet in ONE transaction.
+// The fee does NOT sit in escrow. Escrow is the GAME wallet and should only ever hold what is
+// actually owed to players and bettors; the platform cut belongs in the same fee wallet the 10%
+// cashout fee goes to (CREATOR_WALLET). Doing both transfers in a single tx makes it atomic (the
+// fee can never be stranded or double-swept) and costs one network fee instead of two.
+async function wgPayWinnerAndFee(esc, winner, payout, fee, tag) {
+  const win = Math.floor(Number(payout) || 0);
+  const cut = Math.max(0, Math.floor(Number(fee) || 0));
+  if (!(win > 0)) return { ok: false, reason: 'nothing to pay' };
+  const inv = await assertSolvency(esc.pubkeyB58, win + cut);
+  if (!inv.ok) {
+    betAlert('invariant REFUSED ' + tag + ' to=' + String(winner).slice(0, 8) + ' win=' + win + ' fee=' + cut +
+             ' bal=' + inv.onChainBalance + ' betLiab=' + inv.betLiability + ' deficit=' + (inv.deficit || 'n/a'));
+    return { ok: false, reason: 'insolvent', inv };
+  }
+  try {
+    const { blockhash } = await fetchBalAndHash(esc.pubkeyB58);
+    const transfers = [{ to: b58Decode(winner), lamports: win }];
+    if (cut > 0) transfers.push({ to: b58Decode(CREATOR_WALLET), lamports: cut });
+    const tx = buildTx(esc, blockhash, transfers);
+    const result = await sendAndConfirm(tx);
+    return { ok: true, sig: result.sig, confirmed: result.confirmed, feeSent: cut };
+  } catch (e) {
+    console.error('[wg] ' + tag + ' payout failed — ' + (e && e.message || e));
+    return { ok: false, reason: (e && e.message) || 'send failed' };
+  }
+}
+
 // Public-safe projection of a wager (never leaks internal reservation details).
 function wgPublic(w) {
   if (!w) return null;
@@ -1015,16 +1043,17 @@ module.exports = async function handler(req, res) {
         if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
 
         const esc = getEscrow();
-        const pay = await wgPayOne(esc, r.winner, r.payout, 'wager-settle');
+        // Winner is paid and the 8% is swept to the fee wallet in the SAME transaction.
+        const pay = await wgPayWinnerAndFee(esc, r.winner, r.payout, r.fee, 'wager-settle');
         if (!pay.ok) {
           await kvDel('wgpaid:' + wid).catch(() => {});   // release so a funded retry can pay
           clearTimeout(guard); done = true;
           return res.status(503).json({ error: 'payout held: ' + (pay.reason || 'unknown'), retry: true });
         }
-        // Book it: the whole pot leaves bet liability; the platform's 8% becomes accrued fee.
-        await kvHincrby(BET_LEDGER, 'accruedFee', r.fee).catch(() => {});
+        // The whole pot leaves bet liability. accruedFee is NOT incremented any more: the fee has
+        // physically left escrow to the fee wallet, so tracking it as a balance still sitting here
+        // would overstate what escrow holds and (as it did) block later legitimate payouts.
         await kvHincrby(BET_LEDGER, 'betLiability', -r.pot).catch(() => {});
-        await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {}); // network cost from the fee
         w.status = P2P.STATUS.SETTLED; w.winningSide = winningSide; w.winner = r.winner; w.loser = r.loser;
         w.payout = r.payout; w.fee = r.fee; w.payoutTx = pay.sig; w.settledTs = Date.now();
         await wgSave(w);
