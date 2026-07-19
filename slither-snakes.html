@@ -3666,6 +3666,17 @@ function _wgTitle(w){
   return (w.subjectName||'?')+' cashes out';
 }
 function _wgMyAddr(){ return (ST&&ST.address)||''; }
+// My own entry in the signed bettable-snake roster, or null if I'm not in this arena.
+// ⚠️ Match on the WALLET ADDRESS, not just myPid. A roster pid IS the wallet address for real
+// players, but myPid is only that while you're an active player on the current socket — after a
+// cash-out the client parks you in spectate mode and myPid becomes '__watch__…', so a pid-only
+// lookup failed to find you even though your snake was right there. That's what produced
+// "You need a live snake in this arena" for people who were plainly in the game.
+function _wgMySnake(){
+  const a=_wgMyAddr();
+  if(!Array.isArray(_wg.roster)||!_wg.roster.length)return null;
+  return _wg.roster.find(s=>s&&(s.pid===a||(myPid&&s.pid===myPid)))||null;
+}
 // Mirrors lib/p2pbet.js#riggableSubjects. You may back your own snake to WIN (you can't guarantee
 // it — anyone can kill you), but never take a side that pays out when a snake you control loses,
 // because you could just drive into a wall. The server enforces this for real (and also catches
@@ -3872,13 +3883,19 @@ function _wgFormHtml(){
   if(!r.length){ h+='<div style="font-size:10px;color:#8a7c54;text-align:center;padding:10px 0">No snakes to bet on yet — wait for players to join.</div></div>'; return h; }
   // bet type
   h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">BET TYPE</div><div style="display:flex;gap:5px;margin-bottom:9px">';
-  for(const t of _WG_TYPES){ const on=(f.type===t.id);
+  // A DUEL is your snake vs theirs, so it can only be offered to someone who HAS a snake here.
+  // Spectators and dead players still get every other market — betting never requires being in the
+  // game, only duelling does. Hiding it beats showing a button whose only outcome is an error.
+  const _canDuel=!!_wgMySnake();
+  const _types=_WG_TYPES.filter(t=>t.id!=='duel'||_canDuel);
+  if(f.duel&&!_canDuel){ f.duel=false; f.type='cashout'; f.side='YES'; }   // lost your snake mid-form
+  for(const t of _types){ const on=(f.type===t.id);
     h+='<button data-wg-type="'+t.id+'" style="flex:1;background:'+(on?'#FFD700':'transparent')+';color:'+(on?'#1a1200':'#b8a97a')+';border:1px solid '+(on?'#FFD700':'#3a3115')+';border-radius:7px;font-size:9px;font-weight:700;padding:7px 4px;cursor:pointer">'+t.name+'</button>'; }
   h+='</div>';
   // DUEL: no picker at all — side A is your snake, side B is whoever accepts. Showing a chooser
   // would imply you can nominate someone else, which is exactly what the shape forbids.
   if(f.duel){
-    const me=r.find(s=>s.pid===myPid);
+    const me=_wgMySnake();
     h+='<div style="font-size:8px;color:#8a7c54;margin-bottom:4px">THE CHALLENGE</div>';
     if(!me){
       h+='<div style="font-size:10px;color:#FF6600;background:rgba(255,102,0,.08);border:1px solid #5a3a10;border-radius:7px;padding:9px;margin-bottom:9px">You need a live snake in this arena to post a duel.</div>';
@@ -4134,7 +4151,7 @@ async function _wgCreate(){
   // A DUEL is always YOUR snake vs whoever accepts — the subject is forced to your own snake so the
   // UI can never post one on someone else's behalf.
   if(f.duel){
-    const me=_wg.roster.find(s=>s.pid===myPid);
+    const me=_wgMySnake();
     if(!me){ addToast('You need a live snake in this arena to post a duel','#FFD700',5000); return; }
     f.subject=me.pid; f.subject2=null; f.type='outlast'; f.side='A';
   }
@@ -4207,7 +4224,7 @@ async function _wgAccept(id){
     // A DUEL is answered with your OWN snake, so you must be in the arena to take one.
     let mine=null;
     if(w.duel){
-      mine=_wg.roster.find(s=>s.pid===myPid);
+      mine=_wgMySnake();
       if(!mine){ addToast('You need a live snake in this arena to accept a duel','#FFD700',5000); return; }
       if(mine.pid===w.subject){ addToast('That is your own duel','#FFD700'); return; }
     }
