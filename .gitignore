@@ -28,3 +28,18 @@ Thumbs.db
 .claude
 
 .vercel
+
+# Discord bot token for clip fetching — NEVER commit
+scripts/discord_token.txt
+discord_clips/
+
+# clip-montage working files (keep out of git)
+scratch_frames/
+scratch_sheets/
+scratch_cut/
+scratch_*.js
+scratch_*.jpg
+promo/
+scratch_strips/
+scratch_cut2/
+scratch_vert/

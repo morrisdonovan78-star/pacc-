@@ -203,6 +203,18 @@ input,textarea,[contenteditable="true"]{-webkit-user-select:text;-moz-user-selec
 body.mctl #voice-speakers{left:150px;}
 /* ══ HOME DASHBOARD (snakepot.com look) ═══════════════════════════════════════ */
 #scr-home.on{justify-content:flex-start;padding:0 0 24px;}
+/* Discord invite — a direct child of #scr-home so .scr display rules hide it on every other screen,
+   and so it escapes the zoom:1.15 on #topbar/#dash (zoom breaks position:fixed on descendants). */
+#discord-fab{position:fixed;left:16px;bottom:16px;z-index:120;display:flex;align-items:center;gap:9px;
+  padding:11px 17px 11px 14px;border-radius:99px;background:#5865F2;border:1px solid rgba(255,255,255,.18);
+  color:#fff;text-decoration:none;font-family:'Press Start 2P',monospace;font-size:9px;letter-spacing:1px;
+  box-shadow:0 4px 18px rgba(88,101,242,.45);transition:transform .15s,box-shadow .15s,background .15s;}
+#discord-fab:hover{background:#4752c4;transform:translateY(-2px);box-shadow:0 7px 24px rgba(88,101,242,.7);}
+#discord-fab svg{width:20px;height:20px;flex-shrink:0;}
+@media(max-width:640px){
+  #discord-fab{left:10px;bottom:10px;padding:10px;gap:0;}
+  #discord-fab .df-txt{display:none;}   /* icon-only on phones so it never crowds the dashboard */
+}
 /* Uniform ~15% upscale of the whole home screen (owner request: "everything a bit bigger").
    zoom scales layout+text+canvases together; media queries still read the real viewport. */
 #topbar,#dash{zoom:1.15;}
@@ -310,6 +322,11 @@ body.mctl #voice-speakers{left:150px;}
 
 <!-- ══ HOME ══════════════════════════════════════════════════ -->
 <div id="scr-home" class="scr on">
+
+  <a id="discord-fab" href="https://discord.gg/kd4tNP2vw" target="_blank" rel="noopener noreferrer" title="Join the SNAKE POT Discord">
+    <svg viewBox="0 0 127 96" fill="currentColor" aria-hidden="true"><path d="M107.7 8.07A105.15 105.15 0 0 0 81.47 0a72.06 72.06 0 0 0-3.36 6.83 97.68 97.68 0 0 0-29.11 0A72.37 72.37 0 0 0 45.64 0a105.89 105.89 0 0 0-26.25 8.09C2.79 32.65-1.71 56.6.54 80.21a105.73 105.73 0 0 0 32.17 16.15 77.7 77.7 0 0 0 6.89-11.11 68.42 68.42 0 0 1-10.85-5.18c.91-.66 1.8-1.34 2.66-2a75.57 75.57 0 0 0 64.32 0c.87.71 1.76 1.39 2.66 2a68.68 68.68 0 0 1-10.87 5.19 77 77 0 0 0 6.89 11.1 105.25 105.25 0 0 0 32.19-16.14c2.64-27.38-4.51-51.11-18.9-72.15ZM42.45 65.69C36.18 65.69 31 60 31 53s5-12.74 11.43-12.74S54 46 53.89 53s-5.05 12.69-11.44 12.69Zm42.24 0C78.41 65.69 73.25 60 73.25 53s5-12.74 11.44-12.74S96.23 46 96.12 53s-5.04 12.69-11.43 12.69Z"/></svg>
+    <span class="df-txt">JOIN DISCORD</span>
+  </a>
 
   <!-- Top bar: logo · quick lobby chips · profile/settings -->
   <div id="topbar">
@@ -5416,6 +5433,11 @@ _applyGfx();
 const CLIP_SEG_MS=20000, CLIP_W=1280, CLIP_H=720, CLIP_FPS=24;
 let _clipStream=null,_clipMime='',_clipRec=null,_clipChunks=[],_clipSegStart=0,_clipPrev=null,_clipPendingSave=false,
     _clipCanvas=null,_clipCtx=null,_clipRaf=0,_clipLastDraw=0,_clipRestartTimer=null;
+// Clip audio: the canvas stream is video-only, which is why clips were silent. Voice chat is mixed
+// in through a MediaStreamDestination built on _voicePlayCtx (the context the remote peers already
+// play into) — nodes cannot be connected across AudioContexts, so the mix has to live there.
+let _clipMixDest=null,_clipMicSrc=null,_clipMicGain=null;
+function _clipMicOn(){ return localStorage.getItem('ss_clip_mic')!=='0'; } // your own mic, default ON
 function _clipEnabled(){ return SS_IS_PC && localStorage.getItem('ss_clip_on')==='1'; } // opt-in, default OFF
 function _clipDrawLoop(ts){
   if(!_clipStream){ _clipRaf=0; return; }
@@ -5427,7 +5449,7 @@ function _clipDrawLoop(ts){
 function _clipBeginSegment(){
   _clipChunks=[]; _clipSegStart=Date.now();
   try{
-    _clipRec=new MediaRecorder(_clipStream,_clipMime?{mimeType:_clipMime,videoBitsPerSecond:2500000}:undefined);
+    _clipRec=new MediaRecorder(_clipStream,_clipMime?{mimeType:_clipMime,videoBitsPerSecond:2500000,audioBitsPerSecond:96000}:undefined);
     _clipRec.ondataavailable=e=>{ if(e.data&&e.data.size)_clipChunks.push(e.data); };
     _clipRec.onstop=()=>{
       const blob=_clipChunks.length?new Blob(_clipChunks,{type:_clipMime||'video/mp4'}):null;
@@ -5438,6 +5460,34 @@ function _clipBeginSegment(){
     _clipRec.start();
   }catch(err){ console.warn('[clip] segment start failed',err); _clipRec=null; }
 }
+// Wire voice chat into the clip stream. Safe to call repeatedly — it only does work when something
+// new has appeared (the audio context, the mic, or another speaker). Called on clip start, on voice
+// toggle, and whenever a new peer starts talking.
+function _clipWireAudio(){
+  if(!_clipStream || !_voicePlayCtx || _voicePlayCtx.state==='closed') return;
+  try{
+    if(!_clipMixDest){
+      _clipMixDest=_voicePlayCtx.createMediaStreamDestination();
+      // Every peer already routes through an analyser; tap those rather than the context
+      // destination (which cannot be read back).
+      _voiceAnalysers.forEach(an=>{ try{ an.connect(_clipMixDest); }catch(_){} });
+      const tr=_clipMixDest.stream.getAudioTracks()[0];
+      if(tr){
+        _clipStream.addTrack(tr);
+        // A track added mid-recording is NOT picked up by the running MediaRecorder — roll to a new
+        // segment so the next 20s (and every save after it) actually carries sound.
+        try{ if(_clipRec && _clipRec.state==='recording') _clipRec.stop(); }catch(_){}
+      }
+    }
+    // Your own mic: a fresh source on the PLAY context (it lives on _voiceCapCtx otherwise, and
+    // cross-context connections are impossible). Never routed to speakers — that is self-echo.
+    if(_voiceStream && _clipMicOn() && !_clipMicSrc){
+      _clipMicSrc=_voicePlayCtx.createMediaStreamSource(_voiceStream);
+      _clipMicGain=_voicePlayCtx.createGain(); _clipMicGain.gain.value=0.85;
+      _clipMicSrc.connect(_clipMicGain); _clipMicGain.connect(_clipMixDest);
+    }
+  }catch(e){ console.warn('[clip] audio wire failed',e); }
+}
 function _clipStart(){
   if(!_clipEnabled() || _clipStream || !canvas || typeof MediaRecorder==='undefined') return;
   try{
@@ -5445,11 +5495,14 @@ function _clipStart(){
     _clipCtx=_clipCanvas.getContext('2d');
     _clipCtx.fillStyle='#000'; _clipCtx.fillRect(0,0,CLIP_W,CLIP_H); // seed one frame so the stream has content
     _clipStream=_clipCanvas.captureStream(CLIP_FPS);
-    const types=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+    // Each candidate must name an AUDIO codec too — a video-only mime makes the recorder drop the
+    // voice track silently, which looks exactly like the old no-sound bug.
+    const types=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
     _clipMime=(MediaRecorder.isTypeSupported?types.find(t=>MediaRecorder.isTypeSupported(t)):'')||'';
     _clipPrev=null; _clipLastDraw=0;
     _clipRaf=requestAnimationFrame(_clipDrawLoop);
     _clipBeginSegment();
+    _clipWireAudio(); // no-op unless voice chat is already running
     // restart the segment every 20s so the "current" segment used on save is never longer than ~20s
     _clipRestartTimer=setInterval(()=>{ try{ if(_clipRec && _clipRec.state==='recording')_clipRec.stop(); }catch(_){} }, CLIP_SEG_MS);
   }catch(err){ console.warn('[clip] start failed',err); _clipStop(); }
@@ -5460,6 +5513,11 @@ function _clipStop(){
   const s=_clipStream; _clipStream=null; _clipPendingSave=false; // null first so onstop won't restart
   try{ if(_clipRec){ _clipRec.onstop=null; if(_clipRec.state!=='inactive')_clipRec.stop(); } }catch(_){}
   _clipRec=null; _clipChunks=[]; _clipPrev=null; _clipCanvas=null; _clipCtx=null;
+  // Tear the audio mix down but leave _voicePlayCtx alone — voice chat keeps running without clips.
+  try{ _voiceAnalysers.forEach(an=>{ try{ an.disconnect(_clipMixDest); }catch(_){} }); }catch(_){}
+  if(_clipMicSrc){ try{_clipMicSrc.disconnect();}catch(_){} _clipMicSrc=null; }
+  if(_clipMicGain){ try{_clipMicGain.disconnect();}catch(_){} _clipMicGain=null; }
+  _clipMixDest=null;
   if(s){ try{s.getTracks().forEach(t=>t.stop());}catch(_){} }
 }
 function _clipSave(){
@@ -7715,7 +7773,9 @@ function _closeVoicePeer(pid){_peerAudioCtxs.delete(pid);_voiceAnalysers.delete(
 function _getOrMakePeerAudio(pid){
   if(!_voicePlayCtx)return null;
   let s=_peerAudioCtxs.get(pid);
-  if(!s){const an=_voicePlayCtx.createAnalyser();an.fftSize=256;an.connect(_voicePlayCtx.destination);s={analyser:an,nextTime:0};_peerAudioCtxs.set(pid,s);_voiceAnalysers.set(pid,an);}
+  if(!s){const an=_voicePlayCtx.createAnalyser();an.fftSize=256;an.connect(_voicePlayCtx.destination);
+    if(_clipMixDest){try{an.connect(_clipMixDest);}catch(_){}}   // so late joiners land in clips too
+    s={analyser:an,nextTime:0};_peerAudioCtxs.set(pid,s);_voiceAnalysers.set(pid,an);}
   return s;
 }
 function _playVoiceChunk(from,ab){
@@ -7777,7 +7837,9 @@ async function voiceToggle(){
         };
       }catch(e){console.warn('[voice-cap]',e);}
       if(btn){btn.textContent='🎤';btn.style.borderColor='rgba(57,255,20,0.6)';}
+      _clipWireAudio(); // voice came up after clips started — fold it into the recording now
       addToast('🎤 Voice ON — X (controller) / M (keyboard) to mute','#39FF14');
+      if(_clipStream)addToast('🎙️ Voice chat will be recorded in clips','#FFD700');
       if(_sio)_sio.emit('voice-ready',{});
     }catch(e){addToast('Microphone access denied — check browser settings','#FF4444');}
   }else{
