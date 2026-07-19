@@ -535,10 +535,24 @@ async function wgSave(w) { await kvSet('wg:' + w.id, JSON.stringify(w), WG_TTL);
 function verifySnakeSig(region, lobby, pid, name, ipHash, expTs, sig) {
   if (!GAME_SECRET || !sig) return false;
   if (!(Number(expTs) > Date.now())) return false;                 // roster entry expired
-  const canon = 'snake:' + region + ':' + lobby + ':' + pid + ':' + (name || '') + ':' + (ipHash || '') + ':' + expTs;
-  const expected = crypto.createHmac('sha256', GAME_SECRET).update(canon).digest('hex');
-  try { return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(sig))); } catch (_) { return false; }
+  // ⚠️ The NAME IS NOT SIGNED (v2). This proof only has to establish "this pid is a live snake in
+  // this arena" — the display name is cosmetic and MUTABLE. Binding it meant that the moment a
+  // player renamed, or their name reset to the default "SNAKE" mid-session, every signature they
+  // had stopped verifying: their snake silently failed validation, a duel's opponent never got
+  // recorded, and the wager could never settle. Names change; wallet ids do not.
+  //
+  // v1 (name included) is still accepted so a game server that has not been redeployed yet keeps
+  // working — remove that fallback once both nodes are on the nameless signature.
+  const mk = c => crypto.createHmac('sha256', GAME_SECRET).update(c).digest('hex');
+  const v2 = 'snake:' + region + ':' + lobby + ':' + pid + ':' + (ipHash || '') + ':' + expTs;
+  const v1 = 'snake:' + region + ':' + lobby + ':' + pid + ':' + (name || '') + ':' + (ipHash || '') + ':' + expTs;
+  const given = Buffer.from(String(sig));
+  for (const canon of [v2, v1]) {
+    try { if (crypto.timingSafeEqual(Buffer.from(mk(canon)), given)) return true; } catch (_) {}
+  }
+  return false;
 }
+
 
 // ── ANTI-SNIPE: the subject must still be IN THE ARENA at the moment you take the bet ──────────
 // The game server only signs snakes that are currently alive (wgBettableSnakes filters on sn.alive)
