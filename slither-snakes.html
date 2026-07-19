@@ -3680,12 +3680,57 @@ function _chatFade(){
     if(!_chatTyping){ const el=document.getElementById('ss-chat-msgs'); if(el)el.style.display='none'; }
   },8000);
 }
+// ── Chat bet commands ────────────────────────────────────────────────────────────
+// Betting without leaving the keyboard. These build the SAME _wg.form the F8 panel builds and hand
+// off to _wgCreate(), so escrow, the roster signature, the anti-rig side check and the balance guard
+// are the panel's — no second money path to keep in sync.
+//   /bet <name> <amount>          back them to cash out
+//   /bet against <name> <amount>  bet they die
+//   /bets                         list open bets
+function _wgChatHelp(){
+  addToast('/bet NAME 1  ·  /bet against NAME 1  ·  /bets','#00CFFF',8000);
+}
+async function _wgChatCmd(text){
+  const m=text.match(/^\/(\w+)\s*(.*)$/); if(!m)return false;
+  const cmd=m[1].toLowerCase(), rest=(m[2]||'').trim();
+  if(cmd!=='bet'&&cmd!=='bets'&&cmd!=='help')return false;   // not ours — send as normal chat
+  if(cmd==='help'){ _wgChatHelp(); return true; }
+  // The roster is only backfilled when the F8 panel opens; a chat bettor may never have opened it.
+  if(!Array.isArray(_wg.roster)||!_wg.roster.length){ try{ await _wgLoad(); }catch(_){} }
+  if(cmd==='bets'){
+    const open=[..._wg.open.values()];
+    if(!open.length){ addToast('No open bets right now','#FFD700'); return true; }
+    open.slice(0,4).forEach(w=>addToast('📋 '+_wgUsdStr(w.stake)+' — '+_wgTitle(w),'#00CFFF',7000));
+    return true;
+  }
+  if(!_wgGuard())return true;
+  let against=false, args=rest;
+  const am=args.match(/^(against|vs|on)\s+(.*)$/i);
+  if(am){ against=/^(against|vs)$/i.test(am[1]); args=am[2].trim(); }
+  // Name may contain spaces, so take the amount off the END rather than splitting on whitespace.
+  const tail=args.match(/^(.*?)\s+\$?([\d.]+)$/);
+  if(!tail){ addToast('Try: /bet NAME 1   (or /bet against NAME 1)','#FFD700',6000); return true; }
+  const name=tail[1].trim(), usd=parseFloat(tail[2]);
+  if(!name||!(usd>0)){ _wgChatHelp(); return true; }
+  const snake=(_wg.roster||[]).find(s=>s&&String(s.name||'').toLowerCase()===name.toLowerCase())
+           || (_wg.roster||[]).find(s=>s&&String(s.name||'').toLowerCase().startsWith(name.toLowerCase()));
+  if(!snake){ addToast('No live snake called "'+name+'" — /bets to see who is in','#FF4444',6000); return true; }
+  // Backing your own snake to LOSE is rejected by the server; say so here instead of burning a deposit.
+  if(_wgRiggableForMe('cashout',against?'NO':'YES',snake.pid,null)){
+    addToast("You can't bet against your own snake",'#FF4444',6000); return true;
+  }
+  _wg.form={type:'cashout',side:against?'NO':'YES',subject:snake.pid,subject2:null,duel:false,usd:usd,durationMs:0};
+  await _wgCreate();
+  return true;
+}
 function sendChat(){
   const inp=document.getElementById('ss-chat-inp');
   if(!inp)return;
   const text=(inp.value||'').trim().slice(0,100);
   closeChat();
   if(!text||!_sio)return;
+  // Commands never go out as chat messages — no cooldown either, or a failed bet would eat it.
+  if(text[0]==='/'){ _wgChatCmd(text).then(handled=>{ if(!handled && _sio){ try{ _sio.emit('chat',{text}); }catch(_){} } }); return; }
   const now=Date.now();
   if(now-_chatLastSend<_CHAT_COOLDOWN)return;   // silent throttle — no scolding toast mid-fight
   _chatLastSend=now;
@@ -3838,9 +3883,32 @@ function _wgOnRoster(d){
   }
   if(_wg.panel&&changed)_wgRender();
 }
+// Am I the SUBJECT of this wager (i.e. is someone betting on my snake), and does the creator's
+// side back me or fade me? Returns null when the bet has nothing to do with me.
+// Sides mirror lib/p2pbet.js: outlast/duel -> A backs subject, B backs subject2;
+// cashout/survive have only a subject, where YES backs them and NO fades them.
+function _wgOnMe(w){
+  const me=_wgMyAddr(); if(!me||!w)return null;
+  const isA=(w.subject===me), isB=(w.subject2===me);
+  if(!isA&&!isB)return null;
+  const backs = (w.type==='outlast') ? (isA ? w.side==='A' : w.side==='B') : (w.side==='YES');
+  return {backs:!!backs, mine:(w.creator===me||w.acceptor===me)};
+}
 function _wgOnEvent(d){
   if(!d||!d.wager||!d.wager.id)return;
   const w=d.wager, ev=d.event;
+  // Tell the player money is riding on THEM. The event already reaches everyone in the lobby room
+  // (io.to(lobby)), players included — it was only ever rendered for the bettor, so the person being
+  // bet on had no idea. Skip it when I'm also the bettor: my own slip toast already covers that.
+  try{
+    const om=_wgOnMe(w);
+    if(om&&!om.mine){
+      const who=_wgEsc(w.creatorName||'Someone').slice(0,14), amt=_wgUsdStr(w.stake);
+      if(ev==='created')      addToast((om.backs?'💚 ':'🎯 ')+who+' bet '+amt+(om.backs?' ON you':' AGAINST you'),om.backs?'#39FF14':'#FF4444',6000);
+      else if(ev==='matched') addToast('⚔ '+amt+' matched on you — '+_wgTitle(w),'#FFD700',6000);
+      else if(ev==='settled') addToast('💰 Bet on you settled — '+_wgTitle(w),'#FFD700',5000);
+    }
+  }catch(_){}
   _wg.open.delete(w.id); _wg.live.delete(w.id);
   if(w.status==='open')_wg.open.set(w.id,w);
   else if(w.status==='matched')_wg.live.set(w.id,w);
