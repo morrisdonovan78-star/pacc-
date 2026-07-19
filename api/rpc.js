@@ -10,12 +10,21 @@ module.exports = async function handler(req, res) {
 
   // Ankr now requires a paid API key — removed.
   // api.mainnet-beta.solana.com works fine from Vercel (server-to-server).
+  // ⚠️ HELIUS_RPC_URL FIRST. This endpoint carries the ENTIRE deposit path — getLatestBlockhash,
+  // sendTransaction, getSignatureStatuses — for every paid join and every bet. It used to run purely
+  // on free public nodes, and those are frequently rate-limited or outright broken (measured: 2 of
+  // the 3 returned non-JSON garbage). When they fail, a player's transaction is built on a stale
+  // blockhash or never broadcast: they are NOT charged, nothing confirms, /api/join cannot find the
+  // tx, and the join dies after retrying — the "long wait, verified 4 times, never let in, never
+  // charged" report. api/settle.js already prefers Helius; this path was left behind.
+  // Set HELIUS_RPC_URL in the Vercel env (free tier, 50 req/s) — without it this stays flaky.
   const rpcs = [
+    process.env.HELIUS_RPC_URL,                     // PRIMARY when configured
+    process.env.SOLANA_RPC_URL,                     // optional second private endpoint
     'https://api.mainnet-beta.solana.com',
     'https://solana.public-rpc.com',
     'https://solana-mainnet.g.alchemy.com/v2/demo',
-    'https://api.mainnet-beta.solana.com', // retry official once more
-  ];
+  ].filter(Boolean);
 
   // RPC error codes that mean "this node can't help us" — that node is discarded and we take
   // whichever OTHER node answers. Legitimate errors (insufficient funds, bad tx, etc.) pass through.
@@ -47,6 +56,42 @@ module.exports = async function handler(req, res) {
     }
     return data;
   };
+
+  // ── getLatestBlockhash needs the FRESHEST node, not the fastest ────────────────────────────────
+  // Racing and taking whoever answers first is wrong here: a node that replies quickly but is a few
+  // slots BEHIND hands back an old blockhash. The wallet then signs a transaction that Solana drops
+  // as expired — so the player is never charged, nothing ever confirms, /api/join can't find the tx,
+  // and the join dies after retrying. That is the "long wait, verified 4 times, never let in, never
+  // charged" report. Collect the answers and take the one with the highest lastValidBlockHeight.
+  // Resolved early once we have a couple of opinions (or a short deadline) so this stays fast.
+  if (req.body && req.body.method === 'getLatestBlockhash') {
+    const freshness = d => {
+      const v = d && d.result && (d.result.value || d.result);
+      return (v && Number(v.lastValidBlockHeight)) || (d && d.result && d.result.context && Number(d.result.context.slot)) || 0;
+    };
+    const got = [];
+    const best = await new Promise(resolve => {
+      let left = rpcs.length, settled = false;
+      const finish = () => { if (!settled) { settled = true; resolve(got.slice()); } };
+      const timer = setTimeout(finish, 1500);          // don't wait on a slow node
+      for (const url of rpcs) {
+        attempt(url).then(d => { if (d && d.result) got.push(d); })
+          .catch(() => {})
+          .finally(() => {
+            // Two independent answers is enough to spot a laggard; otherwise wait for the rest.
+            if (got.length >= 2 || --left === 0) { clearTimeout(timer); finish(); }
+          });
+      }
+      if (!left) { clearTimeout(timer); finish(); }
+    });
+    if (best.length) {
+      best.sort((a, b) => freshness(b) - freshness(a));
+      res.status(200).json(best[0]);
+      return;
+    }
+    res.status(502).json({ jsonrpc: '2.0', error: { code: -32603, message: 'All RPC endpoints failed (blockhash)' }, id: null });
+    return;
+  }
 
   // ── getSignatureStatuses needs "first node that FOUND it", not "first node to answer" ──────────
   // A node that hasn't indexed the signature yet replies with a perfectly valid {value:[null]} —
