@@ -6323,12 +6323,10 @@ function onGameKey(e){
     const _kbFree=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
     if(_isPractice||_kbFree){ if(e.key==='c'||e.key==='C')clearBotSnakes(); else spawnBotSnake('circle'); return; }
   }
-  // ── Body renderer A/B toggles (perf, OWNER only) — live switch, same snakes on screen. Default = 3-stroke + rings ──
-  if(!a && (e.key==='b'||e.key==='B'||e.key==='m'||e.key==='M'||e.key==='v'||e.key==='V') && localStorage.getItem('ss_owner')==='1'){
-    if(e.key==='b'||e.key==='B'){window._BODY3STROKE=!window._BODY3STROKE;addToast('Body renderer: '+(window._BODY3STROKE?'3-STROKE (optimized)':'legacy 3-pass circles'),'#8cf');return;}
-    if(e.key==='v'||e.key==='V'){window._BODYSEGS=!window._BODYSEGS;addToast('Segment rings: '+(window._BODYSEGS?'ON':'OFF (plain tube)'),'#8cf');return;}
-    if(e.key==='m'||e.key==='M'){_renderBench();return;} // same-scene FPS/CPU/GPU/snake benchmark for the active renderer
-  }
+  // Body-renderer A/B toggles removed: the renderer is LOCKED to the good look (_BODY3STROKE +
+  // segment rings) and B no longer swaps it mid-game. The V/M halves of this block were already
+  // unreachable anyway — V and M became push-to-talk and mic-mute, so `a` is always truthy for them.
+  // _renderBench() is still callable from the console if a benchmark is ever needed again.
   if(!a)return;
   if(a==='boost')_mouseBoost=true;
   else if(a==='cashout'){ startCashout(); }
@@ -7257,14 +7255,13 @@ function drawMoneyFx(){
   }
   ctx.globalAlpha=1;ctx.restore();
 }
-// ── Body renderer: 3-STROKE is now the DEFAULT (measured ~2.1× cheaper than the legacy 3-pass circle
-//    renderer at the same look — see commit 18fa50f). Owner keys remain for live A/B verification:
-//   B → window._BODY3STROKE : toggle back to the legacy n-overlapping-circles renderer (fallback only).
-//   V → window._BODYSEGS    : toggle the segment-ring pass (visual only) for a clean cost comparison.
-//   M → _renderBench() : real FPS + flush-based CPU/GPU/snake/total numbers for whichever renderer is
-//       active right now (run before and after a toggle for a true, same-scene before/after).
-window._BODY3STROKE = true;   // optimized renderer ON by default (B toggles legacy for comparison)
-window._BODYSEGS    = true;   // Damnbruh-style segment rings ON by default (V toggles, visual only)
+// ── Body renderer: LOCKED to 3-STROKE + segment rings — the canonical look, and measured ~2.1×
+//    cheaper than the legacy 3-pass circle renderer at the same look (commit 18fa50f). The B/V/M
+//    owner hotkeys that used to swap these live are GONE: an in-game keypress could change how every
+//    snake was drawn mid-match. Both stay overridable from the console for debugging, and
+//    _renderBench() still works, but nothing on the keyboard touches them any more.
+window._BODY3STROKE = true;   // optimized renderer — canonical, no longer toggleable in-game
+window._BODYSEGS    = true;   // Damnbruh-style segment rings — canonical, no longer toggleable in-game
 // Hex-grid background renderer. 'on' (default, everyone) = cached blit; 'off' = live per-frame stroke.
 // Those are the ONLY two values; console escape hatch `window._GRIDMODE='off'` reverts to the stroke.
 // The cache is the right default on real hardware, measured on 19,364 REAL frames of play (RTX 4070,
