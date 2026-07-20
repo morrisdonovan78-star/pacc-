@@ -201,6 +201,11 @@ input,textarea,[contenteditable="true"]{-webkit-user-select:text;-moz-user-selec
 #m-zoom::-moz-range-track{height:6px;border-radius:3px;background:rgba(0,255,255,0.35);}
 #m-zoom::-moz-range-thumb{width:26px;height:26px;border:none;border-radius:50%;background:var(--c);}
 body.mctl #voice-speakers{left:150px;}
+/* /help panel — command line then plain-English meaning, so the syntax is copyable at a glance */
+.ch-cmd{font-family:'Courier New',monospace;font-size:12.5px;font-weight:bold;color:#39FF14;background:rgba(57,255,20,.07);
+  border-left:3px solid rgba(57,255,20,.55);border-radius:4px;padding:6px 9px;margin:0 0 3px;word-break:break-word;}
+.ch-txt{font-size:11px;color:var(--muted);line-height:1.6;margin:0 0 10px;padding-left:12px;}
+.ch-i{font-family:'Courier New',monospace;color:#8cf;}
 /* ══ HOME DASHBOARD (snakepot.com look) ═══════════════════════════════════════ */
 #scr-home.on{justify-content:flex-start;padding:0 0 24px;}
 /* Discord invite — a direct child of #scr-home so .scr display rules hide it on every other screen,
@@ -563,6 +568,56 @@ body.mctl #voice-speakers{left:150px;}
       <button class="copy-btn" onclick="_resetBinds()" style="flex:1;">RESET DEFAULTS</button>
       <button class="btn btn-g btn-sm" onclick="_closeSettings()" style="flex:1;margin:0;">DONE</button>
     </div>
+  </div>
+</div>
+
+<!-- Command help (/help) — betting commands, the rules that catch people out, and the keys -->
+<div id="cmdhelp-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10004;align-items:center;justify-content:center;">
+  <div class="card" style="max-width:560px;width:94%;padding:1.3rem;max-height:88vh;overflow:auto;">
+    <div style="font-family:'Press Start 2P',monospace;font-size:12px;color:var(--acc);margin-bottom:.35rem;text-align:center;">💬 CHAT COMMANDS</div>
+    <div style="font-size:10px;color:var(--muted);text-align:center;margin-bottom:1rem;">Press <b>T</b> to open chat, type the command, hit Enter. The <b>amount is always last</b>, in US dollars.</div>
+
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin:0 0 8px;">CASH OUT / DIE</div>
+    <div class="ch-cmd">/bet EMINEM 1</div><div class="ch-txt">$1 that EMINEM <b>cashes out</b> — banks their money instead of dying.</div>
+    <div class="ch-cmd">/bet against EMINEM 1</div><div class="ch-txt">$1 that EMINEM <b>dies</b> instead.</div>
+
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin:14px 0 8px;">SURVIVE A TIMER</div>
+    <div class="ch-cmd">/survive EMINEM 1</div><div class="ch-txt">$1 that EMINEM is <b>still alive after 60s</b> (60s is the default).</div>
+    <div class="ch-cmd">/survive EMINEM 30s 1</div><div class="ch-txt">Same, but 30 seconds. Allowed: <b>30s · 60s · 120s</b>.</div>
+    <div class="ch-cmd">/survive against EMINEM 30s 1</div><div class="ch-txt">$1 that they <b>don't</b> last 30 seconds.</div>
+
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin:14px 0 8px;">ONE SNAKE vs ANOTHER</div>
+    <div class="ch-cmd">/outlast EMINEM SNAKEPOT 1</div><div class="ch-txt">$1 that <b>EMINEM lasts longer</b> than SNAKEPOT. Neither has to be you.</div>
+    <div class="ch-cmd">/outlast against EMINEM SNAKEPOT 1</div><div class="ch-txt">The other side — SNAKEPOT lasts longer.</div>
+    <div class="ch-cmd">/duel EMINEM 1</div><div class="ch-txt">$1: <b>your snake vs EMINEM</b>. Settles only on a decisive kill between you two.</div>
+
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin:14px 0 8px;">LOOK AROUND</div>
+    <div class="ch-cmd">/bets</div><div class="ch-txt">List the bets currently open for anyone to take.</div>
+    <div class="ch-cmd">/help</div><div class="ch-txt">This panel. <b>F8</b> opens the full betting panel with buttons.</div>
+
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--acc);margin:16px 0 8px;">HOW THE MONEY WORKS</div>
+    <ul style="font-size:11px;color:var(--muted);line-height:1.75;margin:0 0 2px;padding-left:18px;">
+      <li><b>Even money.</b> Your $1 against their $1 — the winner takes about <b>$1.84</b> (8% fee).</li>
+      <li><b>The fee only applies to matched bets.</b> If nobody takes the other side you get <b>100% back</b>, no fee.</li>
+      <li>Minimum bet is <b>$0.50</b>.</li>
+      <li>Names are <b>partial and case-insensitive</b> — <span class="ch-i">/bet emin 1</span> finds EMINEM. Names with spaces work too.</li>
+      <li>You can back <b>your own snake to win</b> — never to lose. <span class="ch-i">/bet against</span> yourself is blocked, and so is any bet that pays out when your snake loses.</li>
+      <li>Anything that isn't a command is just sent as a normal chat message.</li>
+    </ul>
+
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--acc);margin:16px 0 8px;">WHEN MONEY IS ON YOU</div>
+    <div style="font-size:11px;color:var(--muted);line-height:1.75;margin-bottom:2px;">
+      You'll see it live: <span style="color:#39FF14;">💚 someone bet ON you</span> or <span style="color:#FF4444;">🎯 someone bet AGAINST you</span>, and again when an opponent matches it.
+    </div>
+
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--acc);margin:16px 0 8px;">KEYS</div>
+    <div style="font-size:11px;color:var(--muted);line-height:1.9;">
+      <b>T</b> chat · <b>F8</b> betting panel · <b>Q</b> cash out · <b>G</b> save clip · <b>E</b> auto-circle<br>
+      <b>V</b> push-to-talk (turn it on in ⚙ Settings) · <b>M</b> your mic · <b>J</b> mute everyone else<br>
+      Every key is rebindable in <b>⚙ Settings</b>, controller included.
+    </div>
+
+    <button class="btn btn-g btn-sm" onclick="_cmdHelpClose()" style="width:100%;margin:1.2rem 0 0;">GOT IT</button>
   </div>
 </div>
 
@@ -3687,11 +3742,20 @@ function _chatFade(){
 //   /bet <name> <amount>          back them to cash out
 //   /bet against <name> <amount>  bet they die
 //   /bets                         list open bets
-function _wgChatHelp(){
-  addToast('/bet NAME 1 · /bet against NAME 1','#00CFFF',9000);
-  addToast('/survive NAME 30s 1 · /outlast NAME1 NAME2 1','#00CFFF',9000);
-  addToast('/duel NAME 1 · /bets','#00CFFF',9000);
+// /help opens a real panel. Toasts were the wrong medium for this — they expire, they stack, and
+// there is no room to say what a bet actually MEANS or what it pays.
+let _cmdHelpOn=false;
+function _cmdHelpOpen(){
+  _cmdHelpOn=true;
+  const el=document.getElementById('cmdhelp-modal'); if(el)el.style.display='flex';
 }
+function _cmdHelpClose(){
+  _cmdHelpOn=false;
+  const el=document.getElementById('cmdhelp-modal'); if(el)el.style.display='none';
+}
+function _wgChatHelp(){ _cmdHelpOpen(); }
+// Capture phase so Escape closes the panel before anything else claims the key.
+document.addEventListener('keydown',e=>{ if(_cmdHelpOn&&e.key==='Escape'){ e.preventDefault(); e.stopPropagation(); _cmdHelpClose(); } },true);
 function _wgFindSnake(name){
   const n=String(name||'').trim().toLowerCase(); if(!n)return null;
   const r=_wg.roster||[];
@@ -6243,6 +6307,7 @@ function _plWant(){
   // so opening it must give the cursor back. rafDraw's auto-release picks this up on the next frame,
   // and the next canvas click re-locks — the player never has to press Esc.
   if(_wg.panel) return false;
+  if(_cmdHelpOn) return false;   // same reason: a held lock makes GOT IT unclickable
   return !!(SG && !SG.over && !isSpectating && !_localDead &&
             document.getElementById('scr-game') && document.getElementById('scr-game').classList.contains('on'));
 }
