@@ -591,8 +591,10 @@ body.mctl #voice-speakers{left:150px;}
     <div class="ch-cmd">/outlast against EMINEM SNAKEPOT 1</div><div class="ch-txt">The other side — SNAKEPOT lasts longer.</div>
     <div class="ch-cmd">/duel EMINEM 1</div><div class="ch-txt">$1: <b>your snake vs EMINEM</b>. Settles only on a decisive kill between you two.</div>
 
-    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin:14px 0 8px;">LOOK AROUND</div>
-    <div class="ch-cmd">/bets</div><div class="ch-txt">List the bets currently open for anyone to take.</div>
+    <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin:14px 0 8px;">TAKE SOMEONE ELSE'S BET</div>
+    <div class="ch-cmd">/bets</div><div class="ch-txt">Lists the open bets, <b>numbered</b>. Your own show as <i>(yours)</i>.</div>
+    <div class="ch-cmd">/accept 2</div><div class="ch-txt">Takes bet <b>#2</b> from that list — you put up the same stake on the other side. <span class="ch-i">/take</span> works too.</div>
+    <div class="ch-cmd">/accept</div><div class="ch-txt">With no number, takes the only open bet — if there's exactly one.</div>
     <div class="ch-cmd">/help</div><div class="ch-txt">This panel. <b>F8</b> opens the full betting panel with buttons.</div>
 
     <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--acc);margin:16px 0 8px;">HOW THE MONEY WORKS</div>
@@ -3754,6 +3756,9 @@ function _cmdHelpClose(){
   const el=document.getElementById('cmdhelp-modal'); if(el)el.style.display='none';
 }
 function _wgChatHelp(){ _cmdHelpOpen(); }
+// The numbered list the player last saw from /bets, so /accept N maps to it. Kept separate from
+// _wg.open (a Map, unordered from the player's point of view) and re-checked by id before paying.
+let _wgChatList=[];
 // Capture phase so Escape closes the panel before anything else claims the key.
 document.addEventListener('keydown',e=>{ if(_cmdHelpOn&&e.key==='Escape'){ e.preventDefault(); e.stopPropagation(); _cmdHelpClose(); } },true);
 function _wgFindSnake(name){
@@ -3780,14 +3785,48 @@ function _wgSplitTwo(s){
 async function _wgChatCmd(text){
   const m=text.match(/^\/(\w+)\s*(.*)$/); if(!m)return false;
   const cmd=m[1].toLowerCase(); let rest=(m[2]||'').trim();
-  if(['bet','survive','outlast','duel','bets','help'].indexOf(cmd)<0)return false;  // normal chat
+  if(['bet','survive','outlast','duel','bets','accept','take','help'].indexOf(cmd)<0)return false;  // normal chat
   if(cmd==='help'){ _wgChatHelp(); return true; }
   // The roster is only backfilled when the F8 panel opens; a chat bettor may never have opened it.
   if(!Array.isArray(_wg.roster)||!_wg.roster.length){ try{ await _wgLoad(); }catch(_){} }
   if(cmd==='bets'){
+    // Number them and REMEMBER that order, so /accept N refers to what the player just saw. Ids are
+    // long hashes — nobody is typing one of those mid-match.
+    _wgChatList=[..._wg.open.values()];
+    if(!_wgChatList.length){ addToast('No open bets right now','#FFD700'); return true; }
+    const me=_wgMyAddr();
+    _wgChatList.slice(0,5).forEach((w,i)=>addToast(
+      (i+1)+') '+_wgUsdStr(w.stake)+' — '+_wgTitle(w)+(w.creator===me?' (yours)':''),'#00CFFF',9000));
+    addToast('Take one with /accept '+'1'.padStart(1),'#FFD700',9000);
+    return true;
+  }
+  if(cmd==='accept'||cmd==='take'){
+    if(!_wgGuard())return true;
     const open=[..._wg.open.values()];
     if(!open.length){ addToast('No open bets right now','#FFD700'); return true; }
-    open.slice(0,4).forEach(w=>addToast('📋 '+_wgUsdStr(w.stake)+' — '+_wgTitle(w),'#00CFFF',7000));
+    const n=parseInt(rest,10);
+    // NEVER pay for a bet the player hasn't seen. If they type /accept 2 without having listed,
+    // show the numbered list and make them repeat it — one keystroke instead of a blind stake.
+    // The single-open-bet shortcut is exempt: there is nothing to pick wrong.
+    if(!_wgChatList.length && !(open.length===1&&!rest)){
+      _wgChatList=open;
+      const me0=_wgMyAddr();
+      open.slice(0,5).forEach((w,i)=>addToast(
+        (i+1)+') '+_wgUsdStr(w.stake)+' — '+_wgTitle(w)+(w.creator===me0?' (yours)':''),'#00CFFF',9000));
+      addToast('Now run /accept '+((rest&&n>0)?n:1)+' to take one','#FFD700',9000);
+      return true;
+    }
+    const list=_wgChatList.length?_wgChatList:open;
+    let w=null;
+    if(rest&&n>0) w=list[n-1];
+    else if(list.length===1) w=list[0];
+    else { addToast('Which one? Run /bets, then /accept 1','#FFD700',6000); return true; }
+    if(!w){ addToast('No bet '+n+' — run /bets for the current list','#FF4444',6000); return true; }
+    // The list can be stale (someone else took it, or it settled) — re-read from the live map by id.
+    const live=_wg.open.get(w.id);
+    if(!live){ addToast('That bet is gone — someone took it. /bets for the rest','#FF6600',6000); return true; }
+    if(live.creator===_wgMyAddr()){ addToast("That's your own bet — you can't take both sides",'#FFD700',6000); return true; }
+    await _wgAccept(live.id);
     return true;
   }
   if(!_wgGuard())return true;
