@@ -3,7 +3,7 @@
 const nacl    = require('tweetnacl');
 const crypto  = require('crypto');
 const GAME_SECRET = (process.env.GAME_SECRET || '').trim();
-const { kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvZrevrange, kvHincrby,
+const { kvPing, kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvZrevrange, kvHincrby,
         kvLpush, kvLtrim, kvLrange, kvHget, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
 // Pure pari-mutuel engine (spectator betting). All money math lives here so it is unit-tested
 // offline; this file only does auth, KV, and the on-chain transfers. See lib/betting.js.
@@ -1447,7 +1447,20 @@ module.exports = async function handler(req, res) {
       const coLockKey = 'lock:co:' + playerAddress;
       const coLock = await kvSetNX(coLockKey, '1', 20);
       if (!coLock) {
+        // A falsy NX result means EITHER the lock is genuinely held OR KV is unreachable — lib/kv.js
+        // collapses every infrastructure failure into the same null. Those two need OPPOSITE
+        // responses: one clears in a couple of seconds, the other is a total outage that no amount
+        // of retrying will fix. Conflating them is what made a dead KV present to every single
+        // player as "cashout already in progress", burning all four client retries and leaving them
+        // on a screen that says the payout did not complete. Ping to tell them apart and say which.
+        const kvUp = await kvPing();
         clearTimeout(guard); done = true;
+        if (!kvUp) {
+          console.error('[settle] CASHOUT BLOCKED — KV unreachable, wallet=' + playerAddress);
+          return res.status(503).json({
+            error: 'Payout system temporarily unavailable — your wager is safe and still on record. Try Cash Out again shortly.',
+            kvDown: true, retry: true });
+        }
         return res.status(429).json({ error: 'Cashout already in progress — wait a moment and try again' });
       }
 
