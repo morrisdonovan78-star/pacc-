@@ -3688,12 +3688,35 @@ function _chatFade(){
 //   /bet against <name> <amount>  bet they die
 //   /bets                         list open bets
 function _wgChatHelp(){
-  addToast('/bet NAME 1  ·  /bet against NAME 1  ·  /bets','#00CFFF',8000);
+  addToast('/bet NAME 1 · /bet against NAME 1','#00CFFF',9000);
+  addToast('/survive NAME 30s 1 · /outlast NAME1 NAME2 1','#00CFFF',9000);
+  addToast('/duel NAME 1 · /bets','#00CFFF',9000);
+}
+function _wgFindSnake(name){
+  const n=String(name||'').trim().toLowerCase(); if(!n)return null;
+  const r=_wg.roster||[];
+  return r.find(s=>s&&String(s.name||'').toLowerCase()===n)
+      || r.find(s=>s&&String(s.name||'').toLowerCase().startsWith(n)) || null;
+}
+// The amount is always the LAST token, so snake names are free to contain spaces.
+function _wgSplitAmount(s){
+  const m=String(s||'').match(/^(.*?)\s+\$?([\d.]+)$/);
+  return m?{rest:m[1].trim(),usd:parseFloat(m[2])}:null;
+}
+// Two names in one string with no delimiter: try every split point and keep the one where BOTH
+// halves resolve to a real snake. Beats guessing at whitespace when names have spaces in them.
+function _wgSplitTwo(s){
+  const p=String(s||'').trim().split(/\s+/);
+  for(let i=1;i<p.length;i++){
+    const a=_wgFindSnake(p.slice(0,i).join(' ')), b=_wgFindSnake(p.slice(i).join(' '));
+    if(a&&b&&a.pid!==b.pid) return {a,b};
+  }
+  return null;
 }
 async function _wgChatCmd(text){
   const m=text.match(/^\/(\w+)\s*(.*)$/); if(!m)return false;
-  const cmd=m[1].toLowerCase(), rest=(m[2]||'').trim();
-  if(cmd!=='bet'&&cmd!=='bets'&&cmd!=='help')return false;   // not ours — send as normal chat
+  const cmd=m[1].toLowerCase(); let rest=(m[2]||'').trim();
+  if(['bet','survive','outlast','duel','bets','help'].indexOf(cmd)<0)return false;  // normal chat
   if(cmd==='help'){ _wgChatHelp(); return true; }
   // The roster is only backfilled when the F8 panel opens; a chat bettor may never have opened it.
   if(!Array.isArray(_wg.roster)||!_wg.roster.length){ try{ await _wgLoad(); }catch(_){} }
@@ -3704,22 +3727,46 @@ async function _wgChatCmd(text){
     return true;
   }
   if(!_wgGuard())return true;
-  let against=false, args=rest;
-  const am=args.match(/^(against|vs|on)\s+(.*)$/i);
-  if(am){ against=/^(against|vs)$/i.test(am[1]); args=am[2].trim(); }
-  // Name may contain spaces, so take the amount off the END rather than splitting on whitespace.
-  const tail=args.match(/^(.*?)\s+\$?([\d.]+)$/);
-  if(!tail){ addToast('Try: /bet NAME 1   (or /bet against NAME 1)','#FFD700',6000); return true; }
-  const name=tail[1].trim(), usd=parseFloat(tail[2]);
-  if(!name||!(usd>0)){ _wgChatHelp(); return true; }
-  const snake=(_wg.roster||[]).find(s=>s&&String(s.name||'').toLowerCase()===name.toLowerCase())
-           || (_wg.roster||[]).find(s=>s&&String(s.name||'').toLowerCase().startsWith(name.toLowerCase()));
-  if(!snake){ addToast('No live snake called "'+name+'" — /bets to see who is in','#FF4444',6000); return true; }
-  // Backing your own snake to LOSE is rejected by the server; say so here instead of burning a deposit.
-  if(_wgRiggableForMe('cashout',against?'NO':'YES',snake.pid,null)){
-    addToast("You can't bet against your own snake",'#FF4444',6000); return true;
+  // "against"/"vs" flips to the losing side; "on" is just sugar for backing them.
+  let against=false;
+  const am=rest.match(/^(against|vs|on)\s+(.*)$/i);
+  if(am){ against=/^(against|vs)$/i.test(am[1]); rest=am[2].trim(); }
+  // Lift a 30s/60s/120s token out before the amount is read, so /survive takes two numbers safely.
+  let durationMs=60000;
+  const dm=rest.match(/(?:^|\s)(\d+)s(?=\s|$)/i);
+  if(dm){ durationMs=parseInt(dm[1],10)*1000; rest=(rest.slice(0,dm.index)+' '+rest.slice(dm.index+dm[0].length)).trim(); }
+
+  const sp=_wgSplitAmount(rest);
+  if(!sp||!(sp.usd>0)){ _wgChatHelp(); return true; }
+  const usd=sp.usd, names=sp.rest;
+  const notFound=n=>{ addToast('No live snake called "'+n+'" — /bets to see who is in','#FF4444',6000); return true; };
+
+  let form=null;
+  if(cmd==='bet'||cmd==='survive'){
+    const s=_wgFindSnake(names); if(!s)return notFound(names);
+    if(cmd==='survive'&&_WG_DURATIONS.indexOf(durationMs)<0){
+      addToast('Survive time must be 30s, 60s or 120s','#FFD700',6000); return true; }
+    form={type:cmd==='bet'?'cashout':'survive',side:against?'NO':'YES',subject:s.pid,subject2:null,
+          duel:false,usd:usd,durationMs:cmd==='survive'?durationMs:0};
+  } else if(cmd==='outlast'){
+    const two=_wgSplitTwo(names);
+    if(!two){ addToast('Try: /outlast NAME1 NAME2 1','#FFD700',6000); return true; }
+    form={type:'outlast',side:against?'B':'A',subject:two.a.pid,subject2:two.b.pid,duel:false,usd:usd,durationMs:0};
+  } else if(cmd==='duel'){
+    const mine=_wgMySnake();
+    if(!mine){ addToast('You need a live snake in this arena to duel','#FF4444',6000); return true; }
+    const s=_wgFindSnake(names); if(!s)return notFound(names);
+    if(s.pid===mine.pid){ addToast("You can't duel yourself",'#FFD700',6000); return true; }
+    // Duel is an outlast where side A is YOUR snake — you are always backing yourself to win.
+    form={type:'outlast',side:'A',subject:mine.pid,subject2:s.pid,duel:true,usd:usd,durationMs:0};
   }
-  _wg.form={type:'cashout',side:against?'NO':'YES',subject:snake.pid,subject2:null,duel:false,usd:usd,durationMs:0};
+  if(!form)return true;
+  // The single rule: never take a side that pays out when a snake YOU control loses. Checked here so
+  // the deposit isn't burned before the server rejects it.
+  if(_wgRiggableForMe(form.type,form.side,form.subject,form.subject2)){
+    addToast("You can't bet on your own snake to lose",'#FF4444',6000); return true;
+  }
+  _wg.form=form;
   await _wgCreate();
   return true;
 }
