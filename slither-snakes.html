@@ -201,6 +201,10 @@ input,textarea,[contenteditable="true"]{-webkit-user-select:text;-moz-user-selec
 #m-zoom::-moz-range-track{height:6px;border-radius:3px;background:rgba(0,255,255,0.35);}
 #m-zoom::-moz-range-thumb{width:26px;height:26px;border:none;border-radius:50%;background:var(--c);}
 body.mctl #voice-speakers{left:150px;}
+/* Card explainer copy */
+.mp-p{font-size:12px;color:#dfe;line-height:1.65;margin:0 0 10px;}
+.mp-l{font-size:11px;color:var(--muted);line-height:1.7;margin:0;padding-left:17px;}
+.mp-l li{margin-bottom:6px;}
 /* /help panel — command line then plain-English meaning, so the syntax is copyable at a glance */
 .ch-cmd{font-family:'Courier New',monospace;font-size:12.5px;font-weight:bold;color:#39FF14;background:rgba(57,255,20,.07);
   border-left:3px solid rgba(57,255,20,.55);border-radius:4px;padding:6px 9px;margin:0 0 3px;word-break:break-word;}
@@ -487,6 +491,8 @@ body.mctl #voice-speakers{left:150px;}
         <div style="font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);margin-bottom:6px;">SEND SOL TO THIS ADDRESS</div>
         <div id="dep-addr" style="font-family:monospace;font-size:11px;color:var(--g);word-break:break-all;margin-bottom:8px;">--</div>
         <button class="copy-btn" onclick="copyWalletAddr()" style="width:100%;">📋 COPY ADDRESS</button>
+        <!-- Card option — hidden entirely unless SS_MOONPAY_KEY is set. Same wallet as above. -->
+        <button id="mp-buy-btn" class="copy-btn" onclick="_mpInfo('buy')" style="display:none;width:100%;margin-top:7px;border-color:rgba(0,207,255,.45);color:#00CFFF;">💳 OR ADD WITH CARD</button>
       </div>
     </div>
     <div class="panel" id="pnl-cust">
@@ -571,6 +577,22 @@ body.mctl #voice-speakers{left:150px;}
   </div>
 </div>
 
+<!-- Card deposit/withdraw explainer. Shown BEFORE opening MoonPay so nobody meets an ID check or a
+     fee for the first time on someone else's site, and so the free crypto route stays visible. -->
+<div id="mp-info-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10005;align-items:center;justify-content:center;">
+  <div class="card" style="max-width:470px;width:92%;padding:1.4rem;max-height:88vh;overflow:auto;">
+    <div id="mp-info-title" style="font-family:'Press Start 2P',monospace;font-size:11px;color:var(--acc);margin-bottom:.9rem;text-align:center;">💳 CARD</div>
+    <div id="mp-info-body"></div>
+    <div style="font-size:10px;color:var(--muted);line-height:1.6;margin:1rem 0 0;padding-top:10px;border-top:1px solid rgba(255,255,255,.09);">
+      Card payments are handled entirely by <b>MoonPay</b>, a licensed provider. SNAKE POT never sees your card details.
+    </div>
+    <div style="display:flex;gap:8px;margin-top:1rem;">
+      <button class="btn btn-g btn-sm" onclick="_mpGo()" style="flex:1;margin:0;">CONTINUE</button>
+      <button class="btn btn-r btn-sm" onclick="_mpInfoClose()" style="flex:1;margin:0;">CANCEL</button>
+    </div>
+  </div>
+</div>
+
 <!-- Command help (/help) — betting commands, the rules that catch people out, and the keys -->
 <div id="cmdhelp-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10004;align-items:center;justify-content:center;">
   <div class="card" style="max-width:560px;width:94%;padding:1.3rem;max-height:88vh;overflow:auto;">
@@ -645,6 +667,9 @@ body.mctl #voice-speakers{left:150px;}
       <button id="wd-send-btn" class="btn btn-g btn-sm" onclick="doWithdraw()" style="flex:1;">SEND</button>
       <button id="wd-cancel-btn" class="btn btn-r btn-sm" onclick="wdClose()" style="flex:1;">CANCEL</button>
     </div>
+    <!-- Card cash-out — hidden unless SS_MOONPAY_KEY is set. Does NOT replace the send above: it
+         opens MoonPay, and the address they give you is sent with that same normal flow. -->
+    <button id="mp-sell-btn" class="copy-btn" onclick="_mpInfo('sell')" style="display:none;width:100%;margin-top:9px;border-color:rgba(0,207,255,.45);color:#00CFFF;">💳 OR CASH OUT TO A CARD</button>
   </div>
 </div>
 
@@ -2438,6 +2463,7 @@ async function checkSession(){
 
 const WD_TX_FEE=5000; // lamports — 1 signature base fee
 function showWithdraw(){
+  _mpShowCardOut=true; _mpApplyVisibility();   // plain withdraw — offer the card route
   document.getElementById('wd-modal-title').textContent='WITHDRAW SOL';
   document.getElementById('wd-addr').value='';
   document.getElementById('wd-addr').readOnly=false;
@@ -2456,6 +2482,7 @@ function showWithdraw(){
 // wallet — same on-chain transfer doWithdraw() already does, just a prefilled recipient.
 function openSendModal(addr,name){
   if(!addr){addToast('No wallet address','#f55');return;}
+  _mpShowCardOut=false;   // sending to another PLAYER — a "cash out to card" button here is nonsense
   document.getElementById('wd-modal-title').textContent=name?('SEND TO '+String(name).toUpperCase()):'SEND SOL';
   document.getElementById('wd-addr').value=addr;
   document.getElementById('wd-addr').readOnly=true;
@@ -2467,6 +2494,7 @@ function openSendModal(addr,name){
   const maxUsd=ST.solPrice>0?(maxLamps/1e9*ST.solPrice).toFixed(2):'?';
   document.getElementById('wd-bal-line').textContent='Available: $'+balUsd+' (max send: $'+maxUsd+')';
   document.getElementById('wd-modal').style.display='flex';
+  _mpApplyVisibility();
   setTimeout(()=>{const el=document.getElementById('wd-amt');if(el)el.focus();},60); // ready to type immediately
 }
 function wdMax(){
@@ -2586,6 +2614,70 @@ async function doWithdraw(){
   finally{ _wdSetBusy(false); }   // released on EVERY exit path — a stuck flag would lock withdrawals
 }
 
+// ══ CARD DEPOSIT / WITHDRAWAL (MoonPay on-ramp + off-ramp) ═══════════════════════════════════
+// Deliberately ADDITIVE. The crypto paths above (send SOL to your address / doWithdraw to any
+// address) are untouched and remain the default — this only adds a card option onto the SAME
+// wallet. ST.address is what MoonPay delivers to, so card-bought SOL lands in the exact wallet the
+// game already uses; nothing downstream knows or cares where the SOL came from.
+//
+// We never see a card number, never hold fiat, have no merchant account and carry no chargeback
+// liability: MoonPay is the licensed money transmitter and sells the crypto to the player directly.
+//
+// ⚠️ Paste your PUBLISHABLE key from dashboard.moonpay.com. EMPTY = the whole feature stays hidden
+// and the wallet behaves exactly as it does today, so shipping this with no key changes nothing.
+// pk_test_… automatically targets the sandbox; pk_live_… targets production.
+const SS_MOONPAY_KEY = '';
+function _mpOn(){ return !!SS_MOONPAY_KEY; }
+function _mpSandbox(){ return SS_MOONPAY_KEY.indexOf('pk_test') === 0; }
+function _mpUrl(mode, extra){
+  const host = mode==='sell'
+    ? (_mpSandbox()?'https://sell-sandbox.moonpay.com':'https://sell.moonpay.com')
+    : (_mpSandbox()?'https://buy-sandbox.moonpay.com':'https://buy.moonpay.com');
+  const p = new URLSearchParams(Object.assign({ apiKey: SS_MOONPAY_KEY }, extra||{}));
+  return host + '?' + p.toString();
+}
+// Show the card buttons only when a key is configured — otherwise the wallet UI is byte-identical
+// to what players see today.
+let _mpShowCardOut=true;   // false while the withdraw modal is reused to send to another PLAYER
+function _mpApplyVisibility(){
+  const on=_mpOn();
+  const b=document.getElementById('mp-buy-btn');  if(b)b.style.display=on?'block':'none';
+  const s=document.getElementById('mp-sell-btn'); if(s)s.style.display=(on&&_mpShowCardOut)?'block':'none';
+}
+function _mpInfo(kind){
+  _mpInfoKind=kind;
+  const t=document.getElementById('mp-info-title'), b=document.getElementById('mp-info-body');
+  if(t)t.textContent = kind==='buy' ? '💳 ADD MONEY WITH A CARD' : '💳 CASH OUT TO YOUR CARD';
+  if(b)b.innerHTML = kind==='buy'
+    ? '<p class="mp-p">You\'ll buy SOL from <b>MoonPay</b> with your Visa or Mastercard. It lands in <b>this same game wallet</b> — the one you already play with — and shows up in your balance automatically.</p>'
+      +'<ul class="mp-l"><li><b>ID check required.</b> MoonPay verifies you once, the first time. That\'s their requirement as a licensed provider, not ours.</li>'
+      +'<li><b>Their fee is roughly 3.5–5.5%</b>, charged by MoonPay, shown before you confirm.</li>'
+      +'<li>Usually arrives in a few minutes.</li>'
+      +'<li><b>Prefer no fees?</b> Sending SOL to your address from another wallet still works exactly as before, and costs nothing extra.</li></ul>'
+    : '<p class="mp-p">You\'ll sell SOL to <b>MoonPay</b> and they pay your card. MoonPay gives you a Solana address to send to — copy it, then send with the normal CASH OUT below.</p>'
+      +'<ul class="mp-l"><li><b>ID check required</b>, once, on MoonPay\'s side.</li>'
+      +'<li><b>Card payouts need a Visa that supports Visa Direct.</b> Most debit cards do; some don\'t. Bank transfer, PayPal and Venmo also work.</li>'
+      +'<li><b>Fees are about 1% plus a $3.99 minimum</b> on card payouts. On a small cash-out that minimum bites — <b>bank transfer is cheaper under ~$40</b>.</li>'
+      +'<li>Card is fast; bank transfer takes 1–3 business days.</li>'
+      +'<li><b>Withdrawing to a crypto wallet is unchanged</b> and has no MoonPay fee at all.</li></ul>';
+  const m=document.getElementById('mp-info-modal'); if(m)m.style.display='flex';
+}
+let _mpInfoKind='buy';
+function _mpInfoClose(){ const m=document.getElementById('mp-info-modal'); if(m)m.style.display='none'; }
+function _mpGo(){
+  _mpInfoClose();
+  if(!_mpOn()){ addToast('Card payments are not configured yet','#FFD700'); return; }
+  if(!ST.address){ addToast('Sign in first','#FFD700'); return; }
+  const url = _mpInfoKind==='buy'
+    ? _mpUrl('buy',  { currencyCode:'sol', walletAddress:ST.address, baseCurrencyCode:'usd' })
+    // refundWalletAddress is where MoonPay returns the SOL if the sale fails — their docs require
+    // it, and it must be OUR wallet so a failed payout comes straight back into the game balance.
+    : _mpUrl('sell', { baseCurrencyCode:'sol', quoteCurrencyCode:'usd', refundWalletAddress:ST.address });
+  // New tab, not an iframe: MoonPay's KYC flow sets its own frame policy, and a popup keeps their
+  // page clearly THEIR page rather than something that looks like it belongs to us.
+  window.open(url,'_blank','noopener,noreferrer');
+  if(_mpInfoKind==='sell') addToast('Copy the address MoonPay gives you, then use CASH OUT to send it','#FFD700',9000);
+}
 function doLogout(){
   if(ST.email)localStorage.removeItem('ss_'+ST.email);
   localStorage.removeItem('ss_last');
@@ -8301,7 +8393,7 @@ function toggleDeposit(){
   const b=document.getElementById('dep-box');if(!b)return;
   const show=b.style.display==='none';
   b.style.display=show?'block':'none';
-  if(show){const a=document.getElementById('dep-addr');if(a)a.textContent=ST.address||'--';}
+  if(show){const a=document.getElementById('dep-addr');if(a)a.textContent=ST.address||'--'; _mpApplyVisibility();}
 }
 function toggleCust(){
   const b=document.getElementById('cust-open');if(!b)return;
