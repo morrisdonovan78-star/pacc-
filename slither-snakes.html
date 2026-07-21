@@ -5772,7 +5772,10 @@ const SS_CLIP_WEBHOOK = 'https://discord.com/api/webhooks/1523452307268833333/zE
 // Auto win-clips post here for a self-refilling content feed (pull them with scripts/fetch-discord-clips.js).
 // Defaults to the clips channel — swap in a dedicated #wall-of-winners webhook to route them separately.
 const SS_WIN_WEBHOOK = SS_CLIP_WEBHOOK;
-const SS_WIN_CLIP_MIN_USD = 1.50; // match the server text wall-of-winners threshold — no tiny-win spam
+// Floor for auto-posting a win-clip to the feed. Kept low on purpose: a $1-lobby cash-out nets ~$0.90
+// after the 10% fee, and that "eat snake → cash out" clip is exactly the montage content we want. Raise
+// it later if the feed gets noisy; it's independent of the server's $1.50 TEXT wall-of-winners.
+const SS_WIN_CLIP_MIN_USD = 0.10;
 
 // action → default keys (first is the primary shown in Settings). Boost keeps Space+Shift.
 const SS_BIND_DEFS = [
@@ -6096,7 +6099,10 @@ function _wclipDraw(ts){
 function _wclipStart(){
   // Skip if disabled, already running, or the heavy opt-in rolling buffer is already capturing — never
   // two encoders at once (that pairing is exactly what used to tank FPS).
-  if(!_wclipEnabled() || _wclipStream || _clipStream || !canvas || !canvas.width) return;
+  if(!_wclipEnabled()){ console.info('[winclip] not recording: AUTO WIN-CLIP is OFF (or MediaRecorder unsupported)'); return; }
+  if(_wclipStream) return; // already recording this cashout
+  if(_clipStream){ console.info('[winclip] not recording: the opt-in CLIP RECORDING buffer is ON — press G to save that clip instead'); return; }
+  if(!canvas || !canvas.width){ console.info('[winclip] not recording: game canvas not ready'); return; }
   try{
     _wclipBlob=null; _wclipChunks=[]; _wclipPosted=false;
     _wclipCanvas=document.createElement('canvas'); _wclipCanvas.width=WCLIP_W; _wclipCanvas.height=WCLIP_H;
@@ -6145,10 +6151,12 @@ function _wclipDecorateShareBtn(){
 // swallowed (the player's own SHARE MY WIN is the primary path — this is a bonus feed).
 function _wclipAutoPost(){
   if(_wclipPosted) return;
-  if(!SS_WIN_WEBHOOK || !_winShare || !_winShare.clip) return;
-  if(!(Number(_winShare.usd)>=SS_WIN_CLIP_MIN_USD)) return;
+  if(!SS_WIN_WEBHOOK){ console.info('[winclip] no post: SS_WIN_WEBHOOK unset'); return; }
+  if(!_winShare){ return; } // fired before the win is armed — the arm site calls again
+  if(!_winShare.clip){ console.info('[winclip] no post: clip blob not ready yet (recorder still finalizing)'); return; }
+  if(!(Number(_winShare.usd)>=SS_WIN_CLIP_MIN_USD)){ console.info('[winclip] no post: win $'+Number(_winShare.usd).toFixed(2)+' is below the $'+SS_WIN_CLIP_MIN_USD+' feed floor'); return; }
   const blob=_winShare.clip;
-  if(blob.size > 25*1024*1024) return; // Discord webhook cap — ~5s 720p clips are far under this
+  if(blob.size > 25*1024*1024){ console.info('[winclip] no post: clip is '+(blob.size/1048576).toFixed(1)+'MB, over the 25MB Discord cap'); return; }
   _wclipPosted=true;
   try{
     const ext=(_wclipMime && _wclipMime.indexOf('mp4')!==-1) ? 'mp4' : 'webm';
@@ -6162,8 +6170,11 @@ function _wclipAutoPost(){
     const fd=new FormData();
     fd.append('content',content);
     fd.append('file', blob, fname);
-    fetch(SS_WIN_WEBHOOK,{method:'POST',body:fd}).catch(()=>{});
-  }catch(_){ /* never let the feed break the result screen */ }
+    console.info('[winclip] posting '+(blob.size/1048576).toFixed(2)+'MB win-clip to Discord…');
+    fetch(SS_WIN_WEBHOOK,{method:'POST',body:fd})
+      .then(r=>{ console.info('[winclip] Discord post '+(r.ok?'OK ✓':'FAILED — HTTP '+r.status)); })
+      .catch(e=>{ console.warn('[winclip] Discord post network error',e); });
+  }catch(err){ console.warn('[winclip] autopost threw',err); /* never let the feed break the result screen */ }
 }
 
 // ── Settings modal (keybinds + clip toggle) ────────────────────────────────────
