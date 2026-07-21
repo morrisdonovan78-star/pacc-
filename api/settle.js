@@ -39,6 +39,59 @@ const CREATOR_FEE_PCT = 0.10;
 // Minimum accrued referral balance a referrer can withdraw. Keeps a single payout worth many times
 // its own ~5000-lamport network fee instead of dribbling out cent-sized transactions. ~0.002 SOL.
 const REF_MIN_CLAIM   = 2_000_000;
+
+// ── Discord "wall of winners" ─────────────────────────────────────────────────────────────────
+// When a paid cashout confirms, we post a small embed to a Discord channel via an incoming webhook.
+// It turns every real win into free, on-chain-proven social proof that recruits players. The
+// webhook URL lives ONLY in this env var (never shipped to the client) so nobody can spam the
+// channel. If the var is unset the whole feature is silently off — nothing changes. Set it in
+// Vercel: DISCORD_WINS_WEBHOOK = the URL from Discord → channel → Integrations → Webhooks.
+const DISCORD_WINS_WEBHOOK = (process.env.DISCORD_WINS_WEBHOOK || '').trim();
+const WIN_POST_MIN_LAMPORTS = 5_000_000; // ~$0.75+ — don't announce dust cashouts
+
+// Best-effort SOL/USD for the embed. One source, short timeout, null on any failure (embed then
+// shows SOL only). Never throws — a price hiccup must never touch the payout path.
+async function solUsdQuick() {
+  try {
+    const r = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT', { signal: AbortSignal.timeout(2500) });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const p = parseFloat(d && d.price);
+    return (p > 0) ? p : null;
+  } catch (_) { return null; }
+}
+
+// Post a single win to the Discord channel. Fully best-effort: any failure is swallowed so it can
+// NEVER affect the player's payout or the API response. `grossLamports` is what the player cashed
+// out (wager + winnings) — the figure they actually saw, and the honest social-proof number.
+async function postWinToDiscord(grossLamports, name, sig) {
+  if (!DISCORD_WINS_WEBHOOK) return;
+  if (!(grossLamports >= WIN_POST_MIN_LAMPORTS)) return;
+  try {
+    const sol = grossLamports / 1e9;
+    const price = await solUsdQuick();
+    const usd = price ? '$' + (sol * price).toFixed(2) : null;
+    const who = (name && String(name).trim()) ? String(name).trim().slice(0, 20) : 'A player';
+    const amount = usd ? (usd + '  (' + sol.toFixed(3) + ' SOL)') : (sol.toFixed(3) + ' SOL');
+    const explorer = 'https://explorer.solana.com/tx/' + sig;
+    const body = {
+      username: 'SNAKE POT',
+      embeds: [{
+        title: '🐍 ' + who + ' just cashed out!',
+        description: '**' + amount + '** paid straight to their wallet.\n\n' +
+                     '[✅ View on-chain proof](' + explorer + ')  •  [🎮 Play now](https://snakepot.com/play)',
+        color: 0x39FF14,
+        timestamp: new Date().toISOString(),
+      }],
+    };
+    await fetch(DISCORD_WINS_WEBHOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch (_) { /* social proof is best-effort; never let it matter */ }
+}
 const TX_FEE          = 5000;  // exact Solana base fee (5000 lamports × 1 signature, no priority fees)
 // Solana requires a system account's balance to be either exactly 0 OR >= RENT_MIN.
 // It must NEVER sit between 0 and RENT_MIN — that triggers InsufficientFundsForRent.
@@ -1584,6 +1637,12 @@ module.exports = async function handler(req, res) {
               await kvHincrby('ph:'+game+':global','totalEarned',payout);
               await pushEarningsPoint(game,playerAddress,newEarned);
             }catch(_){}
+            // Announce the win to Discord — awaited (Vercel can freeze the function the moment the
+            // response is sent) but fully guarded, so it never affects the payout or the response.
+            try{
+              const _wname = await kvHget('ph:'+playerAddress,'name');
+              await postWinToDiscord(payout, _wname, sig);
+            }catch(_){}
             break;
           } catch (e) {
             const isOnChainFail = e.message.includes('TX rejected') || e.message.includes('insufficient') || e.message.includes('0x1') || e.message.includes('-32002') || e.message.includes('Send failed');
@@ -1753,3 +1812,6 @@ module.exports = async function handler(req, res) {
     if (!done) { done = true; clearTimeout(guard); try { res.status(500).json({ error: e && e.message || String(e) }); } catch (_) {} }
   }
 };
+
+// Exported for unit testing the Discord win-post payload in isolation (scripts/test-winpost.js).
+module.exports.postWinToDiscord = postWinToDiscord;
