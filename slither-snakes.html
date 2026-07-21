@@ -1096,6 +1096,9 @@ body.mctl #voice-speakers{left:150px;}
       <div class="rstat"><div class="rsl">WAGER</div><div class="rsv hc" id="rs-wager">FREE</div></div>
       <div class="rstat"><div class="rsl">RESULT</div><div class="rsv" id="rs-result">--</div></div>
     </div>
+    <!-- Share my win — shown only after a real cashout (populated in the result flow). Opens X/Twitter
+         with a prefilled brag + the on-chain proof link, turning every winner into a recruiter. -->
+    <button class="btn btn-y" id="btn-share-win" style="display:none;width:100%;" onclick="shareMyWin()">📢 SHARE MY WIN</button>
     <div class="rbtns">
       <button class="btn btn-g" onclick="go('scr-lobby');populateLobby();">▶ PLAY AGAIN</button>
       <button class="btn btn-y" id="btn-spectate" style="display:none" onclick="enterSpectate()">👁 SPECTATE</button>
@@ -2595,6 +2598,23 @@ async function refClaim(){
     await refreshBal().catch(()=>{});
   }catch(e){ addToast('Claim failed: '+(e.message||e),'#f55',6000); }
   finally{ _refBusy=false; }
+}
+// ── Share my win ─────────────────────────────────────────────────────────────
+// Armed on a real cashout (see the result flow). Opens X/Twitter with a prefilled brag plus the
+// on-chain proof link, so every winner can recruit their own followers — the social-proof engine
+// that also feeds the Discord wall of winners, but pointed at the player's audience.
+let _winShare=null;
+function shareMyWin(){
+  if(!_winShare){ addToast('Nothing to share yet','#FFD700'); return; }
+  const usd=(_winShare.usd||0).toFixed(2);
+  const sol=(_winShare.sol||0).toFixed(4);
+  const play='https://snakepot.com/play';
+  let text='I just won $'+usd+' ('+sol+' SOL) playing Snake Pot 🐍💰 real-money PvP snake on Solana, instant payouts. Play free 👇';
+  // If we have the payout signature, append verifiable on-chain proof — the un-fakeable part.
+  if(_winShare.sig) text+='\n\n✅ Proof: https://explorer.solana.com/tx/'+_winShare.sig;
+  const url='https://twitter.com/intent/tweet?text='+encodeURIComponent(text)+'&url='+encodeURIComponent(play);
+  try{ window.open(url,'_blank','noopener,noreferrer'); }
+  catch(_){ try{ navigator.clipboard.writeText(text+' '+play); addToast('Copied — paste it anywhere','#39FF14'); }catch(__){} }
 }
 async function doWithdraw(){
   if(_wdBusy){ addToast('Withdrawal already in progress — please wait','#FFD700'); return; }
@@ -6791,6 +6811,8 @@ async function endSnakeGame(reason,killerId){
   const _bb2=document.getElementById('bot-bar');if(_bb2)_bb2.style.display='none';
   const _payoutEl=document.getElementById('rs-payout');
   if(_payoutEl)_payoutEl.style.display='none';
+  // Reset the share button every result screen — it's re-armed only on a real cashout below.
+  _winShare=null; const _shBtn0=document.getElementById('btn-share-win'); if(_shBtn0)_shBtn0.style.display='none';
   go('scr-result');
   setTimeout(()=>gpadFocus(0),80); // ensure first result-screen button gets controller focus
   if(cashed&&ST.lobbyUsd>0){
@@ -6804,6 +6826,9 @@ async function endSnakeGame(reason,killerId){
         const _netUsd=(ST.solPrice>0)?_netSol*ST.solPrice:(_myUsd*0.9);
         _payoutEl.textContent='💰 YOU RECEIVED $'+_netUsd.toFixed(2)+'  ('+_netSol.toFixed(4)+' SOL)';
         const _subEl=document.getElementById('rsub'); if(_subEl)_subEl.textContent='Sent to your wallet — 10% fee applied';
+        // Arm the "Share my win" button with this cashout's real numbers + on-chain proof link.
+        _winShare={usd:_netUsd,sol:_netSol,sig:(_sd&&_sd.sig)||null};
+        const _shBtn=document.getElementById('btn-share-win'); if(_shBtn)_shBtn.style.display='';
       }else{
         // settle() returned null = the payout did NOT complete. Never claim it did.
         _payoutEl.textContent='⚠ Payout did not complete — your wager is still on record';
