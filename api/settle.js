@@ -49,16 +49,26 @@ const REF_MIN_CLAIM   = 2_000_000;
 const DISCORD_WINS_WEBHOOK = (process.env.DISCORD_WINS_WEBHOOK || '').trim();
 const WIN_POST_MIN_LAMPORTS = 5_000_000; // ~$0.75+ — don't announce dust cashouts
 
-// Best-effort SOL/USD for the embed. One source, short timeout, null on any failure (embed then
-// shows SOL only). Never throws — a price hiccup must never touch the payout path.
+// Best-effort SOL/USD for the embed. Tries multiple sources in order (first success wins) so the
+// USD figure reliably shows. ORDER MATTERS: Binance geo-blocks US IPs and Vercel functions run in
+// the US, so Binance-first silently returned null and every post fell back to SOL-only — Coinbase
+// and CoinGecko answer fine from US, so they go first. Short per-source timeout; null only if every
+// source fails (embed then shows SOL). Never throws — a price hiccup must never touch the payout.
 async function solUsdQuick() {
-  try {
-    const r = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT', { signal: AbortSignal.timeout(2500) });
-    if (!r.ok) return null;
-    const d = await r.json();
-    const p = parseFloat(d && d.price);
-    return (p > 0) ? p : null;
-  } catch (_) { return null; }
+  const sources = [
+    { url: 'https://api.coinbase.com/v2/prices/SOL-USD/spot', pick: d => parseFloat(d && d.data && d.data.amount) },
+    { url: 'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', pick: d => d && d.solana && d.solana.usd },
+    { url: 'https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT', pick: d => parseFloat(d && d.price) },
+  ];
+  for (const s of sources) {
+    try {
+      const r = await fetch(s.url, { signal: AbortSignal.timeout(2500) });
+      if (!r.ok) continue;
+      const p = s.pick(await r.json());
+      if (p > 0) return p;
+    } catch (_) { /* try next source */ }
+  }
+  return null;
 }
 
 // Post a single win to the Discord channel. Fully best-effort: any failure is swallowed so it can

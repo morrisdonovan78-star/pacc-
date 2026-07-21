@@ -7,8 +7,11 @@ process.env.DISCORD_WINS_WEBHOOK = 'https://discord.test/webhook/AAA';
 const calls = [];
 const realFetch = global.fetch;
 global.fetch = async (url, opts) => {
-  // Price source → return a fixed SOL price; webhook → capture the body.
-  if (String(url).includes('binance')) return { ok: true, json: async () => ({ price: '150.00' }) };
+  // Price sources → return a fixed SOL price so USD renders; webhook → capture the body.
+  const u = String(url);
+  if (u.includes('coinbase'))  return { ok: true, json: async () => ({ data: { amount: '150.00' } }) };
+  if (u.includes('coingecko')) return { ok: true, json: async () => ({ solana: { usd: 150.0 } }) };
+  if (u.includes('binance'))   return { ok: true, json: async () => ({ price: '150.00' }) };
   calls.push({ url, body: JSON.parse(opts.body) });
   return { ok: true, json: async () => ({}) };
 };
