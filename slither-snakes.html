@@ -1246,7 +1246,11 @@ function _bgMakeSnake(x,y,sections,color,angle){
   if(angle==null)angle=Math.random()*Math.PI*2;
   const speed=1.6;
   const path=[];
-  for(let i=0;i<40;i++)path.push({x:x-Math.cos(angle)*i*speed,y:y-Math.sin(angle)*i*speed});
+  // Seed the FULL body length up front (matches the maxLen cap in _bgUpdate: numSections*3+40).
+  // Previously only 40 points were seeded, so every snake spawned as a short stub and slowly grew —
+  // which is why they looked way too short. Now they enter from off-screen already full-length.
+  const seedLen=sections*3+40;
+  for(let i=0;i<seedLen;i++)path.push({x:x-Math.cos(angle)*i*speed,y:y-Math.sin(angle)*i*speed});
   return{
     id:'bg'+Math.random().toString(36).slice(2), path, numSections:sections, color, angle,
     alive:true, boost:false, name:BG_NAMES[Math.floor(Math.random()*BG_NAMES.length)],
@@ -1256,7 +1260,8 @@ function _bgMakeSnake(x,y,sections,color,angle){
   };
 }
 function _bgSpawnSnake(W,H){
-  const sections=14+Math.floor(Math.random()*26);
+  // Doubled length with a wide spread so no two snakes are the same size (was 14–39).
+  const sections=30+Math.floor(Math.random()*55); // 30–84
   const color=SNAKE_COLORS[Math.floor(Math.random()*SNAKE_COLORS.length)];
   // Enter from just OFF-SCREEN past a random edge, heading inward — so snakes slide onto the
   // screen naturally (and later slide off the far side) instead of popping into existence.
@@ -1276,7 +1281,7 @@ function _bgKill(victim,killer){
   // Variety: sometimes the victim "cashes out" instead of just dying — never the same every time
   victim._cashout=Math.random()<0.5;
   _bgSpawnLoot(victim.path[0].x,victim.path[0].y,Math.min(10,4+Math.floor(victim.numSections/6)));
-  if(killer)killer.numSections=Math.min(70,killer.numSections+4);
+  if(killer)killer.numSections=Math.min(120,killer.numSections+4); // above the 84 spawn max so a kill never SHRINKS a big snake
 }
 
 function _bgUpdate(dt,W,H){
@@ -1344,7 +1349,7 @@ function _bgUpdate(dt,W,H){
     if(s.path.length>maxLen)s.path.length=maxLen;
 
     for(let i=_bgLoot.length-1;i>=0;i--){
-      if(Math.hypot(_bgLoot[i].x-nx,_bgLoot[i].y-ny)<14){_bgLoot.splice(i,1); if(s.numSections<60)s.numSections++;}
+      if(Math.hypot(_bgLoot[i].x-nx,_bgLoot[i].y-ny)<14){_bgLoot.splice(i,1); if(s.numSections<120)s.numSections++;}
     }
   }
 
@@ -1405,8 +1410,12 @@ function _bgRenderFrame(){
   // Safe to swap the shared globals here: this only ever runs while #scr-game is inactive,
   // and the real render loop only ever runs while it IS active — rAF callbacks run one at a
   // time and this function returns before yielding, so they can never interleave.
-  const savedCtx=ctx, savedCanvas=canvas, savedZoom=_camZoom;
+  const savedCtx=ctx, savedCanvas=canvas, savedZoom=_camZoom, savedCamX=_camX, savedCamY=_camY;
   ctx=bctx; canvas=c; _camZoom=1;
+  // drawSnake culls anything outside a box centered on _camX/_camY. Those still hold game-WORLD
+  // coords from the last match, so background snakes (in screen coords) fall outside the box and
+  // vanish. Center the cull on this canvas so the whole menu screen is the viewport.
+  _camX=W/2; _camY=H/2;
   for(const s of _bgSnakes){
     if(s.alive){ drawSnake(s); continue; }
     if(s._exited)continue; // slid off-screen — nothing to draw, no death fade
@@ -1422,7 +1431,7 @@ function _bgRenderFrame(){
       bctx.restore();
     }
   }
-  ctx=savedCtx; canvas=savedCanvas; _camZoom=savedZoom;
+  ctx=savedCtx; canvas=savedCanvas; _camZoom=savedZoom; _camX=savedCamX; _camY=savedCamY;
 
   requestAnimationFrame(_bgRenderFrame);
 }
