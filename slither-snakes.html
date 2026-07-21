@@ -544,6 +544,14 @@ body.mctl #voice-speakers{left:150px;}
     <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:1.1rem;">
       Records the last 20 seconds in your browser. Press <b>G</b> (keyboard) or click the <b>right stick</b> (controller) to save a clip. <b>PC only</b> — off on phones. Runs on your device, never on the game server.
     </div>
+    <!-- Auto win-clip -->
+    <div id="winclip-setting-row" style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px;">
+      <span style="font-family:'Press Start 2P',monospace;font-size:8px;color:#fff;">🎬 AUTO WIN-CLIP</span>
+      <button id="winclip-toggle-btn" class="copy-btn" style="min-width:64px;" onclick="_toggleWinClip()">ON</button>
+    </div>
+    <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:1.1rem;">
+      Auto-records your cash-out and hands the video to <b>SHARE MY WIN</b> — one tap to post it to TikTok / X / Instagram. Only records during the cash-out circle, so it never affects gameplay.
+    </div>
     <!-- Voice chat -->
     <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">🎙 VOICE CHAT</div>
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:7px;">
@@ -2623,6 +2631,25 @@ function shareMyWin(){
   // If we have the payout signature, append verifiable on-chain proof — the un-fakeable part.
   if(_winShare.sig) text+='\n\n✅ Proof: https://explorer.solana.com/tx/'+_winShare.sig;
   const url='https://twitter.com/intent/tweet?text='+encodeURIComponent(text)+'&url='+encodeURIComponent(play);
+  // Best case: hand the actual VIDEO to the OS share sheet — one tap posts it to TikTok / IG / X. This
+  // must fire straight from the click gesture (no await before it), so use the blob we already have.
+  const blob=_winShare.clip;
+  if(blob){
+    try{
+      const ext=(blob.type&&blob.type.indexOf('mp4')!==-1)?'mp4':'webm';
+      const file=new File([blob],'snakepot-win-'+Date.now()+'.'+ext,{type:blob.type||'video/mp4'});
+      if(navigator.canShare && navigator.canShare({files:[file]})){
+        navigator.share({files:[file],text:text+'\n'+play}).catch(()=>{});
+        return;
+      }
+      // No file-share (most desktop browsers): download the clip so they can attach it to the post…
+      const u=URL.createObjectURL(blob); const a=document.createElement('a');
+      a.href=u; a.download=file.name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(u),8000);
+      addToast('🎬 Win clip downloaded — attach it to your post','#39FF14');
+    }catch(_){}
+  }
+  // …then open the X composer with the prefilled brag + proof (also the whole flow when there's no clip).
   try{ window.open(url,'_blank','noopener,noreferrer'); }
   catch(_){ try{ navigator.clipboard.writeText(text+' '+play); addToast('Copied — paste it anywhere','#39FF14'); }catch(__){} }
 }
@@ -4854,6 +4881,9 @@ function getBodyPoints(snake,headAnchor){
 }
 // damnbruh.com exact radius: BASE_RADIUS + size^RADIUS_GROWTH * RADIUS_SCALE
 function sectionRadius(snake){
+  // Menu/background snakes carry a FIXED visual radius so they can be made longer (more sections)
+  // without also getting fatter — width stays matched to in-game snakes. Real snakes never set this.
+  if(snake&&snake._rFixed)return snake._rFixed;
   const size=snake.numSections*SIZE_PER_SEGMENT;
   return BASE_RADIUS+Math.pow(size,RADIUS_GROWTH)*RADIUS_SCALE;
 }
@@ -5739,6 +5769,10 @@ const SS_IS_PC = !!(window.matchMedia
 // download to the player's device instead. Exposed in client code by necessity (browser →
 // Discord direct); if it ever gets abused, regenerate it in Discord and paste the new one here.
 const SS_CLIP_WEBHOOK = 'https://discord.com/api/webhooks/1523452307268833333/zEoRKlhURKzFv-Q7pdDEVOGEPltlfSQjP8wA0s1W2C9FwCgZfze2Yv6rLFpXCZ06IYlU';
+// Auto win-clips post here for a self-refilling content feed (pull them with scripts/fetch-discord-clips.js).
+// Defaults to the clips channel — swap in a dedicated #wall-of-winners webhook to route them separately.
+const SS_WIN_WEBHOOK = SS_CLIP_WEBHOOK;
+const SS_WIN_CLIP_MIN_USD = 1.50; // match the server text wall-of-winners threshold — no tiny-win spam
 
 // action → default keys (first is the primary shown in Settings). Boost keeps Space+Shift.
 const SS_BIND_DEFS = [
@@ -5823,6 +5857,7 @@ const SS_SET_DEFS = [
   {k:'ss_server',      def:'NA',   apply:v=>{ if(v==='NA'||v==='EU') setGameServer(v,true); }},
   {k:'ss_gfx',         def:'high', apply:v=>{ _gfx=v; _applyGfx(); }},
   {k:'ss_clip_on',     def:'',     apply:null},
+  {k:'ss_winclip_off', def:'',     apply:null},
   {k:'ss_keybinds',    def:'{}',   apply:v=>{ try{ _ssBinds=JSON.parse(v)||{}; }catch(_){ _ssBinds={}; } }},
   {k:'ss_gpbinds',     def:'{}',   apply:v=>{ try{ _gpBinds=JSON.parse(v)||{}; }catch(_){ _gpBinds={}; } }},
   {k:'ss_snake_color', def:'',     apply:null},
@@ -6036,6 +6071,101 @@ function _clipUpload(blob){
     .catch(()=>addToast('Clip upload failed (network)','#FF4444'));
 }
 
+// ── Auto WIN-CLIP (growth engine) ────────────────────────────────────────────
+// Auto-records ONLY the cashout window (~4–6s) — the money moment — and hands the video to
+// SHARE MY WIN so every winner can one-tap it to TikTok / IG / X. This is the distribution loop:
+// the game paying out IS the ad.
+//
+// FPS: this is deliberately built so it CANNOT touch skill gameplay. No encoder exists during a
+// normal match — it spins up the instant the player commits to cashout, by which point the snake is
+// in the SERVER-LOCKED auto-circle and reads no aim input, so the only added cost is one 720p
+// drawImage per frame (~0.3ms) for a few seconds, hidden behind the cashout ring. Killed <6s → the
+// recording is thrown away. Video-only (no audio mix), one recorder, hard-capped lifetime, and every
+// path is wrapped so a failure silently tears down instead of stalling the game.
+const WCLIP_W=1280, WCLIP_H=720, WCLIP_FPS=24, WCLIP_MAX_MS=12000;
+let _wclipCanvas=null,_wclipCtx=null,_wclipStream=null,_wclipRec=null,_wclipChunks=[],_wclipMime='',
+    _wclipRaf=0,_wclipLast=0,_wclipBlob=null,_wclipStopTimer=null,_wclipPosted=false;
+function _wclipEnabled(){ return localStorage.getItem('ss_winclip_off')!=='1' && typeof MediaRecorder!=='undefined'; }
+function _wclipDraw(ts){
+  if(!_wclipStream){ _wclipRaf=0; return; }
+  _wclipRaf=requestAnimationFrame(_wclipDraw);
+  if(ts-_wclipLast < 1000/WCLIP_FPS) return; // throttle the downscale copy to WCLIP_FPS
+  _wclipLast=ts;
+  try{ if(canvas && canvas.width) _wclipCtx.drawImage(canvas,0,0,WCLIP_W,WCLIP_H); }catch(_){}
+}
+function _wclipStart(){
+  // Skip if disabled, already running, or the heavy opt-in rolling buffer is already capturing — never
+  // two encoders at once (that pairing is exactly what used to tank FPS).
+  if(!_wclipEnabled() || _wclipStream || _clipStream || !canvas || !canvas.width) return;
+  try{
+    _wclipBlob=null; _wclipChunks=[]; _wclipPosted=false;
+    _wclipCanvas=document.createElement('canvas'); _wclipCanvas.width=WCLIP_W; _wclipCanvas.height=WCLIP_H;
+    _wclipCtx=_wclipCanvas.getContext('2d');
+    _wclipCtx.fillStyle='#000'; _wclipCtx.fillRect(0,0,WCLIP_W,WCLIP_H); // seed a frame so the stream has content
+    _wclipStream=_wclipCanvas.captureStream(WCLIP_FPS);
+    const types=['video/mp4;codecs=avc1.42E01E','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
+    _wclipMime=(MediaRecorder.isTypeSupported?types.find(t=>MediaRecorder.isTypeSupported(t)):'')||'';
+    _wclipLast=0; _wclipRaf=requestAnimationFrame(_wclipDraw);
+    _wclipRec=new MediaRecorder(_wclipStream,_wclipMime?{mimeType:_wclipMime,videoBitsPerSecond:2500000}:undefined);
+    _wclipRec.ondataavailable=e=>{ if(e.data&&e.data.size)_wclipChunks.push(e.data); };
+    _wclipRec.onstop=()=>{
+      _wclipBlob=_wclipChunks.length?new Blob(_wclipChunks,{type:_wclipMime||'video/mp4'}):null;
+      // If the result screen already armed the share button before the blob finalized, backfill it.
+      if(_winShare && !_winShare.clip && _wclipBlob){ _winShare.clip=_wclipBlob; _wclipDecorateShareBtn(); }
+      _wclipAutoPost(); // push to the Discord wall-of-winners feed (no-op until _winShare is armed)
+    };
+    _wclipRec.start();
+    _wclipStopTimer=setTimeout(_wclipFinish, WCLIP_MAX_MS); // never outlive a stuck cashout
+  }catch(err){ console.warn('[winclip] start failed',err); _wclipTeardown(); }
+}
+// Stop cleanly and let onstop finalize the blob (called on a successful cashout).
+function _wclipFinish(){
+  if(_wclipStopTimer){ clearTimeout(_wclipStopTimer); _wclipStopTimer=null; }
+  if(_wclipRaf){ cancelAnimationFrame(_wclipRaf); _wclipRaf=0; }
+  try{ if(_wclipRec && _wclipRec.state==='recording') _wclipRec.stop(); }catch(_){}
+  const s=_wclipStream; _wclipStream=null; // null first so _wclipDraw exits
+  setTimeout(()=>{ if(s){ try{s.getTracks().forEach(t=>t.stop());}catch(_){} } }, 80);
+}
+// Discard everything (called on death / non-cashout exit) — no clip of a failed cashout.
+function _wclipTeardown(){
+  if(_wclipStopTimer){ clearTimeout(_wclipStopTimer); _wclipStopTimer=null; }
+  if(_wclipRaf){ cancelAnimationFrame(_wclipRaf); _wclipRaf=0; }
+  try{ if(_wclipRec){ _wclipRec.onstop=null; if(_wclipRec.state!=='inactive')_wclipRec.stop(); } }catch(_){}
+  const s=_wclipStream; _wclipStream=null;
+  if(s){ try{s.getTracks().forEach(t=>t.stop());}catch(_){} }
+  _wclipRec=null; _wclipChunks=[]; _wclipBlob=null; _wclipCanvas=null; _wclipCtx=null;
+}
+function _wclipDecorateShareBtn(){
+  const b=document.getElementById('btn-share-win');
+  if(b && b.style.display!=='none' && _winShare && _winShare.clip) b.textContent='🎬 SHARE MY WIN CLIP';
+}
+// Auto-post the finished win-clip to the Discord wall-of-winners feed — a self-refilling content pool
+// the owner pulls with scripts/fetch-discord-clips.js to cut into promo montages. Fires at most once per
+// win, only for real paid cash-outs at/above the wall-of-winners threshold. Best-effort: any failure is
+// swallowed (the player's own SHARE MY WIN is the primary path — this is a bonus feed).
+function _wclipAutoPost(){
+  if(_wclipPosted) return;
+  if(!SS_WIN_WEBHOOK || !_winShare || !_winShare.clip) return;
+  if(!(Number(_winShare.usd)>=SS_WIN_CLIP_MIN_USD)) return;
+  const blob=_winShare.clip;
+  if(blob.size > 25*1024*1024) return; // Discord webhook cap — ~5s 720p clips are far under this
+  _wclipPosted=true;
+  try{
+    const ext=(_wclipMime && _wclipMime.indexOf('mp4')!==-1) ? 'mp4' : 'webm';
+    const fname='snakepot-win-'+Date.now()+'.'+ext;
+    const who=((typeof getMyName==='function' && getMyName()) || 'A player');
+    const usd=(Number(_winShare.usd)||0).toFixed(2);
+    const sol=(Number(_winShare.sol)||0).toFixed(4);
+    const where = ST.lobbyUsd ? ('the $'+ST.lobbyUsd+' '+GAME_SERVER+' lobby') : 'Snake Pot';
+    let content='🏆 **'+String(who).slice(0,32)+'** just cashed out **$'+usd+'** ('+sol+' SOL) in '+where+'! 🐍💰';
+    if(_winShare.sig) content+='\n✅ Proof: https://explorer.solana.com/tx/'+_winShare.sig;
+    const fd=new FormData();
+    fd.append('content',content);
+    fd.append('file', blob, fname);
+    fetch(SS_WIN_WEBHOOK,{method:'POST',body:fd}).catch(()=>{});
+  }catch(_){ /* never let the feed break the result screen */ }
+}
+
 // ── Settings modal (keybinds + clip toggle) ────────────────────────────────────
 let _kbCapturing=false, _kbCapBtn=null, _kbCapAct=null;
 function _keyLabel(k){
@@ -6053,6 +6183,8 @@ function _renderSettings(){
     tb.textContent = !SS_IS_PC ? 'PC ONLY' : (on?'ON':'OFF');
     tb.style.color = !SS_IS_PC ? '#888' : (on?'#39FF14':'#FF4444');
   }
+  const wcOn=_wclipEnabled(); const wtb=document.getElementById('winclip-toggle-btn');
+  if(wtb){ wtb.textContent = wcOn?'ON':'OFF'; wtb.style.color = wcOn?'#39FF14':'#FF4444'; }
   const list=document.getElementById('keybind-list');
   if(list){
     list.innerHTML = SS_BIND_DEFS.map(d=>
@@ -6117,6 +6249,12 @@ function _toggleClip(){
   if(!SS_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
   if(localStorage.getItem('ss_clip_on')==='1'){ ssSetSetting('ss_clip_on',''); _clipStop(); }
   else{ ssSetSetting('ss_clip_on','1'); if(SG&&!SG.over&&!isSpectating)_clipStart(); }
+  _renderSettings();
+}
+function _toggleWinClip(){
+  // Default ON — store the OFF state as ss_winclip_off so a fresh player gets win-clips automatically.
+  if(_wclipEnabled()){ ssSetSetting('ss_winclip_off','1'); _wclipTeardown(); }
+  else{ ssSetSetting('ss_winclip_off',''); }
   _renderSettings();
 }
 // Global capture-phase listener: while rebinding, the next key press becomes the new binding.
@@ -6650,6 +6788,7 @@ window.addEventListener('blur',()=>_pttSet(false));
 function startCashout(){
   if(!SG||SG.over||_localDead||_cashoutActive)return;
   _cashoutActive=true; _cashoutStart=Date.now(); _myCashMs=0;
+  _wclipStart(); // auto-record the money moment (only runs during this locked circle — no gameplay cost)
   addToast('💰 CASHING OUT — circle up fully, then hold on!','#FFD700');
   // Live rooms: the SERVER runs the wind-in gate (timer only starts once the whole body is curled into the
   // circle) + 4s timer, then signals ss-cashout-done. NO local timer there or we'd pay before the body is
@@ -6729,6 +6868,9 @@ async function endSnakeGame(reason,killerId){
 
   const elim=reason==='eliminated';
   const cashed=reason==='cashout';
+  // Finalize the auto win-clip on a cashout (blob is ready by the time settle() returns below); throw it
+  // away on any other exit so we never keep a clip of a failed cashout or a death.
+  if(cashed) _wclipFinish(); else _wclipTeardown();
 
   // ALL eliminated: go straight to spectate — host loop stays alive if isHost, rafDraw continues for both.
   // Guests also spectate immediately (no result screen) so there's no black-screen flash.
@@ -6837,8 +6979,10 @@ async function endSnakeGame(reason,killerId){
         _payoutEl.textContent='💰 YOU RECEIVED $'+_netUsd.toFixed(2)+'  ('+_netSol.toFixed(4)+' SOL)';
         const _subEl=document.getElementById('rsub'); if(_subEl)_subEl.textContent='Sent to your wallet — 10% fee applied';
         // Arm the "Share my win" button with this cashout's real numbers + on-chain proof link.
-        _winShare={usd:_netUsd,sol:_netSol,sig:(_sd&&_sd.sig)||null};
+        _winShare={usd:_netUsd,sol:_netSol,sig:(_sd&&_sd.sig)||null,clip:_wclipBlob||null};
         const _shBtn=document.getElementById('btn-share-win'); if(_shBtn)_shBtn.style.display='';
+        _wclipDecorateShareBtn(); // label it 🎬 if the win-clip is ready (backfilled by onstop otherwise)
+        _wclipAutoPost(); // auto-feed the Discord wall-of-winners (no-op if the blob isn't ready yet — onstop retries)
       }else{
         // settle() returned null = the payout did NOT complete. Never claim it did.
         _payoutEl.textContent='⚠ Payout did not complete — your wager is still on record';
