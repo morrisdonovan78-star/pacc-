@@ -36,6 +36,9 @@ function verifyPlayerSig(sig, ts, action, playerAddress, wagerLamports) {
 
 const CREATOR_WALLET  = '2ZLqQww5koLr2J7PU54UwA7yNX4DRmMHMLAQjm411E7a';
 const CREATOR_FEE_PCT = 0.10;
+// Minimum accrued referral balance a referrer can withdraw. Keeps a single payout worth many times
+// its own ~5000-lamport network fee instead of dribbling out cent-sized transactions. ~0.002 SOL.
+const REF_MIN_CLAIM   = 2_000_000;
 const TX_FEE          = 5000;  // exact Solana base fee (5000 lamports × 1 signature, no priority fees)
 // Solana requires a system account's balance to be either exactly 0 OR >= RENT_MIN.
 // It must NEVER sit between 0 and RENT_MIN — that triggers InsufficientFundsForRent.
@@ -1128,7 +1131,9 @@ module.exports = async function handler(req, res) {
     // Only the real wallet owner can produce a valid signature.
     // 'solvency' joins 'balance' as unsigned: both are READ-ONLY views of public on-chain state
     // plus aggregate liability totals. No wallet is named, nothing is mutated, no funds move.
-    if (action !== 'balance' && action !== 'solvency') {
+    // 'ref-balance' is unsigned too: a referrer's accrued balance + stats are not secret and nothing
+    // moves — it's the read behind the streamer's earnings panel. The PAYOUT (ref-claim) is signed.
+    if (action !== 'balance' && action !== 'solvency' && action !== 'ref-balance') {
       const sig = req.headers['x-settle-sig'] || '';
       const ts  = req.headers['x-settle-ts']  || '';
       if (!verifyPlayerSig(sig, ts, action, playerAddress || '', wagerLamportsRaw)) {
@@ -1137,7 +1142,52 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // ── ref-balance: read-only view of a referrer's accrued earnings (unsigned) ───────────────────
+    if (action === 'ref-balance') {
+      if (!playerAddress) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'playerAddress required' }); }
+      const owed  = Math.floor(Number(await kvGet('refbal:' + playerAddress)) || 0);
+      const stats = (await kvHgetall('refstats:' + playerAddress)) || {};
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, owedLamports: owed, minClaimLamports: REF_MIN_CLAIM,
+        players: Number(stats.players) || 0, joins: Number(stats.joins) || 0,
+        accruedLamports: Number(stats.accrued) || 0, paidLamports: Number(stats.paid) || 0 });
+    }
+
     const esc = getEscrow();
+
+    // ── ref-claim: a referrer withdraws their accrued referral rewards ───────────────────────────
+    // The wallet signature above (action='ref-claim', playerAddress=referrer, wagerLamports=0) proves
+    // the caller owns the referrer wallet. Payment goes through wgPayOne, which is gated by the global
+    // solvency invariant — so a referral withdrawal can ONLY ever spend genuine surplus (unswept
+    // platform fees sitting in escrow) and can NEVER touch a player deposit or a bettor's stake. If
+    // there isn't enough surplus yet, the claim is refused and the balance stays intact to try later.
+    if (action === 'ref-claim') {
+      if (!playerAddress) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'playerAddress required' }); }
+      // One claim at a time per wallet, so two concurrent claims can't both read the balance and pay.
+      const rcLock = await kvSetNX('lock:rc:' + playerAddress, '1', 20);
+      if (!rcLock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'Claim already in progress — try again shortly' }); }
+      try {
+        // GETDEL: read and zero the balance atomically, so a retry or a race can't double-pay.
+        const owed = Math.floor(Number(await kvGetDel('refbal:' + playerAddress)) || 0);
+        if (owed <= 0) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Nothing to claim yet' }); }
+        // Don't send a payout worth less than a few network fees — leave it accruing until it's worth it.
+        if (owed < REF_MIN_CLAIM) {
+          await kvIncrby('refbal:' + playerAddress, owed).catch(() => {}); // put it back
+          clearTimeout(guard); done = true;
+          return res.status(400).json({ error: 'Below minimum claim (' + (REF_MIN_CLAIM / 1e9).toFixed(4) + ' SOL) — keep earning', owedLamports: owed, minLamports: REF_MIN_CLAIM });
+        }
+        const pay = await wgPayOne(esc, playerAddress, owed, 'ref-claim');
+        if (!pay.ok) {
+          // Payout didn't happen (insolvent surplus / send failure) — restore the balance, lose nothing.
+          await kvIncrby('refbal:' + playerAddress, owed).catch(() => {});
+          clearTimeout(guard); done = true;
+          return res.status(503).json({ error: 'Payout temporarily unavailable — your balance is safe, try again shortly', retry: true });
+        }
+        await kvHincrby('refstats:' + playerAddress, 'paid', owed).catch(() => {});
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true, paidLamports: owed, sig: pay.sig, confirmed: pay.confirmed });
+      } finally { await kvDel('lock:rc:' + playerAddress).catch(() => {}); }
+    }
 
     // ── wager-create: a spectator opens a P2P wager and escrows their stake ──────────────────────
     // Layered auth: the wallet signature above proves ownership; the snake's GAME_SECRET signature

@@ -1,8 +1,14 @@
 'use strict';
 // api/leaderboard.js — GET top-20 players; POST to register/update display name
 const crypto = require('crypto');   // private-lobby handshake token (see the lobby-* actions)
-const { kvGet, kvSetPerm, kvDel, kvZadd, kvZrem, kvZrevrange,
+const { kvGet, kvSet, kvSetPerm, kvDel, kvZadd, kvZrem, kvZrevrange,
         kvHget, kvHset, kvHgetall, kvLrange } = require('../lib/kv');
+
+// Seconds the top-20 board is served from a precomputed blob. Building it live costs ~60 KV
+// commands and it is the most-refreshed endpoint on the site; that combination is what exhausted
+// the KV request budget and took payouts down with it. The board is a vanity ranking, so being a
+// few seconds stale is invisible to players.
+const LB_CACHE_TTL = 30;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -430,6 +436,21 @@ module.exports = async function handler(req, res) {
 
   // ── GET — top-20 leaderboard (per game) ─────────────────────────────────────
   try {
+    // Serve the precomputed blob when it is warm: one GET instead of ~60 commands. Only this
+    // no-params branch is cached — the ?address / ?search / ?resolve branches returned earlier and
+    // are per-player, so they must never share this key.
+    const cacheKey = 'lbcache:' + game;
+    const cached = await kvGet(cacheKey);
+    if (cached) {
+      try {
+        const hit = typeof cached === 'string' ? JSON.parse(cached) : cached;
+        if (hit && Array.isArray(hit.players)) {
+          res.setHeader('X-LB-Cache', 'HIT');
+          return res.status(200).json(hit);
+        }
+      } catch (_) { /* corrupt entry — fall through and rebuild it */ }
+    }
+
     const raw = await kvZrevrange('lb:' + game + ':earned', 0, 19) || [];
 
     const pairs = [];
@@ -459,7 +480,15 @@ module.exports = async function handler(req, res) {
       };
     });
 
-    return res.status(200).json({ game, players, global });
+    const payload = { game, players, global };
+    // Best-effort store — a cache write that fails must never fail the request. Only cache a board
+    // that actually built; caching an empty one during a KV wobble would pin the outage for the
+    // whole TTL, which is exactly the failure mode this endpoint just lived through.
+    if (players.length > 0) {
+      try { await kvSet(cacheKey, JSON.stringify(payload), LB_CACHE_TTL); } catch (_) {}
+    }
+    res.setHeader('X-LB-Cache', 'MISS');
+    return res.status(200).json(payload);
   } catch (err) {
     console.error('[leaderboard]', err);
     return res.status(500).json({ error: 'Internal server error' });

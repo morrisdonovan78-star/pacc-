@@ -6,7 +6,7 @@
 
 const nacl   = require('tweetnacl');
 const crypto = require('crypto');
-const { kvGet, kvSet, kvDel, kvSetPerm, kvZadd, kvZrem, kvHincrby, kvHget, kvHset } = require('../lib/kv');
+const { kvGet, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvHincrby, kvIncrby, kvHget, kvHset } = require('../lib/kv');
 
 // Game token — HMAC-signed proof of payment for the Socket.io game server.
 // Format matches server.js makeGameToken() so the server can validate it.
@@ -30,6 +30,50 @@ function makeEntryToken(walletAddress, lobbyId) {
 }
 
 const ESCROW_PUBKEY = '2SYFfCsSmKr8qwK1AfWd36JtAc1BCaRaSSxyECKUJjBb';
+
+// ── Referral program ────────────────────────────────────────────────────────────────────────────
+// Invite-only: a referrer earns a tiny reward EACH time a player they referred completes a real
+// (paid) join, for REF_WINDOW_MS after that player was first referred. Only owner-minted codes
+// (refcode:<CODE> in KV) work — there is no public sign-up. The reward is a flat lamport amount,
+// NOT a live-priced cent, so the hot join path never has to fetch a price; retune the constant if
+// the SOL price drifts far or streamers want more. It is a promise-to-pay counter only — no SOL
+// moves here; the referrer withdraws an accrued balance later through the solvency-gated ref-claim
+// action in settle.js, which can only ever spend surplus platform fees, never player deposits.
+const REF_WINDOW_MS       = 90 * 24 * 60 * 60 * 1000; // 3 months from first referral
+const REF_BIND_TTL_SEC    = 100 * 24 * 60 * 60;       // refby lives a bit past the window, then self-cleans
+const REF_REWARD_LAMPORTS = 66667;                    // ~1¢ at ~$150 SOL — tune freely, it's a bonus
+const normalizeCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 24);
+
+// First-touch bind + per-join accrual. Fully wrapped by the caller's try/catch AND its own — the
+// referral program must NEVER be able to fail a legitimate paid join.
+async function accrueReferral(playerWallet, refCodeRaw) {
+  // Resolve who (if anyone) this player is referred by. First touch wins and is permanent.
+  let bind = null;
+  try { const raw = await kvGet('refby:' + playerWallet); if (raw) bind = JSON.parse(raw); } catch (_) {}
+
+  if (!bind) {
+    const code = normalizeCode(refCodeRaw);
+    if (!code) return;                                   // no code, never referred → nothing to do
+    const referrer = await kvGet('refcode:' + code);     // owner-minted code → referrer wallet
+    if (!referrer) return;                               // unknown/void code
+    if (referrer === playerWallet) return;               // cannot refer yourself
+    bind = { code, ref: referrer, ts: Date.now() };
+    // NX so two concurrent first-joins can't double-bind; if we lost the race, reload the winner.
+    // TTL outlives the reward window by a margin, then self-cleans (an expired bind can never
+    // over-pay anyway — the window is re-checked against bind.ts below on every accrual).
+    const set = await kvSetNX('refby:' + playerWallet, JSON.stringify(bind), REF_BIND_TTL_SEC);
+    if (!set) { try { bind = JSON.parse(await kvGet('refby:' + playerWallet)); } catch (_) { return; } }
+    else { await kvHincrby('refstats:' + bind.ref, 'players', 1).catch(() => {}); }
+  }
+
+  if (!bind || !bind.ref) return;
+  if (Date.now() - Number(bind.ts || 0) > REF_WINDOW_MS) return; // 3-month window elapsed
+
+  // Accrue the reward. refbal is the withdrawable balance; refstats is the streamer's dashboard.
+  await kvIncrby('refbal:' + bind.ref, REF_REWARD_LAMPORTS).catch(() => {});
+  await kvHincrby('refstats:' + bind.ref, 'joins', 1).catch(() => {});
+  await kvHincrby('refstats:' + bind.ref, 'accrued', REF_REWARD_LAMPORTS).catch(() => {});
+}
 
 // Issues a short-lived Ably token with capability ONLY for the specific paid lobby channel.
 // ably-token.js issues free-lobby-only tokens — paid tokens must come through here (post-deposit).
@@ -190,7 +234,7 @@ module.exports = async function handler(req, res) {
     if (typeof body === 'string') try { body = JSON.parse(body); } catch (_) { return res.status(400).json({ error: 'Bad JSON' }); }
     body = body || {};
 
-    const { walletAddress, wagerLamports, txSig, lobbyId, playerName } = body;
+    const { walletAddress, wagerLamports, txSig, lobbyId, playerName, refCode } = body;
     const sig = req.headers['x-settle-sig'] || '';
     const ts  = req.headers['x-settle-ts']  || '';
     const lamps = Number(wagerLamports) || 0;
@@ -289,6 +333,9 @@ module.exports = async function handler(req, res) {
       await kvHincrby('ph:'+game+':global','gamesPlayed',1);
     }catch(_){}
 
+    // Referral accrual — never allowed to fail the join (own try/catch + best-effort writes inside).
+    try{ await accrueReferral(walletAddress, refCode); }catch(_){}
+
     // Issue a game token — HMAC-signed proof of payment for the Socket.io server.
     // The Socket.io server validates this on connection; without it paid lobbies are rejected.
     // ss-paid-* are the snake game's paid rooms (authoritative sim); paid-lobby-* are legacy Pac-Man rooms.
@@ -302,3 +349,7 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: e.message });
   }
 };
+
+// Exported for unit testing the referral accrual logic in isolation (see scripts/test-referral.js).
+module.exports.accrueReferral = accrueReferral;
+module.exports._refConsts = { REF_WINDOW_MS, REF_REWARD_LAMPORTS };

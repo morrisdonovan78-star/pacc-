@@ -11,7 +11,7 @@
 //                    (set the SAME value in PM2 env on Vultr: ADMIN_SECRET=...)
 const crypto = require('crypto');
 const { kvGet, kvSet, kvSetPerm, kvDel, kvHgetall, kvHset,
-        kvZadd, kvZrevrange, kvZrem,
+        kvZadd, kvZrevrange, kvZrem, kvScan,
         kvLpush, kvLtrim, kvLrange } = require('../lib/kv');
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -178,6 +178,45 @@ module.exports = async function handler(req, res) {
 
   if (action === 'status') {
     return res.json({ servers: await callAllServers('status', 'GET') });
+  }
+
+  // ── Referral codes (invite-only) ────────────────────────────────────────────
+  // Owner-minted only: a code exists in KV only because the owner created it here, so nobody but
+  // the people the owner hands a code to can ever earn a referral reward. See accrueReferral in
+  // api/join.js (accrues) and the ref-claim action in api/settle.js (pays out, solvency-gated).
+  if (action === 'ref-mint') {
+    const code = String(req.body.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 24);
+    const referrer = String(req.body.referrer || '').trim();
+    if (!code || code.length < 3) return res.status(400).json({ error: 'code must be 3–24 letters/digits' });
+    if (!referrer) return res.status(400).json({ error: 'referrer wallet required' });
+    const existing = await kvGet('refcode:' + code);
+    if (existing && existing !== referrer) return res.status(409).json({ error: 'code already assigned to ' + existing });
+    await kvSetPerm('refcode:' + code, referrer);
+    await logAction('ref-mint', referrer, code);
+    return res.json({ ok: true, code, referrer, link: 'https://snakepot.com/play?ref=' + code });
+  }
+
+  if (action === 'ref-list') {
+    // Enumerate every minted code with its referrer + live stats, for the owner's dashboard.
+    const keys = await kvScan('refcode:*');
+    const out = [];
+    for (const k of keys) {
+      const codeName = k.slice('refcode:'.length);
+      const referrer = await kvGet(k);
+      const stats = (await kvHgetall('refstats:' + referrer)) || {};
+      const owed = Number(await kvGet('refbal:' + referrer)) || 0;
+      out.push({ code: codeName, referrer, players: Number(stats.players) || 0,
+                 joins: Number(stats.joins) || 0, accrued: Number(stats.accrued) || 0, owedLamports: owed });
+    }
+    return res.json({ ok: true, codes: out });
+  }
+
+  if (action === 'ref-void') {
+    const code = String(req.body.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 24);
+    if (!code) return res.status(400).json({ error: 'code required' });
+    await kvDel('refcode:' + code);
+    await logAction('ref-void', '', code);
+    return res.json({ ok: true, voided: code });
   }
 
   if (action === 'kick') {
