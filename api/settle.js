@@ -47,7 +47,10 @@ const REF_MIN_CLAIM   = 2_000_000;
 // channel. If the var is unset the whole feature is silently off — nothing changes. Set it in
 // Vercel: DISCORD_WINS_WEBHOOK = the URL from Discord → channel → Integrations → Webhooks.
 const DISCORD_WINS_WEBHOOK = (process.env.DISCORD_WINS_WEBHOOK || '').trim();
-const WIN_POST_MIN_LAMPORTS = 5_000_000; // ~$0.75+ — don't announce dust cashouts
+const WIN_POST_MIN_USD = 1.50;          // only announce cashouts worth at least this many dollars
+const WIN_POST_MIN_SOL_FALLBACK = 0.02; // ~$1.50 at a typical SOL price — used only if the price
+                                        // feed is momentarily unavailable, so a price hiccup neither
+                                        // spams the channel nor silently suppresses every win
 
 // Best-effort SOL/USD for the embed. Tries multiple sources in order (first success wins) so the
 // USD figure reliably shows. ORDER MATTERS: Binance geo-blocks US IPs and Vercel functions run in
@@ -76,11 +79,15 @@ async function solUsdQuick() {
 // out (wager + winnings) — the figure they actually saw, and the honest social-proof number.
 async function postWinToDiscord(grossLamports, name, sig) {
   if (!DISCORD_WINS_WEBHOOK) return;
-  if (!(grossLamports >= WIN_POST_MIN_LAMPORTS)) return;
+  const sol = grossLamports / 1e9;
+  const price = await solUsdQuick();
+  const usdVal = price ? sol * price : null;
+  // USD gate: only announce cashouts >= $1.50. When the price feed is up we compare real dollars;
+  // if it's momentarily down we fall back to an approximate SOL floor so a hiccup doesn't misbehave.
+  if (usdVal != null) { if (usdVal < WIN_POST_MIN_USD) return; }
+  else { if (sol < WIN_POST_MIN_SOL_FALLBACK) return; }
   try {
-    const sol = grossLamports / 1e9;
-    const price = await solUsdQuick();
-    const usd = price ? '$' + (sol * price).toFixed(2) : null;
+    const usd = usdVal != null ? '$' + usdVal.toFixed(2) : null;
     const who = (name && String(name).trim()) ? String(name).trim().slice(0, 20) : 'A player';
     const amount = usd ? (usd + '  (' + sol.toFixed(3) + ' SOL)') : (sol.toFixed(3) + ' SOL');
     const explorer = 'https://explorer.solana.com/tx/' + sig;

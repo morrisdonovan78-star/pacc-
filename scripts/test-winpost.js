@@ -33,10 +33,18 @@ const ok = (c, m) => { if (c) pass++; else { fail++; console.error('  FAIL ' + m
   ok(e && e.description.includes('explorer.solana.com/tx/SIG123'), 'includes on-chain proof link');
   ok(e && e.description.includes('snakepot.com/play'), 'includes play link');
 
-  // 2. Below threshold → silent (no dust spam)
+  // 2. Below the $1.50 USD gate → silent (price stub is $150/SOL)
   calls.length = 0;
-  await settle.postWinToDiscord(1_000_000, 'SMALL', 'SIGX'); // 0.001 SOL
-  ok(calls.length === 0, 'silent below threshold');
+  await settle.postWinToDiscord(1_000_000, 'SMALL', 'SIGX'); // 0.001 SOL = $0.15
+  ok(calls.length === 0, 'silent below $1.50');
+
+  // 2b. Just under $1.50 → silent; exactly $1.50 → posts (boundary at $150/SOL)
+  calls.length = 0;
+  await settle.postWinToDiscord(9_000_000, 'A', 'S'); // 0.009 SOL = $1.35
+  ok(calls.length === 0, '$1.35 stays silent');
+  calls.length = 0;
+  await settle.postWinToDiscord(10_000_000, 'B', 'S'); // 0.010 SOL = $1.50
+  ok(calls.length === 1, '$1.50 posts');
 
   // 3. No name → falls back to "A player"
   calls.length = 0;
