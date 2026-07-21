@@ -1096,10 +1096,11 @@ body.mctl #voice-speakers{left:150px;}
       <div class="rstat"><div class="rsl">WAGER</div><div class="rsv hc" id="rs-wager">FREE</div></div>
       <div class="rstat"><div class="rsl">RESULT</div><div class="rsv" id="rs-result">--</div></div>
     </div>
-    <!-- Share my win — shown only after a real cashout (populated in the result flow). Opens X/Twitter
-         with a prefilled brag + the on-chain proof link, turning every winner into a recruiter. -->
-    <button class="btn btn-y" id="btn-share-win" style="display:none;width:100%;" onclick="shareMyWin()">📢 SHARE MY WIN</button>
     <div class="rbtns">
+      <!-- Share my win — full-width row on top, shown only after a real cashout (armed in the result
+           flow). Lives INSIDE .rbtns so it gets the same gap as the other buttons (no overlap). Opens
+           X/Twitter with a prefilled brag + on-chain proof link, turning every winner into a recruiter. -->
+      <button class="btn btn-y" id="btn-share-win" style="display:none;flex:1 0 100%;" onclick="shareMyWin()">📢 SHARE MY WIN</button>
       <button class="btn btn-g" onclick="go('scr-lobby');populateLobby();">▶ PLAY AGAIN</button>
       <button class="btn btn-y" id="btn-spectate" style="display:none" onclick="enterSpectate()">👁 SPECTATE</button>
       <button class="btn btn-g" id="btn-rejoin" style="display:none" onclick="rejoinGame()">↩ REJOIN</button>
