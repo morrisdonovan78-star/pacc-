@@ -494,6 +494,17 @@ body.mctl #voice-speakers{left:150px;}
         <!-- Card option — hidden entirely unless SS_MOONPAY_KEY is set. Same wallet as above. -->
         <button id="mp-buy-btn" class="copy-btn" onclick="_mpInfo('buy')" style="display:none;width:100%;margin-top:7px;border-color:rgba(0,207,255,.45);color:#00CFFF;">💳 OR ADD WITH CARD</button>
       </div>
+      <!-- Referral earnings — for streamers/partners the owner minted a code for. Hidden until there
+           is something to show (refCheck reveals it only when this wallet has referral activity). -->
+      <div style="margin-top:10px;text-align:center;">
+        <button class="tico sm" onclick="refCheck()" style="font-size:9px;opacity:.7;">💸 Referral earnings</button>
+      </div>
+      <div id="ref-box" style="display:none;margin-top:8px;background:rgba(0,0,0,.35);border:1px solid rgba(255,215,0,.3);border-radius:8px;padding:10px;">
+        <div style="font-family:'Press Start 2P',monospace;font-size:6px;color:var(--muted);margin-bottom:6px;">REFERRAL EARNINGS</div>
+        <div id="ref-owed" style="font-family:'Press Start 2P',monospace;font-size:11px;color:#FFD700;margin-bottom:4px;">-- SOL</div>
+        <div id="ref-stats" style="font-size:10px;color:var(--muted);margin-bottom:8px;">--</div>
+        <button id="ref-claim-btn" class="btn btn-g btn-sm" style="width:100%;margin:0;" onclick="refClaim()">CLAIM</button>
+      </div>
     </div>
     <div class="panel" id="pnl-cust">
       <div class="p-head"><span class="p-title">🎨 CUSTOMIZE</span></div>
@@ -2292,9 +2303,12 @@ async function recordWager(walletAddress,wagerLamports,txSig,lobbyId,playerName)
   const _jmsg=new TextEncoder().encode('pac-arena:join:'+walletAddress+':'+wagerLamports+':'+ts);
   const _jsigBytes=nacl.sign.detached(_jmsg,_keypair.secretKey);
   const sig=btoa(String.fromCharCode(..._jsigBytes));
+  // Referral code captured from a streamer's ?ref= link (see _captureRef). Only bites on the
+  // player's FIRST paid join server-side; harmless to send every time (ignored once bound).
+  const refCode=(()=>{ try{ return localStorage.getItem('ss_ref')||''; }catch(_){ return ''; } })();
   // Route through Vercel — has on-chain tx verification, replay guard, ban check, game token
   const r=await fetch('/api/join',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':sig,'x-settle-ts':String(ts)},
-    body:JSON.stringify({walletAddress,wagerLamports,txSig,lobbyId,playerName:playerName||''})});
+    body:JSON.stringify({walletAddress,wagerLamports,txSig,lobbyId,playerName:playerName||'',refCode})});
   const d=await r.json().catch(()=>({}));
   if(!r.ok)throw new Error(d.error||'join failed');
   return d;
@@ -2535,6 +2549,53 @@ function wdClose(){
   if(_wdBusy){ addToast('Withdrawal in progress — please wait','#FFD700'); return; }
   document.getElementById('wd-modal').style.display='none';
 }
+// ── Referral earnings (streamers/partners) ───────────────────────────────────
+// Reveals accrued referral rewards for this wallet and lets the referrer withdraw them. The read is
+// unsigned (public info); the CLAIM is signed like every other payout and the server pays it only
+// from surplus platform fees (solvency-gated), never from player deposits.
+let _refBusy=false;
+async function refCheck(){
+  if(!ST.address){ addToast('Connect your wallet first','#f55'); return; }
+  try{
+    const r=await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'ref-balance',playerAddress:ST.address})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ addToast(d.error||'Could not load earnings','#f55'); return; }
+    // No activity at all → tell them plainly instead of showing an empty box.
+    if((d.joins||0)===0 && (d.owedLamports||0)===0 && (d.paidLamports||0)===0){
+      addToast('No referral earnings yet — share your link to start earning','#FFD700',4000); return;
+    }
+    const owedSol=(d.owedLamports||0)/1e9;
+    const owedUsd=(ST.solPrice>0)?owedSol*ST.solPrice:0;
+    document.getElementById('ref-owed').textContent='$'+owedUsd.toFixed(2)+'  ('+owedSol.toFixed(4)+' SOL)';
+    document.getElementById('ref-stats').textContent=(d.players||0)+' players • '+(d.joins||0)+' paid joins • $'+(((d.paidLamports||0)/1e9)*(ST.solPrice||0)).toFixed(2)+' claimed';
+    const canClaim=(d.owedLamports||0)>=(d.minClaimLamports||0);
+    const btn=document.getElementById('ref-claim-btn');
+    btn.disabled=!canClaim;
+    btn.textContent=canClaim?'CLAIM $'+owedUsd.toFixed(2):'MIN '+((d.minClaimLamports||0)/1e9).toFixed(4)+' SOL TO CLAIM';
+    btn.style.opacity=canClaim?'1':'.5';
+    document.getElementById('ref-box').style.display='block';
+  }catch(e){ addToast('Could not load earnings','#f55'); }
+}
+async function refClaim(){
+  if(_refBusy){ addToast('Claim in progress…','#FFD700'); return; }
+  if(!_keypair||!ST.address){ addToast('Wallet not loaded','#f55'); return; }
+  _refBusy=true;
+  try{
+    const ts=Math.floor(Date.now()/1000);
+    const _msg=new TextEncoder().encode('pac-arena:ref-claim:'+ST.address+':0:'+ts);
+    const _sig=btoa(String.fromCharCode(...nacl.sign.detached(_msg,_keypair.secretKey)));
+    const r=await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':_sig,'x-settle-ts':String(ts)},
+      body:JSON.stringify({action:'ref-claim',playerAddress:ST.address,wagerLamports:0})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ addToast(d.error||'Claim failed','#f55',6000); return; }
+    const sol=(d.paidLamports||0)/1e9;
+    addToast('✓ Claimed '+sol.toFixed(4)+' SOL to your wallet','#39FF14',6000);
+    await refCheck().catch(()=>{});
+    await refreshBal().catch(()=>{});
+  }catch(e){ addToast('Claim failed: '+(e.message||e),'#f55',6000); }
+  finally{ _refBusy=false; }
+}
 async function doWithdraw(){
   if(_wdBusy){ addToast('Withdrawal already in progress — please wait','#FFD700'); return; }
   const toAddr=document.getElementById('wd-addr').value.trim();
@@ -2626,9 +2687,16 @@ async function doWithdraw(){
 // ⚠️ Paste your PUBLISHABLE key from dashboard.moonpay.com. EMPTY = the whole feature stays hidden
 // and the wallet behaves exactly as it does today, so shipping this with no key changes nothing.
 // pk_test_… automatically targets the sandbox; pk_live_… targets production.
+// MoonPay disabled — KYB denied for this game. Empty key hides the entire card feature; the wallet
+// stays SOL-only and this is inert until a card provider that accepts the game is wired in.
 const SS_MOONPAY_KEY = '';
-function _mpOn(){ return !!SS_MOONPAY_KEY; }
 function _mpSandbox(){ return SS_MOONPAY_KEY.indexOf('pk_test') === 0; }
+// ⚠️ A pk_test_ key ONLY accepts MoonPay's simulated cards — a real Visa is declined. Showing the
+// card buttons to everyone while a test key is configured would hand real players a payment option
+// that cannot work, so TEST keys are owner-only: the full flow is runnable on the live site while
+// nobody else ever sees the buttons. Swapping in a pk_live_ key (available once MoonPay approves
+// the KYB) opens it to everyone automatically — no other change needed.
+function _mpOn(){ return !!SS_MOONPAY_KEY; }
 function _mpUrl(mode, extra){
   const host = mode==='sell'
     ? (_mpSandbox()?'https://sell-sandbox.moonpay.com':'https://sell.moonpay.com')
@@ -8518,6 +8586,11 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   // land you watching, logged in or not; hitting PLAY NOW from there goes to the normal flow.
   try{
     const qp=new URLSearchParams(location.search);
+    // Capture a referral code from a streamer's link (?ref=CODE) and remember it. It rides the
+    // player's first PAID join (recordWager) and only ever binds once, server-side. Stored, not
+    // consumed here, because the player may land via the link now but not deposit until later.
+    const _ref=(qp.get('ref')||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,24);
+    if(_ref){ try{ if(!localStorage.getItem('ss_ref')) localStorage.setItem('ss_ref',_ref); }catch(_){} }
     if(qp.get('watch')==='1'){
       const region=(qp.get('region')||'NA').toUpperCase()==='EU'?'EU':'NA';
       const tier=qp.get('tier')==='5'?5:1;
