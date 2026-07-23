@@ -44,6 +44,38 @@ const KILL_EVENTS = [
   { id: 'bounty-2026-07-25', start: Date.UTC(2026, 6, 25, 18, 0, 0), end: Date.UTC(2026, 6, 25, 19, 0, 0) },
 ];
 function activeKillEvent(now) { now = now || Date.now(); return KILL_EVENTS.find(e => now >= e.start && now < e.end) || null; }
+
+// ── Recruiter of the Week — rolling 7-day contest. weekId buckets all recruit counts so a new week
+// starts clean automatically. Anchor = Thu Jul 23 2026 00:00 America/Detroit (04:00 UTC, EDT).
+// KEEP RECRUIT_ANCHOR in sync with join.js (qualification counting writes recruit:<weekId>).
+const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 23, 4, 0, 0);
+const RECRUIT_WEEK_MS = 7 * 24 * 3600 * 1000;
+function recruitWeek(now) { now = now || Date.now();
+  const i = Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS);
+  return { id: 'rw' + i, start: RECRUIT_ANCHOR + i * RECRUIT_WEEK_MS, end: RECRUIT_ANCHOR + (i + 1) * RECRUIT_WEEK_MS }; }
+// Stable 6-char code from a wallet (no I/O/0/1 → unambiguous, human-typeable).
+function refCodeFor(seed) {
+  const h = crypto.createHash('sha256').update('refcode|' + seed).digest();
+  const AL = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let c = ''; for (let i = 0; i < 6; i++) c += AL[h[i] % 32];
+  return c;
+}
+// Ensure a wallet has a registered referral code; returns it. Collision-safe (salts on clash).
+async function ensureRefCode(wallet) {
+  let code = await kvGet('wref:' + wallet).catch(() => null);
+  if (code) return code;
+  code = refCodeFor(wallet);
+  let ok = await kvSetNX('refcode:' + code, wallet);
+  let tries = 0;
+  while (!ok && tries < 6) {
+    const ex = await kvGet('refcode:' + code).catch(() => null);
+    if (ex === wallet) { ok = true; break; }
+    code = refCodeFor(wallet + ':' + (++tries));
+    ok = await kvSetNX('refcode:' + code, wallet);
+  }
+  await kvSet('wref:' + wallet, code).catch(() => {});
+  return code;
+}
 // Minimum accrued referral balance a referrer can withdraw. Keeps a single payout worth many times
 // its own ~5000-lamport network fee instead of dribbling out cent-sized transactions. ~0.002 SOL.
 const REF_MIN_CLAIM   = 2_000_000;
@@ -919,6 +951,37 @@ module.exports = async function handler(req, res) {
         active: true, state, id: ev.id, startsAt: ev.start, endsAt: ev.end,
         top: top.map(r => ({ name: r.name || (r.addr.slice(0, 4) + '…' + r.addr.slice(-4)), kills: r.kills })),
         you: { rank: youRank, kills: youKills, onBoard: youRank > 0 },
+      });
+    }
+
+    // ── my-refcode: a player's own invite code/link + their qualified-recruit count this week ───────
+    if (action === 'my-refcode') {
+      const w = String(body.playerAddress || '').trim();
+      clearTimeout(guard); done = true;
+      if (!w || w.length < 20) return res.status(400).json({ error: 'playerAddress required' });
+      const code = await ensureRefCode(w);
+      const wk = recruitWeek();
+      const mine = parseInt(await kvHget('recruit:' + wk.id, w).catch(() => 0)) || 0;
+      return res.status(200).json({ code, link: 'https://snakepot.com/?ref=' + code,
+        recruits: mine, weekStart: wk.start, weekEnd: wk.end });
+    }
+
+    // ── recruiter-board: this week's Recruiter-of-the-Week standings (unsigned read) ──────────────
+    if (action === 'recruiter-board') {
+      const wk = recruitWeek();
+      clearTimeout(guard); done = true;
+      const h = (await kvHgetall('recruit:' + wk.id).catch(() => null)) || {};
+      const rows = Object.keys(h).map(a => ({ addr: a, n: parseInt(h[a]) || 0 }))
+                         .filter(r => r.n > 0).sort((a, b) => b.n - a.n);
+      const you = String(body.playerAddress || '').trim();
+      let youRank = 0, youN = 0;
+      for (let i = 0; i < rows.length; i++) { if (rows[i].addr === you) { youRank = i + 1; youN = rows[i].n; break; } }
+      const top = rows.slice(0, 10);
+      await Promise.all(top.map(async r => { try { r.name = (await kvHget('ph:' + r.addr, 'name')) || ''; } catch (_) { r.name = ''; } }));
+      return res.status(200).json({
+        weekStart: wk.start, weekEnd: wk.end, prize: 10,
+        top: top.map(r => ({ name: r.name || (r.addr.slice(0, 4) + '…' + r.addr.slice(-4)), recruits: r.n })),
+        you: { rank: youRank, recruits: youN, onBoard: youRank > 0 },
       });
     }
 

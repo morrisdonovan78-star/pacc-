@@ -44,9 +44,17 @@ const REF_BIND_TTL_SEC    = 100 * 24 * 60 * 60;       // refby lives a bit past 
 const REF_REWARD_LAMPORTS = 66667;                    // ~1¢ at ~$150 SOL — tune freely, it's a bonus
 const normalizeCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 24);
 
+// ── Recruiter of the Week — a referred player only COUNTS as a qualified recruit once their
+// cumulative PAID wager crosses this threshold (real money at risk = the anti-alt wall). Rolling
+// 7-day weeks bucket the counts. KEEP RECRUIT_ANCHOR in sync with api/settle.js recruitWeek().
+const RECRUIT_QUALIFY_LAMPORTS = 60000000;            // ~0.06 SOL (~$9-10) of real wagering
+const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 23, 4, 0, 0); // Thu Jul 23 2026 00:00 America/Detroit
+const RECRUIT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+function recruitWeekId(now) { now = now || Date.now(); return 'rw' + Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS); }
+
 // First-touch bind + per-join accrual. Fully wrapped by the caller's try/catch AND its own — the
 // referral program must NEVER be able to fail a legitimate paid join.
-async function accrueReferral(playerWallet, refCodeRaw) {
+async function accrueReferral(playerWallet, refCodeRaw, wagerLamports) {
   // Resolve who (if anyone) this player is referred by. First touch wins and is permanent.
   let bind = null;
   try { const raw = await kvGet('refby:' + playerWallet); if (raw) bind = JSON.parse(raw); } catch (_) {}
@@ -73,6 +81,18 @@ async function accrueReferral(playerWallet, refCodeRaw) {
   await kvIncrby('refbal:' + bind.ref, REF_REWARD_LAMPORTS).catch(() => {});
   await kvHincrby('refstats:' + bind.ref, 'joins', 1).catch(() => {});
   await kvHincrby('refstats:' + bind.ref, 'accrued', REF_REWARD_LAMPORTS).catch(() => {});
+
+  // Recruiter of the Week: count this referee ONCE for their referrer, the first time their
+  // cumulative paid wager crosses the qualify threshold. NX flag makes it exactly-once even under
+  // concurrent joins. (Same-wallet self-referral is already impossible — blocked at bind above.)
+  try {
+    if (!(await kvGet('refq:' + playerWallet))) {
+      const tot = await kvIncrby('refwag:' + playerWallet, Number(wagerLamports) || 0);
+      if (tot >= RECRUIT_QUALIFY_LAMPORTS && await kvSetNX('refq:' + playerWallet, String(Date.now()))) {
+        await kvHincrby('recruit:' + recruitWeekId(), bind.ref, 1).catch(() => {});
+      }
+    }
+  } catch (_) {}
 }
 
 // Issues a short-lived Ably token with capability ONLY for the specific paid lobby channel.
@@ -334,7 +354,7 @@ module.exports = async function handler(req, res) {
     }catch(_){}
 
     // Referral accrual — never allowed to fail the join (own try/catch + best-effort writes inside).
-    try{ await accrueReferral(walletAddress, refCode); }catch(_){}
+    try{ await accrueReferral(walletAddress, refCode, lamps); }catch(_){}
 
     // Issue a game token — HMAC-signed proof of payment for the Socket.io server.
     // The Socket.io server validates this on connection; without it paid lobbies are rejected.
@@ -352,4 +372,4 @@ module.exports = async function handler(req, res) {
 
 // Exported for unit testing the referral accrual logic in isolation (see scripts/test-referral.js).
 module.exports.accrueReferral = accrueReferral;
-module.exports._refConsts = { REF_WINDOW_MS, REF_REWARD_LAMPORTS };
+module.exports._refConsts = { REF_WINDOW_MS, REF_REWARD_LAMPORTS, RECRUIT_QUALIFY_LAMPORTS, recruitWeekId };

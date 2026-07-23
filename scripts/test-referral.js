@@ -71,6 +71,19 @@ const reset = () => store.clear();
   await join.accrueReferral(P, null);
   eq(bal(), 0, 'join after window pays nothing');
 
+  // 7. Recruiter-of-the-Week qualification — a referee counts ONCE for the referrer past the threshold
+  reset();
+  store.set('refcode:REC', R);
+  const { RECRUIT_QUALIFY_LAMPORTS, recruitWeekId } = join._refConsts;
+  const half = Math.floor(RECRUIT_QUALIFY_LAMPORTS / 2) + 1;
+  const rkey = 'recruit:' + recruitWeekId();
+  await join.accrueReferral(P, 'REC', half);   // below threshold → not yet counted
+  eq((store.get(rkey) || {})[R] || 0, 0, 'below-threshold recruit not counted');
+  await join.accrueReferral(P, null, half);    // crosses threshold → counts once
+  eq((store.get(rkey) || {})[R] || 0, 1, 'crossing threshold counts the recruit once');
+  await join.accrueReferral(P, null, half);    // more joins must NOT double-count
+  eq((store.get(rkey) || {})[R] || 0, 1, 'already-qualified recruit is not re-counted');
+
   console.log((fail === 0 ? '✓ ALL PASS' : '✗ FAILURES') + ' — ' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail === 0 ? 0 : 1);
 })();
