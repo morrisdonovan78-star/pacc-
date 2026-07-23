@@ -127,6 +127,34 @@ async function settleBounty(ev, opts) {
   try { await postEventWinners('🏆 **BOUNTY HOUR RESULTS**', paid); } catch (_) {}
   return { ok: true, result };
 }
+
+// Settle a Recruiter-of-the-Week: pay the single top referrer $10 from the float. Same solvency +
+// once-only guarantees as settleBounty (one week-scoped NX lock; a failed send releases it to retry).
+async function settleRecruiter(wk, opts) {
+  const dryRun = !!(opts && opts.dryRun);
+  const h = (await kvHgetall('recruit:' + wk.id).catch(() => null)) || {};
+  const board = Object.keys(h).map(a => ({ addr: a, recruits: parseInt(h[a]) || 0 }))
+                      .filter(r => r.recruits > 0).sort((a, b) => b.recruits - a.recruits);
+  for (const r of board.slice(0, 1)) { try { r.name = (await kvHget('ph:' + r.addr, 'name')) || ''; } catch (_) { r.name = ''; } }
+  const price = await solUsdQuick();
+  let esc, bal = 0;
+  try { esc = getEscrow(); const bh = await fetchBalAndHash(esc.pubkeyB58); bal = bh.bal; }
+  catch (e) { return { ok: false, reason: 'escrow load: ' + (e && e.message) }; }
+  const plan = PAYOUT.planRecruiterPayout({ board, solPriceUsd: price || 0, escrowLamports: bal, floorLamports: RENT_MIN, prizeUsd: 10 });
+  if (dryRun) return { dryRun: true, week: wk.id, solPriceUsd: price || 0, escrowSol: bal / 1e9, recruiters: board.length, plan };
+  if (!plan.ok) return { ok: false, reason: plan.reason, plan };
+  const lk = await kvSetNX('recpaid:' + wk.id, String(Date.now()));
+  if (!lk) { const prev = await kvGet('recresult:' + wk.id).catch(() => null); return { already: true, result: prev ? JSON.parse(prev) : null }; }
+  const w = plan.winners[0];
+  const r = await wgPayOne(esc, w.addr, w.lamports, 'recruiter:' + wk.id);
+  if (!r.ok) { await kvDel('recpaid:' + wk.id).catch(() => {});
+    betAlert('recruiter payout FAILED ' + wk.id + ' -> ' + String(w.addr).slice(0, 8) + ' : ' + (r.reason || '')); }
+  const paid = [{ place: 1, addr: w.addr, name: w.name, usd: w.usd, lamports: w.lamports, ok: r.ok, sig: r.sig || null, reason: r.reason || null }];
+  const result = { week: wk.id, ts: Date.now(), winners: paid };
+  if (r.ok) await kvSetPerm('recresult:' + wk.id, JSON.stringify(result)).catch(() => {});
+  try { await postEventWinners('🥇 **RECRUITER OF THE WEEK — WINNER**', paid); } catch (_) {}
+  return { ok: r.ok, result };
+}
 // Minimum accrued referral balance a referrer can withdraw. Keeps a single payout worth many times
 // its own ~5000-lamport network fee instead of dribbling out cent-sized transactions. ~0.002 SOL.
 const REF_MIN_CLAIM   = 2_000_000;
@@ -1024,6 +1052,11 @@ module.exports = async function handler(req, res) {
     // ── recruiter-board: this week's Recruiter-of-the-Week standings (unsigned read) ──────────────
     if (action === 'recruiter-board') {
       const wk = recruitWeek();
+      // Lazy auto-settle the PREVIOUS week once it has ended (idempotent, solvency-guarded).
+      if (process.env.EVENT_AUTOPAY !== '0') {
+        const prev = recruitWeek(wk.start - 1);
+        if (Date.now() >= prev.end) { try { await settleRecruiter(prev, { dryRun: false }); } catch (_) {} }
+      }
       clearTimeout(guard); done = true;
       const h = (await kvHgetall('recruit:' + wk.id).catch(() => null)) || {};
       const rows = Object.keys(h).map(a => ({ addr: a, n: parseInt(h[a]) || 0 }))
@@ -1052,6 +1085,19 @@ module.exports = async function handler(req, res) {
         return res.status(200).json(await settleBounty(ev, { dryRun: false }));
       }
       return res.status(200).json(await settleBounty(ev, { dryRun: true }));
+    }
+
+    // ── recruiter-settle: compute (dryRun, anyone) or fire (real, admin-only) the weekly $10 payout ─
+    if (action === 'recruiter-settle') {
+      const cur = recruitWeek();
+      const wk = recruitWeek(cur.start - 1);   // the previous, fully-ended week is what gets paid
+      clearTimeout(guard); done = true;
+      if (body.dryRun === false) {
+        const adminSec = (req.headers['x-admin-secret'] || '').trim(), serverSec = (process.env.ADMIN_SECRET || '').trim();
+        if (!(adminSec && serverSec && adminSec === serverSec)) return res.status(403).json({ error: 'admin only' });
+        return res.status(200).json(await settleRecruiter(wk, { dryRun: false }));
+      }
+      return res.status(200).json(await settleRecruiter(wk, { dryRun: true }));
     }
 
     // ── park-food / get-food: persist a paid lobby's UNCLAIMED gold food across an empty room ──────
