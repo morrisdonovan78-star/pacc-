@@ -42,13 +42,13 @@ const CREATOR_FEE_PCT = 0.10;
 // Kills come only from the GAME_SECRET-authed elim-lock below, so the board can't be client-inflated.
 // KEEP THE WINDOWS IN SYNC with the 'bounty' entries of window.SNAKE_EVENTS in slither-snakes.html.
 const KILL_EVENTS = [
-  { id: 'bounty-2026-07-25', start: Date.UTC(2026, 6, 25, 18, 0, 0), end: Date.UTC(2026, 6, 25, 19, 0, 0) },
+  { id: 'bounty-2026-07-25', start: Date.UTC(2026, 6, 25, 18, 0, 0), end: Date.UTC(2026, 6, 25, 20, 0, 0) }, // 2h: 2–4 PM ET
 ];
 function activeKillEvent(now) { now = now || Date.now(); return KILL_EVENTS.find(e => now >= e.start && now < e.end) || null; }
 // Free Entry Grind windows — mirror api/join.js GRIND_EVENTS. 10 paid $5 games in a window → 1 credit.
 const GRIND_TARGET = 10;
 const GRIND_EVENTS = [
-  { id: 'grind-2026-07-25', start: Date.UTC(2026, 6, 25, 19, 0, 0), end: Date.UTC(2026, 6, 25, 20, 0, 0) },
+  { id: 'grind-2026-07-25', start: Date.UTC(2026, 6, 25, 20, 0, 0), end: Date.UTC(2026, 6, 25, 21, 0, 0) }, // 4–5 PM ET, after Bounty
 ];
 function activeGrindEvent(now) { now = now || Date.now(); return GRIND_EVENTS.find(e => now >= e.start && now < e.end) || null; }
 

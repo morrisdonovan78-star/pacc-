@@ -395,12 +395,12 @@ body.mctl #voice-speakers{left:150px;}
     // Sat Jul 25 2026, 18:00 UTC = 2:00 PM Detroit (EDT, UTC-4). This is the ONLY place times live.
     window.SNAKE_EVENTS = window.SNAKE_EVENTS || [
       { id:'bounty-2026-07-25', title:'🏆 BOUNTY HOUR',
-        tag:'Get the most kills in the hour to win. Every elimination you get in a $1 or $5 lobby scores a point — top 2 on the board get paid in SOL.',
-        start: Date.UTC(2026,6,25,18,0,0), end: Date.UTC(2026,6,25,19,0,0),
+        tag:'Get the most kills over the 2 hours to win. Every elimination you get in a $1 or $5 lobby scores a point — top 2 on the board get paid in SOL.',
+        start: Date.UTC(2026,6,25,18,0,0), end: Date.UTC(2026,6,25,20,0,0),
         prizes:[{p:'1ST',a:'$25',hint:'→ $35 if packed'},{p:'2ND',a:'$15'}] },
       { id:'grind-2026-07-25', title:'⚡ FREE ENTRY GRIND',
         tag:'Play 10 paid $5 games during this hour and earn a FREE $5 entry to use whenever you want. No cap — everyone who hits 10 gets one.',
-        start: Date.UTC(2026,6,25,19,0,0), end: Date.UTC(2026,6,25,20,0,0),
+        start: Date.UTC(2026,6,25,20,0,0), end: Date.UTC(2026,6,25,21,0,0),
         prizes:[{p:'REWARD',a:'FREE $5'}] }
     ];
     var card=document.getElementById('evt-card'); if(!card) return;

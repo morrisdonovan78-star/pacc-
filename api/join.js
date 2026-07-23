@@ -57,7 +57,7 @@ function recruitWeekId(now) { now = now || Date.now(); return 'rw' + Math.floor(
 // SNAKE_EVENTS + api/settle.js. $5 lobby id is ss-paid-lobby-5.
 const GRIND_TARGET = 10;
 const GRIND_EVENTS = [
-  { id: 'grind-2026-07-25', start: Date.UTC(2026, 6, 25, 19, 0, 0), end: Date.UTC(2026, 6, 25, 20, 0, 0) },
+  { id: 'grind-2026-07-25', start: Date.UTC(2026, 6, 25, 20, 0, 0), end: Date.UTC(2026, 6, 25, 21, 0, 0) }, // 4–5 PM ET
 ];
 function activeGrindEvent(now) { now = now || Date.now(); return GRIND_EVENTS.find(e => now >= e.start && now < e.end) || null; }
 
