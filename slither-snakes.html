@@ -8044,7 +8044,10 @@ function _renderBench(){
 // ops rasterise later. It happens to point the right way, confirmed on real frames (see _GRIDMODE), but
 // do not reason about renderer cost from JS timers or from draw loops that never present a frame.
 function _paintHexStrokes(g,camX,camY,zoom,W,H){
-  const R=46/zoom, hx=1.5*R, hy=Math.sqrt(3)*R;
+  // WORLD-LOCKED grid: R is a constant in WORLD units, so the hexes are part of the world and scale
+  // smoothly with zoom (like slither.io) instead of the old screen-constant `46/zoom` that stayed a
+  // fixed pixel size and appeared to slide/rescale as you zoomed. Kill switch: window._HEXWORLDLOCK=false.
+  const R=(window._HEXWORLDLOCK===false?46/zoom:46), hx=1.5*R, hy=Math.sqrt(3)*R;
   const halfW=W/(2*zoom)+R, halfH=H/(2*zoom)+R;
   const cMin=Math.floor((camX-halfW)/hx)-1, cMax=Math.ceil((camX+halfW)/hx)+1;
   const rMin=Math.floor((camY-halfH)/hy)-1, rMax=Math.ceil((camY+halfH)/hy)+1;
@@ -8159,13 +8162,20 @@ function drawArena(){
       ctx.restore();
       _gridDrawn=true;
     }else if(_hc.cv && _hc.zoom>0 && window._HEXZOOMBLIT!==false){
-      const px=_hc.camX*_hc.zoom - _camX*_camZoom;    // screen-phase drift since the cache was built
-      const py=_hc.camY*_hc.zoom - _camY*_camZoom;
-      if(Math.abs(px)<=_hc.margin && Math.abs(py)<=_hc.margin){
+      // World-locked → the whole background scales uniformly with zoom, so scaling the cached bitmap by
+      // the EXACT zoom ratio is correct (no per-frame rebuild). Blit it while it still covers the screen;
+      // a big zoom-OUT shrinks it past the edges → fall through to a one-off live stroke for that frame.
+      const s=_camZoom/_hc.zoom;
+      const cxs=canvas.width/2+(_hc.camX-_camX)*_camZoom;   // where the cache centre lands on screen now
+      const cys=canvas.height/2+(_hc.camY-_camY)*_camZoom;
+      const covX=(_hc.cv.width/2)*s-Math.abs(canvas.width/2-cxs);
+      const covY=(_hc.cv.height/2)*s-Math.abs(canvas.height/2-cys);
+      if(covX>=canvas.width/2 && covY>=canvas.height/2){
         ctx.save();
         ctx.clip();
         ctx.setTransform(1,0,0,1,0,0);
-        ctx.drawImage(_hc.cv,(canvas.width-_hc.cv.width)/2+px,(canvas.height-_hc.cv.height)/2+py);
+        ctx.translate(cxs,cys); ctx.scale(s,s);
+        ctx.drawImage(_hc.cv,-_hc.cv.width/2,-_hc.cv.height/2);
         ctx.restore();
         _gridDrawn=true;
       }
