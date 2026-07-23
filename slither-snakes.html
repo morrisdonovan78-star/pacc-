@@ -3097,25 +3097,13 @@ async function verifyCode(){
   }catch(e){showErr(e.message,'home-err2');}
 }
 async function loadOrOfferWallet(){
-  // 1) This game's local wallet. BACK-FILL it to the account (older wallets predate account-save, so
-  //    they were never uploaded → a new device found nothing → the create/import prompt). Saving it now
-  //    means every future login on any device just retrieves it — no key needed.
-  const kpRaw=localStorage.getItem('ss_kp_'+ST.email);
-  if(kpRaw){
-    try{
-      const kpData=JSON.parse(kpRaw);
-      const bytes=Uint8Array.from(atob(kpData.sk),c=>c.charCodeAt(0));
-      const kp=solanaWeb3.Keypair.fromSecretKey(bytes);
-      _saveWalletToAccount(kp);           // back-fill to account (idempotent, fire-and-forget)
-      await finishLogin(kp); return;
-    }catch(e){}
-  }
-  // 2) The ONE wallet saved to this ACCOUNT — AES-encrypted in Privy metadata, shared across every
-  //    device AND the Pac-Man game (same /api/wallet the Pac-Man client uses).
   window._walletSyncErr='';
+  // 1) ACCOUNT-FIRST: the wallet saved to the ACCOUNT is authoritative, so a login ALWAYS recovers the
+  //    SAME wallet — across devices and after any history/cache clear. Only if the account has none do we
+  //    fall back to a wallet on this device. (The device used to win over the account — that was the bug.)
   if(_jwt){
     try{
-      setWalletStatus('Syncing your account wallet…');
+      setWalletStatus('Recovering your account wallet…');
       const r=await fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({action:'load',email:ST.email,jwt:_jwt}),signal:AbortSignal.timeout(9000)});
       if(r.ok){
@@ -3124,7 +3112,7 @@ async function loadOrOfferWallet(){
           const bytes=Uint8Array.from(atob(d.secretKeyB64),c=>c.charCodeAt(0));
           const kp=solanaWeb3.Keypair.fromSecretKey(bytes);
           localStorage.setItem('ss_kp_'+ST.email,JSON.stringify({sk:d.secretKeyB64,v:1}));
-          await finishLogin(kp); return;
+          await finishLogin(kp); return;                        // ← ALWAYS recovers the account wallet
         }
       } else {
         // 404 = no wallet saved to this account yet (normal first time). Anything else (500/401) means the
@@ -3134,6 +3122,18 @@ async function loadOrOfferWallet(){
         console.warn('[wallet] load status', r.status, em);
       }
     }catch(e){ window._walletSyncErr='Wallet sync request failed: '+(e&&e.message||e); console.warn('[wallet] account sync failed:',e.message); }
+  }
+  // 2) Account has no wallet yet (or a transient sync error) → adopt this device's snake wallet and SAVE
+  //    it up so it becomes the account wallet that recovers everywhere from now on.
+  const kpRaw=localStorage.getItem('ss_kp_'+ST.email);
+  if(kpRaw){
+    try{
+      const kpData=JSON.parse(kpRaw);
+      const bytes=Uint8Array.from(atob(kpData.sk),c=>c.charCodeAt(0));
+      const kp=solanaWeb3.Keypair.fromSecretKey(bytes);
+      _saveWalletToAccount(kp);
+      await finishLogin(kp); return;
+    }catch(e){}
   }
   // 3) The PAC-MAN game's local wallet on THIS device (`pa_kp_<email>`). Most players made their wallet
   //    in Pac-Man first; adopt it here (and back-fill to the account) so both games share ONE wallet
