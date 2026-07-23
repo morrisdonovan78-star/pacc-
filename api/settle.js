@@ -8,6 +8,7 @@ const { kvPing, kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZre
 // Pure pari-mutuel engine (spectator betting). All money math lives here so it is unit-tested
 // offline; this file only does auth, KV, and the on-chain transfers. See lib/betting.js.
 const BET = require('../lib/betting');
+const PAYOUT = require('../lib/eventpayout');   // pure winner/amount planning (unit-tested offline)
 
 // Appends a timestamped earnings snapshot (for the player-profile chart) and caps the
 // list at 200 points so it can't grow unbounded for long-lived accounts.
@@ -75,6 +76,56 @@ async function ensureRefCode(wallet) {
   }
   await kvSet('wref:' + wallet, code).catch(() => {});
   return code;
+}
+
+// Best-effort Discord announce of event winners via the existing wins webhook. @-pings any winner who
+// has linked their Discord (discord:<wallet>). Never throws — a Discord hiccup must not fail a payout.
+async function postEventWinners(title, winners) {
+  const url = DISCORD_WINS_WEBHOOK; if (!url) return;
+  const ids = [];
+  const lines = await Promise.all(winners.map(async w => {
+    const medal = ['🥇', '🥈', '🥉'][w.place - 1] || (w.place + '.');
+    let who = w.name || (String(w.addr).slice(0, 4) + '…' + String(w.addr).slice(-4));
+    try { const did = await kvGet('discord:' + w.addr); if (did) { who = '<@' + did + '>'; ids.push(String(did)); } } catch (_) {}
+    return medal + ' ' + who + ' — **$' + w.usd + '**' + (w.ok === false ? ' _(payout pending)_' : '');
+  }));
+  const body = { content: title + '\n' + lines.join('\n') + '\n💰 Paid in SOL. GG! 🐍',
+    allowed_mentions: { parse: [], users: ids.slice(0, 50) } };
+  try { await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); } catch (_) {}
+}
+
+// Settle a Bounty-Hour event. Prizes are paid via wgPayOne, whose assertSolvency guard means prize
+// money can ONLY come from genuine escrow surplus (the owner-funded float) — never player/bettor
+// funds. Per-place NX locks make each payout run at most once; a failed send releases its lock so a
+// later trigger retries (e.g. once the float is funded). dryRun computes + returns the plan only.
+async function settleBounty(ev, opts) {
+  const dryRun = !!(opts && opts.dryRun);
+  const h = (await kvHgetall('evtk:' + ev.id).catch(() => null)) || {};
+  const board = Object.keys(h).map(a => ({ addr: a, kills: parseInt(h[a]) || 0 }))
+                      .filter(r => r.kills > 0).sort((a, b) => b.kills - a.kills);
+  for (const r of board.slice(0, 2)) { try { r.name = (await kvHget('ph:' + r.addr, 'name')) || ''; } catch (_) { r.name = ''; } }
+  const price = await solUsdQuick();
+  let esc, bal = 0;
+  try { esc = getEscrow(); const bh = await fetchBalAndHash(esc.pubkeyB58); bal = bh.bal; }
+  catch (e) { return { ok: false, reason: 'escrow load: ' + (e && e.message) }; }
+  const plan = PAYOUT.planBountyPayout({ board, solPriceUsd: price || 0, escrowLamports: bal,
+    floorLamports: RENT_MIN, prizes: { first: 25, second: 15, bump: 35 }, bumpMinPlayers: 10 });
+  if (dryRun) return { dryRun: true, id: ev.id, solPriceUsd: price || 0, escrowSol: bal / 1e9,
+    players: board.length, plan };
+  if (!plan.ok) return { ok: false, reason: plan.reason, plan };   // no lock taken → retries later
+  const paid = [];
+  for (const w of plan.winners) {
+    const lk = await kvSetNX('evtpaid:' + ev.id + ':' + w.place, String(Date.now()));
+    if (!lk) { paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, already: true }); continue; }
+    const r = await wgPayOne(esc, w.addr, w.lamports, 'bounty:' + ev.id + ':' + w.place);
+    if (!r.ok) { await kvDel('evtpaid:' + ev.id + ':' + w.place).catch(() => {});
+      betAlert('bounty payout FAILED ' + ev.id + ' place ' + w.place + ' -> ' + String(w.addr).slice(0, 8) + ' : ' + (r.reason || '')); }
+    paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, lamports: w.lamports, ok: r.ok, sig: r.sig || null, reason: r.reason || null });
+  }
+  const result = { id: ev.id, ts: Date.now(), bumped: plan.bumped, winners: paid };
+  await kvSetPerm('evtresult:' + ev.id, JSON.stringify(result)).catch(() => {});
+  try { await postEventWinners('🏆 **BOUNTY HOUR RESULTS**', paid); } catch (_) {}
+  return { ok: true, result };
 }
 // Minimum accrued referral balance a referrer can withdraw. Keeps a single payout worth many times
 // its own ~5000-lamport network fee instead of dribbling out cent-sized transactions. ~0.002 SOL.
@@ -937,6 +988,10 @@ module.exports = async function handler(req, res) {
         const past = KILL_EVENTS.filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
         if (past && (now - past.end) < 6 * 3600 * 1000) { ev = past; state = 'ended'; }
       }
+      // Auto-settle: once a bounty window has ended, pay the winners from the float — idempotent
+      // (per-place NX locks) and solvency-guarded, so only the first post-event reader does the work
+      // and it can never overpay or touch player funds. Kill-switch: set env EVENT_AUTOPAY=0.
+      if (state === 'ended' && ev && process.env.EVENT_AUTOPAY !== '0') { try { await settleBounty(ev, { dryRun: false }); } catch (_) {} }
       clearTimeout(guard); done = true;
       if (!ev) return res.status(200).json({ active: false });
       const h = (await kvHgetall('evtk:' + ev.id).catch(() => null)) || {};
@@ -983,6 +1038,20 @@ module.exports = async function handler(req, res) {
         top: top.map(r => ({ name: r.name || (r.addr.slice(0, 4) + '…' + r.addr.slice(-4)), recruits: r.n })),
         you: { rank: youRank, recruits: youN, onBoard: youRank > 0 },
       });
+    }
+
+    // ── event-settle: compute (dryRun, anyone) or fire (real, admin-only) a Bounty-Hour payout ─────
+    if (action === 'event-settle') {
+      const now = Date.now();
+      const ev = activeKillEvent(now) || KILL_EVENTS.filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
+      clearTimeout(guard); done = true;
+      if (!ev) return res.status(200).json({ error: 'no event' });
+      if (body.dryRun === false) {   // REAL payout — admin secret required
+        const adminSec = (req.headers['x-admin-secret'] || '').trim(), serverSec = (process.env.ADMIN_SECRET || '').trim();
+        if (!(adminSec && serverSec && adminSec === serverSec)) return res.status(403).json({ error: 'admin only' });
+        return res.status(200).json(await settleBounty(ev, { dryRun: false }));
+      }
+      return res.status(200).json(await settleBounty(ev, { dryRun: true }));
     }
 
     // ── park-food / get-food: persist a paid lobby's UNCLAIMED gold food across an empty room ──────
