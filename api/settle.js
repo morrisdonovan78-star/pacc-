@@ -36,6 +36,14 @@ function verifyPlayerSig(sig, ts, action, playerAddress, wagerLamports) {
 
 const CREATOR_WALLET  = '2ZLqQww5koLr2J7PU54UwA7yNX4DRmMHMLAQjm411E7a';
 const CREATOR_FEE_PCT = 0.10;
+// ── Scheduled kill-scoring events ("Bounty Hour"). Only kills landed inside one of these UTC
+// windows, in a PAID lobby, accrue to the event board (evtk:<id> hash, field = killer wallet).
+// Kills come only from the GAME_SECRET-authed elim-lock below, so the board can't be client-inflated.
+// KEEP THE WINDOWS IN SYNC with the 'bounty' entries of window.SNAKE_EVENTS in slither-snakes.html.
+const KILL_EVENTS = [
+  { id: 'bounty-2026-07-25', start: Date.UTC(2026, 6, 25, 18, 0, 0), end: Date.UTC(2026, 6, 25, 19, 0, 0) },
+];
+function activeKillEvent(now) { now = now || Date.now(); return KILL_EVENTS.find(e => now >= e.start && now < e.end) || null; }
 // Minimum accrued referral balance a referrer can withdraw. Keeps a single payout worth many times
 // its own ~5000-lamport network fee instead of dribbling out cent-sized transactions. ~0.002 SOL.
 const REF_MIN_CLAIM   = 2_000_000;
@@ -880,9 +888,38 @@ module.exports = async function handler(req, res) {
           killerAddress !== victimAddress && killerAddress.indexOf('bot-') !== 0 &&
           lobbyId && lobbyId.indexOf('paid') !== -1) {
         try { await kvHincrby('ph:' + game + ':' + killerAddress, 'kills', 1); } catch (_) {}
+        // Bounty Hour: if a scheduled kill-event is live right now, this paid kill also scores on the
+        // event board. Same trust path as the all-time stat above (GAME_SECRET-authed, paid, non-bot).
+        try { const _ev = activeKillEvent(); if (_ev) await kvHincrby('evtk:' + _ev.id, killerAddress, 1); } catch (_) {}
       }
       clearTimeout(guard); done = true;
       return res.status(200).json({ ok: true });
+    }
+
+    // ── event-board: live / just-ended Bounty-Hour kill standings (unsigned read — the numbers are
+    // built only from GAME_SECRET-authed elim-lock kills, so exposing them read-only is safe). ──────
+    if (action === 'event-board') {
+      const now = Date.now();
+      let ev = activeKillEvent(now), state = 'live';
+      if (!ev) {                                    // no live event → show the last one's final board for 6h
+        const past = KILL_EVENTS.filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
+        if (past && (now - past.end) < 6 * 3600 * 1000) { ev = past; state = 'ended'; }
+      }
+      clearTimeout(guard); done = true;
+      if (!ev) return res.status(200).json({ active: false });
+      const h = (await kvHgetall('evtk:' + ev.id).catch(() => null)) || {};
+      const rows = Object.keys(h).map(a => ({ addr: a, kills: parseInt(h[a]) || 0 }))
+                         .filter(r => r.kills > 0).sort((a, b) => b.kills - a.kills);
+      const you = String(body.playerAddress || '').trim();
+      let youRank = 0, youKills = 0;
+      for (let i = 0; i < rows.length; i++) { if (rows[i].addr === you) { youRank = i + 1; youKills = rows[i].kills; break; } }
+      const top = rows.slice(0, 10);
+      await Promise.all(top.map(async r => { try { r.name = (await kvHget('ph:' + r.addr, 'name')) || ''; } catch (_) { r.name = ''; } }));
+      return res.status(200).json({
+        active: true, state, id: ev.id, startsAt: ev.start, endsAt: ev.end,
+        top: top.map(r => ({ name: r.name || (r.addr.slice(0, 4) + '…' + r.addr.slice(-4)), kills: r.kills })),
+        you: { rank: youRank, kills: youKills, onBoard: youRank > 0 },
+      });
     }
 
     // ── park-food / get-food: persist a paid lobby's UNCLAIMED gold food across an empty room ──────

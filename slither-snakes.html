@@ -378,6 +378,7 @@ body.mctl #voice-speakers{left:150px;}
     <div id="evt-tag" style="font-size:11px;color:var(--muted);text-align:center;margin-bottom:13px;">--</div>
     <div id="evt-count" style="font-family:'Press Start 2P',monospace;font-size:19px;color:#FFD700;text-align:center;letter-spacing:1px;margin-bottom:12px;">--</div>
     <div id="evt-prizes" style="display:flex;gap:8px;justify-content:center;"></div>
+    <div id="evt-board" style="display:none;margin-top:13px;border-top:1px solid rgba(255,215,0,.18);padding-top:11px;"></div>
   </div>
   <script>
   (function(){
@@ -394,7 +395,8 @@ body.mctl #voice-speakers{left:150px;}
     var card=document.getElementById('evt-card'); if(!card) return;
     var elWhen=document.getElementById('evt-when'),  elStatus=document.getElementById('evt-status'),
         elTitle=document.getElementById('evt-title'), elTag=document.getElementById('evt-tag'),
-        elCount=document.getElementById('evt-count'), elPrizes=document.getElementById('evt-prizes');
+        elCount=document.getElementById('evt-count'), elPrizes=document.getElementById('evt-prizes'),
+        elBoard=document.getElementById('evt-board');
     function fmtLocal(ms){
       try{ return new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',
         hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(new Date(ms)); }
@@ -418,6 +420,30 @@ body.mctl #voice-speakers{left:150px;}
         +'<div style="font-family:\'Press Start 2P\',monospace;font-size:11px;color:#FFD700;">'+p.a+'</div>'
         +(p.hint?'<div style="font-size:8px;color:var(--muted);margin-top:3px;">'+p.hint+'</div>':'')
         +'</div>'; }).join(''); }
+    // ── Live kill board (Bounty-Hour only) — each player sees the top killers + their OWN rank ──
+    var _bT=0,_bData=null,_bBusy=false;
+    function ord(n){ var s=['th','st','nd','rd'],v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); }
+    function fetchBoard(){ if(_bBusy)return; _bBusy=true;
+      var addr=(window.ST&&ST.address)||'';
+      fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'event-board',playerAddress:addr})})
+        .then(function(r){return r.json();}).then(function(d){_bData=d;_bBusy=false;drawBoard();})
+        .catch(function(){_bBusy=false;}); }
+    function drawBoard(){ var d=_bData;
+      if(!d||!d.active){ elBoard.style.display='none'; return; }
+      var h='<div style="font-family:\'Press Start 2P\',monospace;font-size:6px;color:var(--muted);margin-bottom:8px;text-align:center;letter-spacing:.5px;">🔪 KILL LEADERS</div>';
+      if(!d.top||!d.top.length){ h+='<div style="font-size:11px;color:var(--muted);text-align:center;">No kills yet — get in there.</div>'; }
+      else { d.top.forEach(function(r,i){ var medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
+        h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 4px;font-size:12px;color:'+(i<2?'#FFD700':'#fff')+';">'
+          +'<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72%;">'+medal+' '+r.name+'</span>'
+          +'<b style="color:#39FF14;">'+r.kills+'</b></div>'; }); }
+      if(d.you){ var yt=d.you.onBoard?('YOU: '+d.you.kills+' kill'+(d.you.kills===1?'':'s')+' — '+ord(d.you.rank)+' place')
+                                     :'YOU: not on the board yet — go get a kill';
+        h+='<div style="margin-top:9px;border-top:1px solid rgba(57,255,20,.2);padding-top:8px;font-family:\'Press Start 2P\',monospace;font-size:8px;color:'+(d.you.onBoard?'#39FF14':'var(--muted)')+';text-align:center;">'+yt+'</div>'; }
+      elBoard.innerHTML=h; elBoard.style.display=''; }
+    function maybeBoard(e){ if(!e||e.id.indexOf('bounty')!==0){ elBoard.style.display='none'; return; }
+      var now=Date.now(); if(now-_bT>12000){ _bT=now; fetchBoard(); } if(_bData) drawBoard(); }
+
     function render(){ var now=Date.now(), pk=pick(now);
       if(!pk){ card.style.display='none'; return; } card.style.display='';
       var e=pk.e; elTitle.textContent=e.title; elTag.textContent=e.tag; elPrizes.innerHTML=chips(e);
@@ -425,14 +451,17 @@ body.mctl #voice-speakers{left:150px;}
         elWhen.textContent=fmtLocal(e.start)+' · your time';
         elStatus.innerHTML='SOON'; elStatus.style.color='#FFD700';
         elCount.textContent='STARTS IN '+dur(e.start-now); elCount.style.color='#FFD700';
+        elBoard.style.display='none';
       } else if(pk.state==='live'){
         elWhen.textContent='NOW · started '+fmtLocal(e.start)+' your time';
         elStatus.innerHTML='<span class="ndot" style="width:6px;height:6px;"></span>LIVE'; elStatus.style.color='#39FF14';
         elCount.textContent='ENDS IN '+dur(e.end-now); elCount.style.color='#39FF14';
+        maybeBoard(e);
       } else {
         elWhen.textContent='ENDED · was '+fmtLocal(e.start)+' your time';
         elStatus.innerHTML='ENDED'; elStatus.style.color='var(--muted)';
         elCount.textContent='SEE YOU AT THE NEXT ONE'; elCount.style.color='var(--muted)';
+        maybeBoard(e);
       } }
     render(); setInterval(render,1000);
   })();
