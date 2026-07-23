@@ -365,6 +365,79 @@ body.mctl #voice-speakers{left:150px;}
     <div class="logo-sub">≡ SOLANA PVP WAGER ARENA ≡</div>
   </div>
 
+  <!-- ══ EVENT CARD ══ Shows the next / live / just-ended scheduled event. Every time is anchored to
+       a SINGLE UTC instant in window.SNAKE_EVENTS and rendered in each viewer's OWN timezone via
+       Intl.DateTimeFormat — so it reads "2:00 PM your time" in Detroit and "2:00 AM" in Tokyo for
+       the same event, with a live countdown. Self-contained (below) so it can't break the main app. -->
+  <div id="evt-card" class="panel" style="display:none;width:100%;max-width:560px;border-color:rgba(255,215,0,.42);background:linear-gradient(180deg,rgba(24,19,4,.94),rgba(10,10,26,.92));margin-bottom:1.4rem;padding:16px 18px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px;">
+      <span id="evt-when" style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);letter-spacing:.4px;">--</span>
+      <span id="evt-status" style="font-family:'Press Start 2P',monospace;font-size:7px;color:#FFD700;display:flex;align-items:center;gap:5px;">SOON</span>
+    </div>
+    <div id="evt-title" style="font-family:'Press Start 2P',monospace;font-size:12px;color:#fff;text-align:center;line-height:1.55;margin-bottom:5px;">NEXT EVENT</div>
+    <div id="evt-tag" style="font-size:11px;color:var(--muted);text-align:center;margin-bottom:13px;">--</div>
+    <div id="evt-count" style="font-family:'Press Start 2P',monospace;font-size:19px;color:#FFD700;text-align:center;letter-spacing:1px;margin-bottom:12px;">--</div>
+    <div id="evt-prizes" style="display:flex;gap:8px;justify-content:center;"></div>
+  </div>
+  <script>
+  (function(){
+    // Schedule — one UTC instant per event (JS months are 0-indexed, so 6 = July).
+    // Sat Jul 25 2026, 18:00 UTC = 2:00 PM Detroit (EDT, UTC-4). This is the ONLY place times live.
+    window.SNAKE_EVENTS = window.SNAKE_EVENTS || [
+      { id:'bounty-2026-07-25', title:'🏆 BOUNTY HOUR', tag:'Most kills wins — $1 & $5 lobbies',
+        start: Date.UTC(2026,6,25,18,0,0), end: Date.UTC(2026,6,25,19,0,0),
+        prizes:[{p:'1ST',a:'$25',hint:'→ $35 if packed'},{p:'2ND',a:'$15'}] },
+      { id:'grind-2026-07-25', title:'⚡ FREE ENTRY GRIND', tag:'Play 10 paid $5 games → a FREE $5 entry',
+        start: Date.UTC(2026,6,25,19,0,0), end: Date.UTC(2026,6,25,20,0,0),
+        prizes:[{p:'REWARD',a:'FREE $5'}] }
+    ];
+    var card=document.getElementById('evt-card'); if(!card) return;
+    var elWhen=document.getElementById('evt-when'),  elStatus=document.getElementById('evt-status'),
+        elTitle=document.getElementById('evt-title'), elTag=document.getElementById('evt-tag'),
+        elCount=document.getElementById('evt-count'), elPrizes=document.getElementById('evt-prizes');
+    function fmtLocal(ms){
+      try{ return new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',
+        hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(new Date(ms)); }
+      catch(e){ return new Date(ms).toLocaleString(); }
+    }
+    function dur(ms){ if(ms<0)ms=0; var s=Math.floor(ms/1000),d=Math.floor(s/86400);s-=d*86400;
+      var h=Math.floor(s/3600);s-=h*3600; var m=Math.floor(s/60);s-=m*60;
+      if(d>0)return d+'d '+h+'h '+m+'m'; if(h>0)return h+'h '+m+'m '+s+'s'; return m+'m '+s+'s'; }
+    function pick(now){ var live=null,next=null,ended=null;
+      (window.SNAKE_EVENTS||[]).forEach(function(e){
+        if(now>=e.start&&now<e.end){ if(!live)live=e; }
+        else if(now<e.start){ if(!next||e.start<next.start)next=e; }
+        else { if(!ended||e.end>ended.end)ended=e; } });
+      if(live)  return {e:live,state:'live'};
+      if(next)  return {e:next,state:'up'};
+      if(ended&&(now-ended.end)<24*3600*1000) return {e:ended,state:'ended'};
+      return null; }
+    function chips(e){ return (e.prizes||[]).map(function(p){
+      return '<div style="flex:1;max-width:150px;background:rgba(0,0,0,.35);border:1px solid rgba(255,215,0,.25);border-radius:8px;padding:8px 6px;text-align:center;">'
+        +'<div style="font-family:\'Press Start 2P\',monospace;font-size:6px;color:var(--muted);margin-bottom:5px;">'+p.p+'</div>'
+        +'<div style="font-family:\'Press Start 2P\',monospace;font-size:11px;color:#FFD700;">'+p.a+'</div>'
+        +(p.hint?'<div style="font-size:8px;color:var(--muted);margin-top:3px;">'+p.hint+'</div>':'')
+        +'</div>'; }).join(''); }
+    function render(){ var now=Date.now(), pk=pick(now);
+      if(!pk){ card.style.display='none'; return; } card.style.display='';
+      var e=pk.e; elTitle.textContent=e.title; elTag.textContent=e.tag; elPrizes.innerHTML=chips(e);
+      if(pk.state==='up'){
+        elWhen.textContent=fmtLocal(e.start)+' · your time';
+        elStatus.innerHTML='SOON'; elStatus.style.color='#FFD700';
+        elCount.textContent='STARTS IN '+dur(e.start-now); elCount.style.color='#FFD700';
+      } else if(pk.state==='live'){
+        elWhen.textContent='NOW · started '+fmtLocal(e.start)+' your time';
+        elStatus.innerHTML='<span class="ndot" style="width:6px;height:6px;"></span>LIVE'; elStatus.style.color='#39FF14';
+        elCount.textContent='ENDS IN '+dur(e.end-now); elCount.style.color='#39FF14';
+      } else {
+        elWhen.textContent='ENDED · was '+fmtLocal(e.start)+' your time';
+        elStatus.innerHTML='ENDED'; elStatus.style.color='var(--muted)';
+        elCount.textContent='SEE YOU AT THE NEXT ONE'; elCount.style.color='var(--muted)';
+      } }
+    render(); setInterval(render,1000);
+  })();
+  </script>
+
   <!-- Not logged in -->
   <div id="home-off" class="card">
     <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);text-align:center;margin-bottom:1.5rem;">SIGN IN TO PLAY</div>
