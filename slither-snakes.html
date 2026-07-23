@@ -3112,6 +3112,7 @@ async function loadOrOfferWallet(){
   }
   // 2) The ONE wallet saved to this ACCOUNT — AES-encrypted in Privy metadata, shared across every
   //    device AND the Pac-Man game (same /api/wallet the Pac-Man client uses).
+  window._walletSyncErr='';
   if(_jwt){
     try{
       setWalletStatus('Syncing your account wallet…');
@@ -3125,8 +3126,14 @@ async function loadOrOfferWallet(){
           localStorage.setItem('ss_kp_'+ST.email,JSON.stringify({sk:d.secretKeyB64,v:1}));
           await finishLogin(kp); return;
         }
+      } else {
+        // 404 = no wallet saved to this account yet (normal first time). Anything else (500/401) means the
+        // server couldn't reach Privy — almost always a wrong/missing PRIVY_APP_SECRET. Surface which it is.
+        let em=''; try{ em=((await r.json())||{}).error||''; }catch(_){}
+        if(r.status!==404){ window._walletSyncErr='Server could not load your saved wallet (error '+r.status+'). '+em; }
+        console.warn('[wallet] load status', r.status, em);
       }
-    }catch(e){ console.warn('[wallet] account sync failed:',e.message); }
+    }catch(e){ window._walletSyncErr='Wallet sync request failed: '+(e&&e.message||e); console.warn('[wallet] account sync failed:',e.message); }
   }
   // 3) The PAC-MAN game's local wallet on THIS device (`pa_kp_<email>`). Most players made their wallet
   //    in Pac-Man first; adopt it here (and back-fill to the account) so both games share ONE wallet
@@ -3144,6 +3151,7 @@ async function loadOrOfferWallet(){
   }catch(e){}
   document.getElementById('wallet-checking').style.display='none';
   document.getElementById('wallet-choice').style.display='block';
+  if(window._walletSyncErr){ addToast('⚠ '+window._walletSyncErr+' — if you just set PRIVY_APP_SECRET, Redeploy on Vercel; otherwise import your backup key.','#FFD700',11000); }
   await scanAndShowWallets();
 }
 // Save a keypair to the account (encrypted, Privy metadata) so it syncs to every device + the Pac-Man
