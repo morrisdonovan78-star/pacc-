@@ -394,10 +394,12 @@ body.mctl #voice-speakers{left:150px;}
     // Schedule — one UTC instant per event (JS months are 0-indexed, so 6 = July).
     // Sat Jul 25 2026, 18:00 UTC = 2:00 PM Detroit (EDT, UTC-4). This is the ONLY place times live.
     window.SNAKE_EVENTS = window.SNAKE_EVENTS || [
-      { id:'bounty-2026-07-25', title:'🏆 BOUNTY HOUR', tag:'Most kills wins — $1 & $5 lobbies',
+      { id:'bounty-2026-07-25', title:'🏆 BOUNTY HOUR',
+        tag:'Get the most kills in the hour to win. Every elimination you get in a $1 or $5 lobby scores a point — top 2 on the board get paid in SOL.',
         start: Date.UTC(2026,6,25,18,0,0), end: Date.UTC(2026,6,25,19,0,0),
         prizes:[{p:'1ST',a:'$25',hint:'→ $35 if packed'},{p:'2ND',a:'$15'}] },
-      { id:'grind-2026-07-25', title:'⚡ FREE ENTRY GRIND', tag:'Play 10 paid $5 games → a FREE $5 entry',
+      { id:'grind-2026-07-25', title:'⚡ FREE ENTRY GRIND',
+        tag:'Play 10 paid $5 games during this hour and earn a FREE $5 entry to use whenever you want. No cap — everyone who hits 10 gets one.',
         start: Date.UTC(2026,6,25,19,0,0), end: Date.UTC(2026,6,25,20,0,0),
         prizes:[{p:'REWARD',a:'FREE $5'}] }
     ];
@@ -2620,7 +2622,7 @@ async function doImportWallet(){
     document.getElementById('wallet-choice').style.display='none';
     document.getElementById('wallet-import').style.display='none';
     document.getElementById('wallet-checking').style.display='block';
-    _saveWalletToAccount(kp); // sync the imported wallet to the account so it's the same everywhere
+    _saveWalletToAccount(kp,{force:true}); // import is a deliberate replace → overwrite the account wallet
     await finishLogin(kp);
   }catch(e){alert('Invalid private key: '+e.message);}
 }
@@ -2631,6 +2633,7 @@ async function finishLogin(kp){
   localStorage.setItem('ss_'+ST.email,JSON.stringify({email:ST.email,address:ST.address,token:_jwt}));
   localStorage.setItem('ss_last',ST.email);
   _linkAccountWallet();
+  _saveWalletToAccount(kp); // guarantee (retried) the account holds this wallet so a history-reset recovers it
   _ownerCheck(); // owner wallet → unlock owner UI (T = tuning panel) on this device
   ST.conn=makeConnection();
   await fetchPrice();
@@ -3111,12 +3114,24 @@ async function loadOrOfferWallet(){
 // Save a keypair to the account (encrypted, Privy metadata) so it syncs to every device + the Pac-Man
 // game. Fire-and-forget — the local copy is already saved. Only called when the account had NO wallet
 // (create/import path runs after the load-first check above), so it can't clobber an existing one.
-function _saveWalletToAccount(kp){
-  if(!_jwt||!ST.email||!kp)return;
-  try{ const sk=btoa(String.fromCharCode(...kp.secretKey));
-    fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({action:'save',email:ST.email,jwt:_jwt,secretKeyB64:sk})}).catch(e=>console.warn('[wallet] account save:',e.message));
-  }catch(e){ console.warn('[wallet] account save:',e.message); }
+// Save the wallet to the account (encrypted, Privy metadata) — now RETRIED, so a single network
+// blip no longer leaves the wallet local-only (which is what made a history-reset mint a NEW wallet).
+// Server is non-clobbering, so calling this on every login is safe. {force:true} deliberately replaces
+// (import). Returns true once the account has the wallet.
+async function _saveWalletToAccount(kp,opts){
+  if(!_jwt||!ST.email||!kp)return false;
+  const force=!!(opts&&opts.force);
+  let sk; try{ sk=btoa(String.fromCharCode(...kp.secretKey)); }catch(e){ return false; }
+  for(let i=0;i<3;i++){
+    try{
+      const r=await fetch('/api/wallet',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'save',email:ST.email,jwt:_jwt,secretKeyB64:sk,force}),signal:AbortSignal.timeout(9000)});
+      if(r.ok)return true;
+    }catch(e){ console.warn('[wallet] account save try '+(i+1)+':',e&&e.message); }
+    await new Promise(res=>setTimeout(res,700));
+  }
+  console.warn('[wallet] account save FAILED after retries — check PRIVY_APP_SECRET on the server');
+  return false;
 }
 // Stamp this account's CURRENT wallet so the leaderboard/friends always resolve to it (never a stale
 // old wallet). Fire-and-forget on every login. Complements _saveWalletToAccount (which stores the key).

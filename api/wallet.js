@@ -99,6 +99,17 @@ module.exports = async function handler(req, res) {
     // ── save: encrypt keypair and store in Privy user metadata ──────────────────
     if (action === 'save') {
       if (!secretKeyB64) return res.status(400).json({ error: 'secretKeyB64 required' });
+      // NON-CLOBBERING by default: the FIRST wallet saved to an account is authoritative. Without this,
+      // a second device (or a stale local wallet) would overwrite the account's real wallet on login —
+      // devices ping-ponged, so one person ended up with several wallets and duplicate leaderboard rows,
+      // and a history-reset could adopt the wrong one. `force:true` allows a deliberate replace (import).
+      if (!body.force) {
+        try {
+          const existing = await privyMgmt('GET', '/users/' + userId);
+          const m = existing.customMetadata || existing.custom_metadata || {};
+          if (m.paWallet) { console.log('[wallet] kept existing for', userId); return res.status(200).json({ ok: true, kept: true }); }
+        } catch (_) { /* read failed — fall through and attempt the save so we never lose a first wallet */ }
+      }
       const encrypted = encryptWallet(secretKeyB64, email);
       // Try PATCH first, fall back to PUT (Privy API version differences)
       try {
