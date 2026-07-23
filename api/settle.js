@@ -166,6 +166,8 @@ const REF_MIN_CLAIM   = 2_000_000;
 // channel. If the var is unset the whole feature is silently off — nothing changes. Set it in
 // Vercel: DISCORD_WINS_WEBHOOK = the URL from Discord → channel → Integrations → Webhooks.
 const DISCORD_WINS_WEBHOOK = (process.env.DISCORD_WINS_WEBHOOK || '').trim();
+const DISCORD_BOT_TOKEN    = (process.env.DISCORD_BOT_TOKEN || '').trim();          // clip bot — reads link codes
+const DISCORD_LINK_CHANNEL = (process.env.DISCORD_LINK_CHANNEL || '1523824631914696916').trim();
 const WIN_POST_MIN_USD = 1.50;          // only announce cashouts worth at least this many dollars
 const WIN_POST_MIN_SOL_FALLBACK = 0.02; // ~$1.50 at a typical SOL price — used only if the price
                                         // feed is momentarily unavailable, so a price hiccup neither
@@ -1047,6 +1049,49 @@ module.exports = async function handler(req, res) {
       const mine = parseInt(await kvHget('recruit:' + wk.id, w).catch(() => 0)) || 0;
       return res.status(200).json({ code, link: 'https://snakepot.com/?ref=' + code,
         recruits: mine, weekStart: wk.start, weekEnd: wk.end });
+    }
+
+    // ── discord-link-code: mint a short code the player posts in Discord to link their account ──────
+    if (action === 'discord-link-code') {
+      const w = String(body.playerAddress || '').trim();
+      clearTimeout(guard); done = true;
+      if (!w || w.length < 20) return res.status(400).json({ error: 'playerAddress required' });
+      const existing = await kvGet('discord:' + w).catch(() => null);
+      if (existing) return res.status(200).json({ linked: true });
+      const code = refCodeFor(w + ':dl:' + Math.floor(Date.now() / 60000)); // rotates each minute
+      await kvSet('dlink:' + code, w, 900);                                 // 15-minute window
+      return res.status(200).json({ linked: false, code, channel: DISCORD_LINK_CHANNEL });
+    }
+
+    // ── discord-link-check: read the link channel, map any pending code's wallet to its poster ─────
+    if (action === 'discord-link-check') {
+      const w = String(body.playerAddress || '').trim();
+      clearTimeout(guard); done = true;
+      if (!w || w.length < 20) return res.status(400).json({ error: 'playerAddress required' });
+      if (await kvGet('discord:' + w).catch(() => null)) return res.status(200).json({ linked: true });
+      if (!DISCORD_BOT_TOKEN) return res.status(200).json({ linked: false, notConfigured: true });
+      let msgs = [];
+      try {
+        const r = await fetch('https://discord.com/api/v10/channels/' + DISCORD_LINK_CHANNEL + '/messages?limit=50',
+          { headers: { 'Authorization': 'Bot ' + DISCORD_BOT_TOKEN } });
+        if (r.ok) msgs = await r.json();
+      } catch (_) {}
+      let linked = false;
+      for (const m of (Array.isArray(msgs) ? msgs : [])) {
+        const mm = /^\s*LINK\s+([A-Za-z0-9]{6})\s*$/i.exec((m && m.content) || '');
+        if (!mm) continue;
+        const wallet = await kvGet('dlink:' + mm[1].toUpperCase()).catch(() => null);
+        if (!wallet) continue;
+        const did = m.author && m.author.id;
+        if (!did) continue;
+        if (!(await kvGet('dwallet:' + did).catch(() => null))) {   // one Discord per wallet, first wins
+          await kvSetPerm('discord:' + wallet, did).catch(() => {});
+          await kvSetPerm('dwallet:' + did, wallet).catch(() => {});
+        }
+        await kvDel('dlink:' + mm[1].toUpperCase()).catch(() => {});
+        if (wallet === w) linked = true;
+      }
+      return res.status(200).json({ linked });
     }
 
     // ── recruiter-board: this week's Recruiter-of-the-Week standings (unsigned read) ──────────────
