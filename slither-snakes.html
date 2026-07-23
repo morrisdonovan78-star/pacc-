@@ -501,6 +501,7 @@ body.mctl #voice-speakers{left:150px;}
         <button class="copy-btn" onclick="_recCopy()" style="white-space:nowrap;">📋 COPY</button>
       </div>
     </div>
+    <div id="rec-dl" style="display:none;margin-bottom:11px;text-align:center;font-size:11px;color:var(--muted);"></div>
     <div id="rec-signin" style="font-size:11px;color:var(--muted);text-align:center;margin-bottom:11px;display:none;">Sign in to get your personal invite link.</div>
     <div id="rec-board"></div>
     <div id="rec-you" style="margin-top:9px;border-top:1px solid rgba(57,255,20,.2);padding-top:8px;font-family:'Press Start 2P',monospace;font-size:8px;color:var(--muted);text-align:center;"></div>
@@ -510,7 +511,31 @@ body.mctl #voice-speakers{left:150px;}
     var card=document.getElementById('rec-card'); if(!card) return;
     var elCount=document.getElementById('rec-count'), elLinkBox=document.getElementById('rec-link-box'),
         elLink=document.getElementById('rec-link'), elSignin=document.getElementById('rec-signin'),
-        elBoard=document.getElementById('rec-board'), elYou=document.getElementById('rec-you');
+        elBoard=document.getElementById('rec-board'), elYou=document.getElementById('rec-you'),
+        elDl=document.getElementById('rec-dl');
+    // ── Discord link: post a code in Discord so winners can be @-pinged + auto-paid ──
+    var _dlCode=null, _dlDone=false;
+    function _dlRefresh(addr){ if(_dlDone||!elDl) return;
+      fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'discord-link-code',playerAddress:addr})})
+        .then(function(r){return r.json();}).then(function(d){ if(!d)return;
+          if(d.linked){ _dlDone=true; elDl.style.display=''; elDl.style.color='#39FF14'; elDl.innerHTML='✅ Discord linked'; return; }
+          _dlCode=d.code; elDl.style.display=''; elDl.style.color='var(--muted)';
+          elDl.innerHTML='<button class="copy-btn" onclick="_dlStart()" style="border-color:rgba(114,137,218,.6);color:#aab4ff;">🔗 Link Discord (get paid if you win)</button>';
+        }).catch(function(){}); }
+    window._dlStart=function(){ if(!_dlCode||!elDl)return;
+      elDl.style.color='var(--muted)';
+      elDl.innerHTML='<div style="line-height:1.6;">Post this in the SnakePot Discord:<br><b style="color:#fff;font-family:monospace;font-size:13px;">LINK '+_dlCode+'</b><br>(copied) then tap below.</div>'
+        +'<button class="copy-btn" onclick="_dlDo()" style="margin-top:8px;border-color:rgba(57,255,20,.5);color:#39FF14;">✓ I POSTED IT</button>';
+      try{ if(navigator.clipboard) navigator.clipboard.writeText('LINK '+_dlCode); }catch(_){}
+      try{ window.open('https://discord.gg/kd4tNP2vw','_blank','noopener'); }catch(_){} };
+    window._dlDo=function(){ var addr=(typeof ST!=='undefined'&&ST&&ST.address)||''; if(!addr||!elDl)return;
+      elDl.innerHTML='<span style="color:var(--muted);">Checking Discord…</span>';
+      fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'discord-link-check',playerAddress:addr})})
+        .then(function(r){return r.json();}).then(function(d){
+          if(d&&d.linked){ _dlDone=true; elDl.style.color='#39FF14'; elDl.innerHTML='✅ Discord linked!'; if(window.addToast)addToast('Discord linked!','#39FF14',2500); }
+          else if(d&&d.notConfigured){ elDl.innerHTML='<span style="color:var(--muted);">Linking not enabled yet — check back soon.</span>'; }
+          else { elDl.innerHTML='<span style="color:var(--muted);">Not seen yet — post <b style="color:#fff;">LINK '+_dlCode+'</b> then </span><button class="copy-btn" onclick="_dlDo()" style="border-color:rgba(57,255,20,.5);color:#39FF14;">✓ CHECK AGAIN</button>'; }
+        }).catch(function(){ elDl.innerHTML='<button class="copy-btn" onclick="_dlDo()">✓ CHECK AGAIN</button>'; }); };
     function dur(ms){ if(ms<0)ms=0; var s=Math.floor(ms/1000),d=Math.floor(s/86400);s-=d*86400;var h=Math.floor(s/3600);s-=h*3600;var m=Math.floor(s/60);
       if(d>0)return d+'d '+h+'h'; if(h>0)return h+'h '+m+'m'; return m+'m'; }
     function ord(n){var s=['th','st','nd','rd'],v=n%100;return n+(s[(v-20)%10]||s[v]||s[0]);}
@@ -520,7 +545,7 @@ body.mctl #voice-speakers{left:150px;}
     var _mineDone=false;
     function fetchMine(){ var addr=(typeof ST!=='undefined'&&ST&&ST.address)||'';
       if(!addr){ elLinkBox.style.display='none'; elSignin.style.display=''; return; }
-      elSignin.style.display='none'; if(_mineDone) return; _mineDone=true;
+      elSignin.style.display='none'; _dlRefresh(addr); if(_mineDone) return; _mineDone=true;
       fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'my-refcode',playerAddress:addr})})
         .then(function(r){return r.json();}).then(function(d){ if(d&&d.link){ elLink.value=d.link; elLinkBox.style.display=''; } else _mineDone=false; }).catch(function(){_mineDone=false;}); }
     function fetchBoard(){ var addr=(typeof ST!=='undefined'&&ST&&ST.address)||'';
