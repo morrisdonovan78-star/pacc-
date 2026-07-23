@@ -346,7 +346,9 @@ body.mctl #voice-speakers{left:150px;}
         <div class="tb-sub">· SOLANA PVP WAGER ARENA ·</div>
       </div>
     </div>
-    <div class="tb-chips">
+    <!-- Duplicate top-bar wager chips removed from view (the lobby picker in the play card is the one
+         source of truth). Kept in the DOM but hidden so fetchLobbyCounts() never null-refs. -->
+    <div class="tb-chips" style="display:none;">
       <button class="chip" id="tb-c0" onclick="selLobby(0)">FREE <span class="chip-cnt" id="hc0">·</span></button>
       <button class="chip" id="tb-c1" onclick="selLobby(1)">$1 <span class="chip-cnt" id="hc1">·</span></button>
       <button class="chip" id="tb-c5" onclick="selLobby(5)">$5 <span class="chip-cnt" id="hc5">·</span></button>
@@ -369,16 +371,23 @@ body.mctl #voice-speakers{left:150px;}
        a SINGLE UTC instant in window.SNAKE_EVENTS and rendered in each viewer's OWN timezone via
        Intl.DateTimeFormat — so it reads "2:00 PM your time" in Detroit and "2:00 AM" in Tokyo for
        the same event, with a live countdown. Self-contained (below) so it can't break the main app. -->
-  <div id="evt-card" class="panel" style="display:none;width:100%;max-width:560px;border-color:rgba(255,215,0,.42);background:linear-gradient(180deg,rgba(24,19,4,.94),rgba(10,10,26,.92));margin-bottom:1.4rem;padding:16px 18px;">
+  <div id="evt-card" class="panel" style="display:none;order:2;width:100%;max-width:460px;border-color:rgba(255,215,0,.42);background:linear-gradient(180deg,rgba(24,19,4,.94),rgba(10,10,26,.92));margin-bottom:1rem;padding:12px 14px;">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px;">
       <span id="evt-when" style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);letter-spacing:.4px;">--</span>
       <span id="evt-status" style="font-family:'Press Start 2P',monospace;font-size:7px;color:#FFD700;display:flex;align-items:center;gap:5px;">SOON</span>
     </div>
     <div id="evt-title" style="font-family:'Press Start 2P',monospace;font-size:12px;color:#fff;text-align:center;line-height:1.55;margin-bottom:5px;">NEXT EVENT</div>
     <div id="evt-tag" style="font-size:11px;color:var(--muted);text-align:center;margin-bottom:13px;">--</div>
-    <div id="evt-count" style="font-family:'Press Start 2P',monospace;font-size:19px;color:#FFD700;text-align:center;letter-spacing:1px;margin-bottom:12px;">--</div>
-    <div id="evt-prizes" style="display:flex;gap:8px;justify-content:center;"></div>
-    <div id="evt-board" style="display:none;margin-top:13px;border-top:1px solid rgba(255,215,0,.18);padding-top:11px;"></div>
+    <div id="evt-count" style="font-family:'Press Start 2P',monospace;font-size:15px;color:#FFD700;text-align:center;letter-spacing:1px;margin-bottom:11px;">--</div>
+    <div id="evt-prizes" style="display:flex;gap:7px;justify-content:center;"></div>
+    <div id="evt-rsvp" style="display:none;margin-top:11px;text-align:center;">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:7px;">Coming? Lock your server &amp; react ✅ in Discord</div>
+      <div style="display:flex;gap:7px;justify-content:center;">
+        <button class="copy-btn" onclick="_evtRsvp('NA')" style="border-color:rgba(0,207,255,.45);color:#8fdcff;">🇺🇸 I'M IN · NA</button>
+        <button class="copy-btn" onclick="_evtRsvp('EU')" style="border-color:rgba(0,207,255,.45);color:#8fdcff;">🇩🇪 I'M IN · EU</button>
+      </div>
+    </div>
+    <div id="evt-board" style="display:none;margin-top:12px;border-top:1px solid rgba(255,215,0,.18);padding-top:10px;"></div>
   </div>
   <script>
   (function(){
@@ -396,7 +405,13 @@ body.mctl #voice-speakers{left:150px;}
     var elWhen=document.getElementById('evt-when'),  elStatus=document.getElementById('evt-status'),
         elTitle=document.getElementById('evt-title'), elTag=document.getElementById('evt-tag'),
         elCount=document.getElementById('evt-count'), elPrizes=document.getElementById('evt-prizes'),
-        elBoard=document.getElementById('evt-board');
+        elBoard=document.getElementById('evt-board'), elRsvp=document.getElementById('evt-rsvp');
+    // RSVP: lock the player's server for the event and nudge them to react in Discord.
+    window._evtRsvp=function(region){
+      try{ if(window.setGameServer) setGameServer(region); }catch(_){}
+      if(window.addToast) addToast("You're in for Bounty Hour on "+region+"! Now react ✅ in Discord.",'#39FF14',3800);
+      try{ window.open('https://discord.gg/kd4tNP2vw','_blank','noopener'); }catch(_){}
+    };
     function fmtLocal(ms){
       try{ return new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',
         hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(new Date(ms)); }
@@ -447,6 +462,7 @@ body.mctl #voice-speakers{left:150px;}
     function render(){ var now=Date.now(), pk=pick(now);
       if(!pk){ card.style.display='none'; return; } card.style.display='';
       var e=pk.e; elTitle.textContent=e.title; elTag.textContent=e.tag; elPrizes.innerHTML=chips(e);
+      elRsvp.style.display=(pk.state==='ended')?'none':'';
       if(pk.state==='up'){
         elWhen.textContent=fmtLocal(e.start)+' · your time';
         elStatus.innerHTML='SOON'; elStatus.style.color='#FFD700';
@@ -468,7 +484,7 @@ body.mctl #voice-speakers{left:150px;}
   </script>
 
   <!-- ══ RECRUITER OF THE WEEK ══ Live standings + the player's own invite link + how it works. -->
-  <div id="rec-card" class="panel" style="width:100%;max-width:560px;border-color:rgba(57,255,20,.34);background:linear-gradient(180deg,rgba(6,20,9,.94),rgba(10,10,26,.92));margin-bottom:1.4rem;padding:16px 18px;">
+  <div id="rec-card" class="panel" style="order:3;width:100%;max-width:460px;border-color:rgba(57,255,20,.34);background:linear-gradient(180deg,rgba(6,20,9,.94),rgba(10,10,26,.92));margin-bottom:1rem;padding:12px 14px;">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
       <span style="font-family:'Press Start 2P',monospace;font-size:9px;color:#39FF14;">🥇 RECRUITER OF THE WEEK</span>
       <span id="rec-count" style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);">--</span>
@@ -690,6 +706,11 @@ body.mctl #voice-speakers{left:150px;}
     </div>
   </div>
   </div><!-- /dash -->
+  <div style="margin-top:1.6rem;display:flex;gap:12px;justify-content:center;align-items:center;font-size:11px;color:var(--muted);flex-wrap:wrap;">
+    <a href="/terms.html" style="color:var(--muted);text-decoration:none;">Terms</a><span style="opacity:.5;">·</span>
+    <a href="/privacy.html" style="color:var(--muted);text-decoration:none;">Privacy</a><span style="opacity:.5;">·</span>
+    <a href="https://discord.gg/kd4tNP2vw" target="_blank" rel="noopener noreferrer" style="color:var(--muted);text-decoration:none;">Support</a>
+  </div>
 </div>
 
 <!-- Settings modal — clip toggle + remappable keybinds -->
