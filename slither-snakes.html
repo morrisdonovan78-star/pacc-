@@ -404,6 +404,10 @@ body.mctl #voice-speakers{left:150px;}
         prizes:[{p:'REWARD',a:'FREE $5'}] }
     ];
     var card=document.getElementById('evt-card'); if(!card) return;
+    var _origTitle=document.title;
+    if(!document.getElementById('evt-pulse-style')){var st=document.createElement('style');st.id='evt-pulse-style';
+      st.textContent='@keyframes evtPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,215,0,0)}50%{box-shadow:0 0 22px 2px rgba(255,215,0,.5)}}.evt-soon{animation:evtPulse 1.4s ease-in-out infinite;border-color:rgba(255,215,0,.75)!important;}';
+      document.head.appendChild(st);}
     var elWhen=document.getElementById('evt-when'),  elStatus=document.getElementById('evt-status'),
         elTitle=document.getElementById('evt-title'), elTag=document.getElementById('evt-tag'),
         elCount=document.getElementById('evt-count'), elPrizes=document.getElementById('evt-prizes'),
@@ -465,6 +469,12 @@ body.mctl #voice-speakers{left:150px;}
       if(!pk){ card.style.display='none'; return; } card.style.display='';
       var e=pk.e; elTitle.textContent=e.title; elTag.textContent=e.tag; elPrizes.innerHTML=chips(e);
       elRsvp.style.display=(pk.state==='ended')?'none':'';
+      // Tab-title countdown + "starting soon" pulse — nags players even when the tab is backgrounded.
+      (function(){ var ct=e.title.replace(/^\S+\s/,''), soon=false;
+        if(pk.state==='up'){ var ms=e.start-now; document.title = ms<3600000 ? ('('+dur(ms)+') '+ct+' · SNAKE POT') : _origTitle; soon=ms<900000; }
+        else if(pk.state==='live'){ document.title='🔴 LIVE — '+ct+' · SNAKE POT'; soon=true; }
+        else { document.title=_origTitle; }
+        card.classList.toggle('evt-soon', soon); })();
       if(pk.state==='up'){
         elWhen.textContent=fmtLocal(e.start)+' · your time';
         elStatus.innerHTML='SOON'; elStatus.style.color='#FFD700';
