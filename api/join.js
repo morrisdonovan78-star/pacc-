@@ -52,6 +52,15 @@ const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 23, 4, 0, 0); // Thu Jul 23 2026 00:00
 const RECRUIT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 function recruitWeekId(now) { now = now || Date.now(); return 'rw' + Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS); }
 
+// ── Free Entry Grind — play GRIND_TARGET paid $5 games inside a grind window → earn one free $5
+// credit (credit:<wallet>). KEEP these windows in sync with the 'grind' entries in the client
+// SNAKE_EVENTS + api/settle.js. $5 lobby id is ss-paid-lobby-5.
+const GRIND_TARGET = 10;
+const GRIND_EVENTS = [
+  { id: 'grind-2026-07-25', start: Date.UTC(2026, 6, 25, 19, 0, 0), end: Date.UTC(2026, 6, 25, 20, 0, 0) },
+];
+function activeGrindEvent(now) { now = now || Date.now(); return GRIND_EVENTS.find(e => now >= e.start && now < e.end) || null; }
+
 // First-touch bind + per-join accrual. Fully wrapped by the caller's try/catch AND its own — the
 // referral program must NEVER be able to fail a legitimate paid join.
 async function accrueReferral(playerWallet, refCodeRaw, wagerLamports) {
@@ -355,6 +364,15 @@ module.exports = async function handler(req, res) {
 
     // Referral accrual — never allowed to fail the join (own try/catch + best-effort writes inside).
     try{ await accrueReferral(walletAddress, refCode, lamps); }catch(_){}
+
+    // Free Entry Grind — count paid $5 games in the window; every GRIND_TARGET grants one free $5 credit.
+    try{
+      const gev = activeGrindEvent();
+      if(gev && lobbyId === 'ss-paid-lobby-5'){
+        const n = await kvIncrby('grind:' + gev.id + ':' + walletAddress, 1);
+        if(n % GRIND_TARGET === 0){ await kvIncrby('credit:' + walletAddress, 1).catch(()=>{}); }
+      }
+    }catch(_){}
 
     // Issue a game token — HMAC-signed proof of payment for the Socket.io server.
     // The Socket.io server validates this on connection; without it paid lobbies are rejected.

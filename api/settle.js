@@ -45,6 +45,12 @@ const KILL_EVENTS = [
   { id: 'bounty-2026-07-25', start: Date.UTC(2026, 6, 25, 18, 0, 0), end: Date.UTC(2026, 6, 25, 19, 0, 0) },
 ];
 function activeKillEvent(now) { now = now || Date.now(); return KILL_EVENTS.find(e => now >= e.start && now < e.end) || null; }
+// Free Entry Grind windows — mirror api/join.js GRIND_EVENTS. 10 paid $5 games in a window → 1 credit.
+const GRIND_TARGET = 10;
+const GRIND_EVENTS = [
+  { id: 'grind-2026-07-25', start: Date.UTC(2026, 6, 25, 19, 0, 0), end: Date.UTC(2026, 6, 25, 20, 0, 0) },
+];
+function activeGrindEvent(now) { now = now || Date.now(); return GRIND_EVENTS.find(e => now >= e.start && now < e.end) || null; }
 
 // ── Recruiter of the Week — rolling 7-day contest. weekId buckets all recruit counts so a new week
 // starts clean automatically. Anchor = Thu Jul 23 2026 00:00 America/Detroit (04:00 UTC, EDT).
@@ -1049,6 +1055,18 @@ module.exports = async function handler(req, res) {
       const mine = parseInt(await kvHget('recruit:' + wk.id, w).catch(() => 0)) || 0;
       return res.status(200).json({ code, link: 'https://snakepot.com/?ref=' + code,
         recruits: mine, weekStart: wk.start, weekEnd: wk.end });
+    }
+
+    // ── credit-status: a player's free-entry credit balance + Free Entry Grind progress ───────────
+    if (action === 'credit-status') {
+      const w = String(body.playerAddress || '').trim();
+      clearTimeout(guard); done = true;
+      if (!w || w.length < 20) return res.status(400).json({ error: 'playerAddress required' });
+      const credit = parseInt(await kvGet('credit:' + w).catch(() => 0)) || 0;
+      const gev = activeGrindEvent();
+      const total = gev ? (parseInt(await kvGet('grind:' + gev.id + ':' + w).catch(() => 0)) || 0) : 0;
+      return res.status(200).json({ credit, grindActive: !!gev, grindTarget: GRIND_TARGET,
+        grindDone: total % GRIND_TARGET, grindTotal: total });
     }
 
     // ── discord-link-code: mint a short code the player posts in Discord to link their account ──────
