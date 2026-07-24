@@ -1878,6 +1878,9 @@ function usdToSol(usd){return ST.solPrice>0?parseFloat((usd/ST.solPrice).toFixed
 
 // ══ UI HELPERS ═══════════════════════════════════════════════
 function go(id){
+  // Bridge: the game's own home/lobby dashboards are never shown — the platform is "home". Any nav to
+  // them (e.g. result-screen PLAY AGAIN → scr-lobby, HOME → scr-home) leaves the iframe instead.
+  if(_BRIDGE && (id==='scr-home'||id==='scr-lobby')){ _bridgeNotify('EXIT',{reason:'home'}); return; }
   document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on'));
   const el=document.getElementById(id);
   if(el) el.classList.add('on');

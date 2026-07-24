@@ -952,7 +952,7 @@ if(_BRIDGE){
 // ═══════════════════════════════════════════════════════════
 // UI HELPERS
 // ═══════════════════════════════════════════════════════════
-function go(id){ if(_BRIDGE && id==='scr-home'){ _bridgeNotify('EXIT',{reason:'home'}); return; } document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on')); document.getElementById(id).classList.add('on'); window.scrollTo(0,0); if(id==='scr-home') try{ _updateChampHomeCard(); }catch(_){} }
+function go(id){ if(_BRIDGE && (id==='scr-home'||id==='scr-lobby')){ _bridgeNotify('EXIT',{reason:'home'}); return; } document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on')); document.getElementById(id).classList.add('on'); window.scrollTo(0,0); if(id==='scr-home') try{ _updateChampHomeCard(); }catch(_){} }
 function showStep(n){ ['step-email','step-otp','step-create-wallet'].forEach(s=>{ document.getElementById(s).style.display = s==='step-'+n?'block':'none'; }); }
 function showErr(m){ const e=document.getElementById('login-err'); if(e){e.textContent=m;e.style.display='block';} }
 function hideErr(){ const e=document.getElementById('login-err'); if(e) e.style.display='none'; }
@@ -1461,6 +1461,9 @@ async function finishLoginBridge(info){
   await refreshBal().catch(()=>{});
   const rsel=document.getElementById('region-sel'); if(rsel) rsel.value=REGION;
   syncServerBtns();
+  // Random champion sprite each session (bridge players don't visit the customize panel, so they'd
+  // otherwise always be the default yellow zippy). champFor() reads 'pa_champ' for the local player.
+  try{ const _ci=Math.floor(Math.random()*CHAMPIONS.length); localStorage.setItem('pa_champ',String(_ci)); _mySkin.color=CHAMPIONS[_ci].col; }catch(_){}
   try{ initCustomizePanel(); }catch(_){}
   if(info.watch){
     const reg=(info.region==='EU'?'EU':'NA'); const tier=Number(info.stake)||1;
