@@ -2758,6 +2758,13 @@ async function finishLoginBridge(info){
   else await _loadAccountName().catch(()=>{});
   _homeLoginUi(true);
   syncServerBtns();
+  // Spectate from the platform (Live Matches 👁): watch the lobby, no deposit.
+  if(info.watch){
+    const reg=(info.region==='EU'?'EU':'NA');
+    const tier=Number(info.stake)||1;
+    try{ await enterWatchMode(reg,tier); }catch(e){ console.error('[bridge] watch failed',e); _bridgeNotify('EXIT',{reason:'watch-error'}); }
+    return;
+  }
   // In bridge mode the game iframe is ONLY the play surface — the player must NEVER see the game's own
   // home dashboard (the platform is "home"). Go straight to the lobby the platform chose: FREE drops
   // right in; a paid tier runs the normal deposit flow (the Privy signature IS the explicit confirm) or,
@@ -8155,16 +8162,15 @@ function _renderBench(){
 // ops rasterise later. It happens to point the right way, confirmed on real frames (see _GRIDMODE), but
 // do not reason about renderer cost from JS timers or from draw loops that never present a frame.
 function _paintHexStrokes(g,camX,camY,zoom,W,H){
-  // WORLD-LOCKED grid (default): R=46 in WORLD units, so the honeycomb is part of the world and scales
-  // smoothly with zoom (the look the owner wants). The old FPS death came from re-STROKING thousands of
-  // world hexes every gesture frame — that is now gone: during a zoom we only ever GPU-scale the cached
-  // bitmap (see drawArena), never live-stroke, so the look is world-locked AND the zoom stays smooth.
-  // Screen-constant (R=46/zoom, constant hex count) stays available via window._HEXWORLDLOCK===false.
-  const R=(window._HEXWORLDLOCK===false?46/zoom:46), hx=1.5*R, hy=Math.sqrt(3)*R;
+  // SCREEN-CONSTANT grid (default, matches the owner's reference video): R=46/zoom → the hexes stay a
+  // fixed size on screen and DON'T rescale/rebuild as you zoom (pure pan/phase blit) — which is exactly
+  // the "doesn't re-render with zoom" look AND keeps 240fps (no per-frame bitmap resample). World-locked
+  // (R=46 world units, scales with zoom) is opt-in via window._HEXWORLDLOCK===true.
+  const R=(window._HEXWORLDLOCK===true?46:46/zoom), hx=1.5*R, hy=Math.sqrt(3)*R;
   const halfW=W/(2*zoom)+R, halfH=H/(2*zoom)+R;
   const cMin=Math.floor((camX-halfW)/hx)-1, cMax=Math.ceil((camX+halfW)/hx)+1;
   const rMin=Math.floor((camY-halfH)/hy)-1, rMax=Math.ceil((camY+halfH)/hy)+1;
-  g.strokeStyle='rgba(0,255,255,0.10)'; g.lineWidth=1.2/zoom;
+  g.strokeStyle='rgba(255,255,255,0.05)'; g.lineWidth=1.2/zoom;   // subtle dark-grey honeycomb (ref video)
   g.beginPath();
   for(let c=cMin;c<=cMax;c++){
     const cx=c*hx, yoff=(c&1)?hy/2:0;
@@ -8275,7 +8281,7 @@ function drawArena(){
       ctx.restore();
       _gridDrawn=true;
     }else if(_hc.cv && _hc.zoom>0 && window._HEXZOOMBLIT!==false){
-      if(window._HEXWORLDLOCK!==false){
+      if(window._HEXWORLDLOCK===true){
         // WORLD-LOCKED (default): the whole grid scales uniformly with zoom, so GPU-scaling the cached
         // bitmap by the exact zoom ratio is the CORRECT, cheap way to draw the in-flight frame — one
         // drawImage, sub-millisecond, no re-stroke. We ALWAYS blit (never fall back to the thousands-of-
@@ -8286,9 +8292,10 @@ function drawArena(){
         const cxs=canvas.width/2+(_hc.camX-_camX)*_camZoom;
         const cys=canvas.height/2+(_hc.camY-_camY)*_camZoom;
         ctx.save(); ctx.clip(); ctx.setTransform(1,0,0,1,0,0);
+        ctx.imageSmoothingEnabled=false;   // nearest-neighbour scale during the gesture = far cheaper
         ctx.translate(cxs,cys); ctx.scale(s,s);
         ctx.drawImage(_hc.cv,-_hc.cv.width/2,-_hc.cv.height/2);
-        ctx.restore(); _gridDrawn=true;
+        ctx.restore(); _gridDrawn=true;   // save/restore restores imageSmoothing for everything else
       }else{
         // SCREEN-CONSTANT (opt-out): zoom only shifts the grid's screen PHASE → UNSCALED offset blit.
         const px=_hc.camX*_hc.zoom - _camX*_camZoom;
@@ -8323,13 +8330,13 @@ function drawArena(){
     // bottleneck (a full-bounding-box Gaussian blur every frame). Appearance is unchanged.
     for(let i=4;i>=0;i--){
       ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
-      ctx.strokeStyle=`rgba(0,255,255,${0.06+i*0.03})`;
+      ctx.strokeStyle=`rgba(255,40,40,${0.06+i*0.03})`;
       ctx.lineWidth=20+i*14;ctx.stroke();
     }
     ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
-    ctx.strokeStyle='rgba(0,255,255,0.05)';ctx.lineWidth=90;ctx.stroke(); // soft halo (replaces shadowBlur)
+    ctx.strokeStyle='rgba(255,40,40,0.05)';ctx.lineWidth=90;ctx.stroke(); // soft halo (replaces shadowBlur)
     ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
-    ctx.strokeStyle='#00FFFF';ctx.lineWidth=5;ctx.stroke();               // crisp core
+    ctx.strokeStyle='#FF2A2A';ctx.lineWidth=5;ctx.stroke();               // crisp core
   }
   ctx.restore();
 }
