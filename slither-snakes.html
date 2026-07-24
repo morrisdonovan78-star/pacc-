@@ -8162,10 +8162,10 @@ function _renderBench(){
 // ops rasterise later. It happens to point the right way, confirmed on real frames (see _GRIDMODE), but
 // do not reason about renderer cost from JS timers or from draw loops that never present a frame.
 function _paintHexStrokes(g,camX,camY,zoom,W,H){
-  // SCREEN-CONSTANT grid (default, matches the owner's reference video): R=46/zoom → the hexes stay a
-  // fixed size on screen and DON'T rescale/rebuild as you zoom (pure pan/phase blit) — which is exactly
-  // the "doesn't re-render with zoom" look AND keeps 240fps (no per-frame bitmap resample). World-locked
-  // (R=46 world units, scales with zoom) is opt-in via window._HEXWORLDLOCK===true.
+  // SCREEN-CONSTANT grid (default): R=46/zoom → hexes are a fixed 46px on screen at EVERY zoom. The
+  // cache is therefore zoom-invariant, so during a zoom we neither rebuild nor re-phase it — the grid
+  // sits perfectly STILL while zooming (it only pans with camera movement) AND stays at 240fps.
+  // World-locked (R=46 world units, scales with zoom) is opt-in via window._HEXWORLDLOCK===true.
   const R=(window._HEXWORLDLOCK===true?46:46/zoom), hx=1.5*R, hy=Math.sqrt(3)*R;
   const halfW=W/(2*zoom)+R, halfH=H/(2*zoom)+R;
   const cMin=Math.floor((camX-halfW)/hx)-1, cMax=Math.ceil((camX+halfW)/hx)+1;
@@ -8192,7 +8192,11 @@ let _hexZoomLast=0,_hexZoomStillAt=0;
 function _hexEnsure(force){
   const M=_hexCache.margin, bw=canvas.width+2*M, bh=canvas.height+2*M, c=_hexCache;
   const dxpx=Math.abs(_camX-c.camX)*_camZoom, dypx=Math.abs(_camY-c.camY)*_camZoom;
-  if(force||!c.cv||c.cv.width!==bw||c.cv.height!==bh||c.zoom!==_camZoom||dxpx>M||dypx>M){
+  // Screen-constant (default) hexes are 46px at every zoom → the cache is zoom-invariant, so a zoom
+  // change must NOT trigger a rebuild (that was the "grid re-renders while zooming" jump). Only
+  // world-locked, whose hex size actually changes with zoom, invalidates on zoom.
+  const _zoomInval=(window._HEXWORLDLOCK===true)&&c.zoom!==_camZoom;
+  if(force||!c.cv||c.cv.width!==bw||c.cv.height!==bh||_zoomInval||dxpx>M||dypx>M){
     if(!c.cv||c.cv.width!==bw||c.cv.height!==bh){ c.cv=document.createElement('canvas'); c.cv.width=bw; c.cv.height=bh; c.g=c.cv.getContext('2d'); }
     c.g.setTransform(1,0,0,1,0,0); c.g.clearRect(0,0,bw,bh);
     c.camX=_camX; c.camY=_camY; c.zoom=_camZoom;
@@ -8235,7 +8239,10 @@ function drawArena(){
   const _tNow=performance.now();
   if(_camZoom!==_hexZoomLast){ _hexZoomLast=_camZoom; _hexZoomStillAt=_tNow; }
   const _zoomSettled=(_tNow-_hexZoomStillAt)>=HEX_ZOOM_SETTLE_MS;
-  const _cacheZoomOk=(_hexCache.zoom===_camZoom)||_zoomSettled;
+  // Screen-constant (default): the cache is zoom-invariant, so ALWAYS take the still unscaled blit
+  // below (its offset is (_hc.camX-_camX)*_camZoom → exactly 0 during a pure zoom, so the grid does
+  // not move). Only world-locked needs the zoom-settle/scaled-blit dance.
+  const _cacheZoomOk=(window._HEXWORLDLOCK!==true)||(_hexCache.zoom===_camZoom)||_zoomSettled;
   const _gridReach=Math.hypot(canvas.width,canvas.height)/(2*_camZoom);
   const _borderInView=(window._HEXBORDERGUARD===true)&&(Math.hypot(_camX,_camY)+_gridReach>=ARENA_R-2);
   // ── ZOOM COST, ROUND 2 (measured from a 210Hz capture) ──────────────────────────────────────
