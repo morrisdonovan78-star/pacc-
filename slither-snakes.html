@@ -1676,6 +1676,55 @@ window.addEventListener('resize',()=>{clearTimeout(_menuBgResizeT);_menuBgResize
 // ══ STATE ═══════════════════════════════════════════════════
 const ST={email:'',address:'',balance:0,solPrice:0,wagerSol:0,lobbyUsd:0,conn:null,hasEscrow:false,cashoutLamports:0,entryToken:null};
 let _keypair=null,_jwt='',_pendingBackupKp=null;
+
+// ── SNAKE POT platform bridge (Phase 1) ──────────────────────────────────────────────────────────
+// When this exact game is embedded by the platform (iframe + ?bridge=1), it plays on the platform's
+// shared Privy wallet instead of a local keypair. We reroute ONLY signing to the parent window
+// (Privy signMessage / signTransaction). The escrow address, the fee routing, the game token and the
+// whole /api backend are UNCHANGED — the shared wallet deposits into the SAME escrow and pays the
+// SAME fee wallet every other game uses. Outside an iframe (snakepot.com) _BRIDGE is false and every
+// path below stays the original local-keypair code, byte-for-byte.
+const _BRIDGE = (()=>{ try{ return !!(window.parent && window.parent!==window && new URLSearchParams(location.search).get('bridge')==='1'); }catch(_){ return false; } })();
+let _bridgeParentOrigin='*';                 // tightened to the platform's origin after INIT
+const _bridgePending=new Map(); let _bridgeSeq=0;
+function _bytesToB64(u){ let s=''; for(let i=0;i<u.length;i++) s+=String.fromCharCode(u[i]); return btoa(s); }
+function _b64ToBytes(b){ return Uint8Array.from(atob(b),c=>c.charCodeAt(0)); }
+// Round-trip a request to the platform (parent) and await its reply. 60s ceiling so a stuck wallet
+// prompt can't hang a deposit forever.
+function _bridgeCall(kind,payload){
+  return new Promise((resolve,reject)=>{
+    const id=++_bridgeSeq; _bridgePending.set(id,{resolve,reject});
+    try{ window.parent.postMessage(Object.assign({__snakebridge:1,kind,id},payload||{}),_bridgeParentOrigin); }
+    catch(e){ _bridgePending.delete(id); reject(e); return; }
+    setTimeout(()=>{ if(_bridgePending.has(id)){ _bridgePending.delete(id); reject(new Error('wallet timeout — reopen the game')); } },60000);
+  });
+}
+// Fire-and-forget signal to the platform (e.g. leave the game and return to the platform home).
+function _bridgeNotify(kind,extra){
+  if(!_BRIDGE)return;
+  try{ window.parent.postMessage(Object.assign({__snakebridge:1,kind:kind},extra||{}),_bridgeParentOrigin); }catch(_){}
+}
+// One signer for every 'pac-arena:...' proof string. Bridge → Privy signMessage (ed25519, identical
+// bytes as nacl → the server's verifyPlayerSig accepts it against the Privy pubkey). Local → nacl,
+// byte-for-byte the original.
+async function _sigB64(msgBytes){
+  if(_BRIDGE){ const r=await _bridgeCall('signMessage',{msg:_bytesToB64(msgBytes)}); return r.sig; }
+  if(!_keypair)throw new Error('No wallet loaded');
+  return btoa(String.fromCharCode(...nacl.sign.detached(msgBytes,_keypair.secretKey)));
+}
+if(_BRIDGE){
+  // Cross-origin/relative /api calls resolve against the platform origin, which proxies them to the
+  // real backend (next.config rewrites) — so relative fetch keeps working with zero CORS.
+  try{ _bridgeParentOrigin = (document.referrer ? new URL(document.referrer).origin : '*'); }catch(_){ _bridgeParentOrigin='*'; }
+  // Service replies coming back from the platform.
+  window.addEventListener('message',(ev)=>{
+    if(_bridgeParentOrigin!=='*' && ev.origin!==_bridgeParentOrigin) return;
+    const d=ev.data; if(!d || d.__snakebridge!==1 || !d.reply) return;
+    const p=_bridgePending.get(d.id); if(!p) return; _bridgePending.delete(d.id);
+    if(d.error) p.reject(new Error(d.error)); else p.resolve(d);
+  });
+}
+
 let _sio=null,ablyChannel=null,pkRoomId=null;
 let _voiceStream=null,_voiceEnabled=false,_voiceCapCtx=null,_voiceProc=null,_voicePlayCtx=null;
 // ── Voice options ────────────────────────────────────────────────────────────────
@@ -2500,6 +2549,15 @@ async function pasteWdAddr(){
 }
 
 async function signLocalTx(tx){
+  if(_BRIDGE){
+    // Hand the UNSIGNED tx to the platform → Privy signTransaction → copy the signatures back onto the
+    // caller's tx object so the existing `tx.serialize()` downstream produces the signed bytes.
+    const raw=_bytesToB64(tx.serialize({requireAllSignatures:false,verifySignatures:false}));
+    const r=await _bridgeCall('signTransaction',{tx:raw});
+    const signed=solanaWeb3.Transaction.from(_b64ToBytes(r.tx));
+    tx.signatures=signed.signatures;
+    return;
+  }
   if(!_keypair)throw new Error('No wallet loaded');
   tx.sign(_keypair);
 }
@@ -2540,8 +2598,7 @@ async function recordWager(walletAddress,wagerLamports,txSig,lobbyId,playerName)
   const ts=Math.floor(Date.now()/1000); // seconds — api/join.js verifyPlayerSig checks Math.floor(Date.now()/1000)
   // 'pac-arena:' prefix matches Vercel api/join.js verifyPlayerSig
   const _jmsg=new TextEncoder().encode('pac-arena:join:'+walletAddress+':'+wagerLamports+':'+ts);
-  const _jsigBytes=nacl.sign.detached(_jmsg,_keypair.secretKey);
-  const sig=btoa(String.fromCharCode(..._jsigBytes));
+  const sig=await _sigB64(_jmsg);
   // Referral code captured from a streamer's ?ref= link (see _captureRef). Only bites on the
   // player's FIRST paid join server-side; harmless to send every time (ignored once bound).
   const refCode=(()=>{ try{ return localStorage.getItem('ss_ref')||''; }catch(_){ return ''; } })();
@@ -2562,7 +2619,7 @@ async function settle(){
   // someone's winnings, and never return without telling the caller what happened.
   if(!ST.address){ console.error('[settle] no wallet loaded — cannot pay out'); return null; }
   if(ST.lobbyUsd===0) return null;                       // free lobby: nothing to pay
-  const _payLobby = pkRoomId || _lastRoomId || (ST.lobbyUsd===1?'ss-paid-lobby-1':'ss-paid-lobby-5');
+  const _payLobby = pkRoomId || _lastRoomId || ('ss-paid-lobby-'+ST.lobbyUsd);
   try{
     // Refresh price right before cashout so lamport conversion is exact
     await fetchPrice().catch(()=>{});
@@ -2574,7 +2631,7 @@ async function settle(){
     const ts=Math.floor(Date.now()/1000);
     // 'pac-arena:' prefix matches api/settle.js verifyPlayerSig message format
     const _smsg=new TextEncoder().encode('pac-arena:cashout:'+ST.address+':'+lamps+':'+ts);
-    const _ssig=btoa(String.fromCharCode(...nacl.sign.detached(_smsg,_keypair.secretKey)));
+    const _ssig=await _sigB64(_smsg);
     // Route through Vercel — only Vercel has ESCROW_SECRET to sign the SOL transfer
     // RETRY. A single failed fetch used to cost the player their entire cash-out: settle() returned
     // null and the result screen still claimed the money was sent. The server side is idempotent
@@ -2611,7 +2668,7 @@ async function recordLoss(){
   try{
     const ts=Math.floor(Date.now()/1000);
     const _smsg=new TextEncoder().encode('pac-arena:stat-loss:'+ST.address+':0:'+ts);
-    const _ssig=btoa(String.fromCharCode(...nacl.sign.detached(_smsg,_keypair.secretKey)));
+    const _ssig=await _sigB64(_smsg);
     await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':_ssig,'x-settle-ts':String(ts)},
       body:JSON.stringify({playerAddress:ST.address,wagerLamports:0,lobbyId:pkRoomId,action:'stat-loss'})});
   }catch(e){console.warn('[recordLoss]',e);}
@@ -2683,6 +2740,49 @@ async function finishLogin(kp){
   _homeLoginUi(true);
   _showPracticeBtn();
   syncServerBtns();
+}
+
+// Bridge login: adopt the platform's shared Privy wallet as our identity. Sentinel _keypair holds
+// ONLY the public key — every signature is produced by the platform (see _sigB64 / signLocalTx).
+// No local keypair is created, stored or synced.
+async function finishLoginBridge(info){
+  ST.email=info.email||''; ST.address=info.address; _jwt=info.token||'';
+  _keypair={ publicKey:new solanaWeb3.PublicKey(info.address) };
+  ST.conn=makeConnection();
+  try{ _ownerCheck(); }catch(_){}
+  await fetchPrice();
+  await refreshBal().catch(()=>{});
+  const nm=info.name||'';
+  const nameInput=document.getElementById('name-input');
+  if(nameInput&&nm) nameInput.value=nm;
+  else await _loadAccountName().catch(()=>{});
+  _homeLoginUi(true);
+  syncServerBtns();
+  // In bridge mode the game iframe is ONLY the play surface — the player must NEVER see the game's own
+  // home dashboard (the platform is "home"). Go straight to the lobby the platform chose: FREE drops
+  // right in; a paid tier runs the normal deposit flow (the Privy signature IS the explicit confirm) or,
+  // if the wallet is short, bounces back to the platform instead of stranding them on a game screen.
+  let st=Number(info.stake); if(!(st>=0)) st=0;   // any non-negative stake: 0=free, else its own arena
+  try{ if(st===0||st===1||st===5) selLobby(st); }catch(_){}
+  try{ await joinLobby(st); }catch(e){ console.error('[bridge] auto-join failed',e); _bridgeNotify('EXIT',{reason:'join-error'}); }
+}
+// Announce readiness to the platform (parent) and wait for its INIT reply carrying the shared wallet.
+function _bridgeBoot(){
+  return new Promise((resolve)=>{
+    let done=false;
+    const onMsg=(ev)=>{
+      if(_bridgeParentOrigin!=='*' && ev.origin!==_bridgeParentOrigin) return;
+      const d=ev.data; if(!d || d.__snakebridge!==1 || d.kind!=='INIT') return;
+      if(ev.origin && ev.origin!=='null') _bridgeParentOrigin=ev.origin;  // lock to the real platform origin
+      window.removeEventListener('message',onMsg);
+      done=true;
+      finishLoginBridge(d).then(resolve).catch(e=>{ console.error('[bridge] login failed',e); resolve(); });
+    };
+    window.addEventListener('message',onMsg);
+    const ping=()=>{ try{ window.parent.postMessage({__snakebridge:1,kind:'HELLO'},_bridgeParentOrigin); }catch(_){} };
+    ping(); const iv=setInterval(()=>{ if(done) clearInterval(iv); else ping(); },500);
+    setTimeout(()=>{ clearInterval(iv); if(!done){ window.removeEventListener('message',onMsg); console.warn('[bridge] no INIT from platform'); resolve(); } },30000);
+  });
 }
 
 async function checkSession(){
@@ -2824,7 +2924,7 @@ async function refClaim(){
   try{
     const ts=Math.floor(Date.now()/1000);
     const _msg=new TextEncoder().encode('pac-arena:ref-claim:'+ST.address+':0:'+ts);
-    const _sig=btoa(String.fromCharCode(...nacl.sign.detached(_msg,_keypair.secretKey)));
+    const _sig=await _sigB64(_msg);
     const r=await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':_sig,'x-settle-ts':String(ts)},
       body:JSON.stringify({action:'ref-claim',playerAddress:ST.address,wagerLamports:0})});
     const d=await r.json().catch(()=>({}));
@@ -2915,7 +3015,7 @@ async function doWithdraw(){
     const tx=new solanaWeb3.Transaction();
     tx.recentBlockhash=blockhash; tx.feePayer=from;
     tx.add(solanaWeb3.SystemProgram.transfer({fromPubkey:from,toPubkey:to,lamports:lamps}));
-    tx.sign(_keypair);
+    await signLocalTx(tx);
 
     const sendRes=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({jsonrpc:'2.0',id:2,method:'sendTransaction',
@@ -3340,7 +3440,9 @@ async function joinLobby(usd){
   await refreshBal();
   if(ST.balance<ST.wagerSol+0.001){
     addToast('❌ Not enough SOL! Need '+(ST.wagerSol+0.001).toFixed(4)+' (have '+ST.balance.toFixed(4)+')','#FF4444');
-    _joiningLobby=false; return;
+    _joiningLobby=false;
+    if(_BRIDGE){ _bridgeNotify('EXIT',{reason:'insufficient-funds',need:(ST.wagerSol+0.001),have:ST.balance,usd:usd}); }  // back to the platform to deposit
+    return;
   }
   addToast('🐍 Joining $'+usd+' lobby — wagering '+ST.wagerSol.toFixed(4)+' SOL…','#FFD700');
   stopLobbyCountPoll();
@@ -3399,7 +3501,9 @@ async function joinLobby(usd){
     lg('mm-log','Recording wager…','lhi');
     // ss- prefix routes paid lobbies through the authoritative snake sim (same path as ss-free-lobby),
     // not the legacy relay. Without this the server never simulates food/collisions for paid rooms.
-    const roomId=usd===1?'ss-paid-lobby-1':'ss-paid-lobby-5';
+    // Any stake gets its own arena — the server creates the room on demand and gates by token, so a
+    // $2 / $0.50 / $12 lobby works exactly like $1 or $5 (the id is just a label).
+    const roomId='ss-paid-lobby-'+usd;
     const _pName=getMyName();
     // api/join.js is the authority — it re-checks the chain with its own retries. Give it a few goes
     // (each call does real on-chain work) so a tx that just needed a few more seconds still gets in.
@@ -4922,10 +5026,10 @@ async function _wgPost(body,headers,label){
   }
   throw lastErr||new Error(label+' failed');
 }
-function _wgSignedHeaders(action,lamps){
+async function _wgSignedHeaders(action,lamps){
   const ts=Math.floor(Date.now()/1000);
   const msg=new TextEncoder().encode('pac-arena:'+action+':'+ST.address+':'+(lamps||0)+':'+ts);
-  const sig=btoa(String.fromCharCode(...nacl.sign.detached(msg,_keypair.secretKey)));
+  const sig=await _sigB64(msg);
   return {'Content-Type':'application/json','x-settle-sig':sig,'x-settle-ts':String(ts)};
 }
 function _wgGuard(){
@@ -4970,7 +5074,7 @@ async function _wgCreate(){
       subject2:s2?s2.pid:null,subject2Name:s2?s2.name:null,subj2IpHash:s2?s2.ipHash:null,subj2Exp:s2?s2.exp:null,subj2Sig:s2?s2.sig:null,
       duel:!!f.duel,
       durationMs:f.type==='survive'?f.durationMs:0,txSig,creatorName:nm};
-    const d=await _wgPost(body,_wgSignedHeaders('wager-create',lamps),'Bet');
+    const d=await _wgPost(body,await _wgSignedHeaders('wager-create',lamps),'Bet');
     addToast('✅ Bet posted — waiting for an opponent','#39FF14',5000);
     _wg.form=null;
     if(d.wager){_wg.open.set(d.wager.id,d.wager);_wg.mine.unshift(d.wager);}
@@ -4989,7 +5093,7 @@ async function _wgHide(id,all){
   try{
     const body=all?{action:'wager-hide',playerAddress:ST.address,all:true}
                   :{action:'wager-hide',playerAddress:ST.address,wagerId:id};
-    const r=await fetch('/api/settle',{method:'POST',headers:_wgSignedHeaders('wager-hide',0),body:JSON.stringify(body)});
+    const r=await fetch('/api/settle',{method:'POST',headers:await _wgSignedHeaders('wager-hide',0),body:JSON.stringify(body)});
     const d=await r.json().catch(()=>({}));
     if(!r.ok||!d.ok){ addToast(d.error||'Could not remove that bet','#FF6600',5000); return; }
     // Mirror it locally so the list updates without a refetch.
@@ -5017,7 +5121,7 @@ async function _wgAccept(id){
     // A duel names both snakes up front, so taking one needs nothing extra — you simply take the
     // other side, and the freshness signatures above already prove both snakes are still in play.
     const mine=null;
-    const rv=await fetch('/api/settle',{method:'POST',headers:_wgSignedHeaders('wager-reserve',0),
+    const rv=await fetch('/api/settle',{method:'POST',headers:await _wgSignedHeaders('wager-reserve',0),
       body:JSON.stringify({action:'wager-reserve',playerAddress:ST.address,wagerId:id,
         subjExp:rs.exp,subjSig:rs.sig,
         subj2Exp:rs2?rs2.exp:null,subj2Sig:rs2?rs2.sig:null,
@@ -5032,7 +5136,7 @@ async function _wgAccept(id){
     const txSig=await _wgDeposit(lamps);
     let nm=''; try{ nm=(typeof getMyName==='function'?(getMyName()||''):''); }catch(_){}
     const d=await _wgPost({action:'wager-accept',playerAddress:ST.address,wagerId:id,txSig,acceptorName:nm},
-      _wgSignedHeaders('wager-accept',0),'Match');
+      await _wgSignedHeaders('wager-accept',0),'Match');
     addToast('✅ Bet matched — good luck!','#39FF14',5000);
     if(d.wager){_wg.open.delete(id);_wg.live.set(d.wager.id,d.wager);_wg.mine.unshift(d.wager);}
     refreshBal().catch(()=>{}); _wgRender();
@@ -7242,6 +7346,8 @@ async function endSnakeGame(reason,killerId){
   }
   await refreshBal();
   if(!keepAlive){if(isHost&&SG&&pkRoomId)saveKillFood();pkDisconnect();}
+  // After a cash-out the game keeps the player spectating (normal flow) — they return to the platform
+  // only when THEY press HOME (goHome → EXIT). No auto-bounce.
 }
 
 function enterSpectate(){
@@ -7261,7 +7367,7 @@ async function rejoinGame(){
   const usd=ST.lobbyUsd; // capture wager tier before goHome() clears state
   // Snapshot active bot modes before goHome() destroys SG
   const botsSnapshot=wasPractice&&SG?[...SG.snakes.entries()].filter(([id])=>id.startsWith('bot-')).map(([,s])=>s.botMode||'circle'):[];
-  goHome();
+  goHome(true);   // reset game state but STAY (bridge: do not leave to the platform) — we're re-joining
   if(wasPractice){
     launchPractice(); // practice lobby: re-launch locally, no network needed
     if(botsSnapshot.length)setTimeout(()=>botsSnapshot.forEach(mode=>spawnBotSnake(mode)),100);
@@ -7287,7 +7393,10 @@ async function rejoinGame(){
   }
 }
 
-function goHome(){
+function goHome(stay){
+  // Bridge + a real "leave" (not an internal reset): signal the platform FIRST, before any cleanup that
+  // could throw and freeze the frame. The platform navigates to its home and destroys this iframe.
+  if(_BRIDGE && !stay){ try{ _plRelease(); }catch(_){} _bridgeNotify('EXIT',{reason:'home'}); return; }
   _isPractice=false; _hideSyncOverlay();
   isSpectating=false; _localDead=false; _cashedOut=false; _firstRemoteSync=false; _autoCircle=false;
   _showTuning=false; const _tp=document.getElementById('tuning-panel');if(_tp)_tp.style.display='none';
@@ -7310,6 +7419,8 @@ function goHome(){
   const ws=document.getElementById('watch-switch');
   if(ws)ws.style.display='none';
   pkDisconnect();
+  if(stay) return;                      // internal reset (rejoin) — reset state but stay in the game
+  if(_BRIDGE){ _bridgeNotify('EXIT',{reason:'home'}); return; }
   go('scr-home');
 }
 
@@ -8044,9 +8155,11 @@ function _renderBench(){
 // ops rasterise later. It happens to point the right way, confirmed on real frames (see _GRIDMODE), but
 // do not reason about renderer cost from JS timers or from draw loops that never present a frame.
 function _paintHexStrokes(g,camX,camY,zoom,W,H){
-  // WORLD-LOCKED grid: R is a constant in WORLD units, so the hexes are part of the world and scale
-  // smoothly with zoom (like slither.io) instead of the old screen-constant `46/zoom` that stayed a
-  // fixed pixel size and appeared to slide/rescale as you zoomed. Kill switch: window._HEXWORLDLOCK=false.
+  // WORLD-LOCKED grid (default): R=46 in WORLD units, so the honeycomb is part of the world and scales
+  // smoothly with zoom (the look the owner wants). The old FPS death came from re-STROKING thousands of
+  // world hexes every gesture frame — that is now gone: during a zoom we only ever GPU-scale the cached
+  // bitmap (see drawArena), never live-stroke, so the look is world-locked AND the zoom stays smooth.
+  // Screen-constant (R=46/zoom, constant hex count) stays available via window._HEXWORLDLOCK===false.
   const R=(window._HEXWORLDLOCK===false?46/zoom:46), hx=1.5*R, hy=Math.sqrt(3)*R;
   const halfW=W/(2*zoom)+R, halfH=H/(2*zoom)+R;
   const cMin=Math.floor((camX-halfW)/hx)-1, cMax=Math.ceil((camX+halfW)/hx)+1;
@@ -8162,22 +8275,29 @@ function drawArena(){
       ctx.restore();
       _gridDrawn=true;
     }else if(_hc.cv && _hc.zoom>0 && window._HEXZOOMBLIT!==false){
-      // World-locked → the whole background scales uniformly with zoom, so scaling the cached bitmap by
-      // the EXACT zoom ratio is correct (no per-frame rebuild). Blit it while it still covers the screen;
-      // a big zoom-OUT shrinks it past the edges → fall through to a one-off live stroke for that frame.
-      const s=_camZoom/_hc.zoom;
-      const cxs=canvas.width/2+(_hc.camX-_camX)*_camZoom;   // where the cache centre lands on screen now
-      const cys=canvas.height/2+(_hc.camY-_camY)*_camZoom;
-      const covX=(_hc.cv.width/2)*s-Math.abs(canvas.width/2-cxs);
-      const covY=(_hc.cv.height/2)*s-Math.abs(canvas.height/2-cys);
-      if(covX>=canvas.width/2 && covY>=canvas.height/2){
-        ctx.save();
-        ctx.clip();
-        ctx.setTransform(1,0,0,1,0,0);
+      if(window._HEXWORLDLOCK!==false){
+        // WORLD-LOCKED (default): the whole grid scales uniformly with zoom, so GPU-scaling the cached
+        // bitmap by the exact zoom ratio is the CORRECT, cheap way to draw the in-flight frame — one
+        // drawImage, sub-millisecond, no re-stroke. We ALWAYS blit (never fall back to the thousands-of-
+        // hexes live stroke that caused the 20-30fps drop). On a big one-gesture zoom-OUT the shrunk
+        // bitmap may briefly not reach the very edge; the dark arena fill under it covers that for the
+        // ~90ms until zoom settles and the cache rebuilds once at the new zoom (full coverage).
+        const s=_camZoom/_hc.zoom;
+        const cxs=canvas.width/2+(_hc.camX-_camX)*_camZoom;
+        const cys=canvas.height/2+(_hc.camY-_camY)*_camZoom;
+        ctx.save(); ctx.clip(); ctx.setTransform(1,0,0,1,0,0);
         ctx.translate(cxs,cys); ctx.scale(s,s);
         ctx.drawImage(_hc.cv,-_hc.cv.width/2,-_hc.cv.height/2);
-        ctx.restore();
-        _gridDrawn=true;
+        ctx.restore(); _gridDrawn=true;
+      }else{
+        // SCREEN-CONSTANT (opt-out): zoom only shifts the grid's screen PHASE → UNSCALED offset blit.
+        const px=_hc.camX*_hc.zoom - _camX*_camZoom;
+        const py=_hc.camY*_hc.zoom - _camY*_camZoom;
+        if(Math.abs(px)<=_hc.margin && Math.abs(py)<=_hc.margin){
+          ctx.save(); ctx.clip(); ctx.setTransform(1,0,0,1,0,0);
+          ctx.drawImage(_hc.cv,(canvas.width-_hc.cv.width)/2+px,(canvas.height-_hc.cv.height)/2+py);
+          ctx.restore(); _gridDrawn=true;
+        }
       }
     }
   }
@@ -9019,7 +9139,8 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   _applyGfx(); // re-apply the saved graphics preset AFTER the window._BODYSEGS default runs, so the preset wins
   setTimeout(_checkBuild,4000);              // capture the current build's ETag shortly after load
   setInterval(_checkBuild,90000);            // then poll for a new deploy every 90s (reloads only when idle)
-  await checkSession();
+  if(_BRIDGE){ await _bridgeBoot(); }        // embedded by the platform → adopt the shared Privy wallet
+  else await checkSession();
   // Public "watch live" links (Discord etc.): /slither-snakes.html?watch=1&region=NA&tier=1
   // Takes priority over whatever checkSession() just restored — a spectator link should always
   // land you watching, logged in or not; hitting PLAY NOW from there goes to the normal flow.
