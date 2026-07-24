@@ -378,8 +378,13 @@ module.exports = async function handler(req, res) {
     // The Socket.io server validates this on connection; without it paid lobbies are rejected.
     // ss-paid-* are the snake game's paid rooms (authoritative sim); paid-lobby-* are legacy Pac-Man rooms.
     const VALID_LOBBIES = new Set(['ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
-    const gameToken  = VALID_LOBBIES.has(lobbyId) ? makeGameToken(walletAddress, lobbyId) : null;
-    const entryToken = VALID_LOBBIES.has(lobbyId) ? makeEntryToken(walletAddress, lobbyId) : null;
+    // Snake paid lobbies can be ANY stake — the room id is just a label; the money is the on-chain
+    // deposit this endpoint already verified, and the game server creates the arena on demand
+    // (getOrCreateRoom) validating only the token, not a fixed allowlist. So mint a token for any
+    // ss-paid-lobby-<amount> (e.g. ss-paid-lobby-2, ss-paid-lobby-0.5) plus the legacy fixed set.
+    const isValidLobby = VALID_LOBBIES.has(lobbyId) || /^ss-paid-lobby-(\d{1,6})(\.\d{1,2})?$/.test(lobbyId || '');
+    const gameToken  = isValidLobby ? makeGameToken(walletAddress, lobbyId) : null;
+    const entryToken = isValidLobby ? makeEntryToken(walletAddress, lobbyId) : null;
 
     return res.status(200).json({ ok: true, recorded: lamps, gameToken, entryToken });
   } catch (e) {
