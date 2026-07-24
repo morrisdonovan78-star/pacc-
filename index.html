@@ -915,10 +915,44 @@ let _jwt      = null;
 let _otpToken = null;
 let _keypair  = null; // solanaWeb3.Keypair - stored locally
 
+// ── SNAKE POT platform bridge (Phase 2, PAC ARENA) ────────────────────────────────────────────────
+// When embedded by the platform (iframe + ?bridge=1), PAC plays on the platform's shared Privy wallet
+// instead of a local keypair. Only SIGNING is rerouted to the parent (Privy signMessage/signTransaction);
+// escrow, fee routing and the whole /api backend are UNCHANGED. Outside an iframe (pac-arena.com) _BRIDGE
+// is false and every path below is the original local-keypair code. Mirrors slither-snakes.html.
+const _BRIDGE = (()=>{ try{ return !!(window.parent && window.parent!==window && new URLSearchParams(location.search).get('bridge')==='1'); }catch(_){ return false; } })();
+let _bridgeParentOrigin='*';
+const _bridgePending=new Map(); let _bridgeSeq=0;
+function _bytesToB64(u){ let s=''; for(let i=0;i<u.length;i++) s+=String.fromCharCode(u[i]); return btoa(s); }
+function _b64ToBytes(b){ return Uint8Array.from(atob(b),c=>c.charCodeAt(0)); }
+function _bridgeCall(kind,payload){
+  return new Promise((resolve,reject)=>{
+    const id=++_bridgeSeq; _bridgePending.set(id,{resolve,reject});
+    try{ window.parent.postMessage(Object.assign({__snakebridge:1,kind,id},payload||{}),_bridgeParentOrigin); }
+    catch(e){ _bridgePending.delete(id); reject(e); return; }
+    setTimeout(()=>{ if(_bridgePending.has(id)){ _bridgePending.delete(id); reject(new Error('wallet timeout — reopen the game')); } },60000);
+  });
+}
+function _bridgeNotify(kind,extra){ if(!_BRIDGE)return; try{ window.parent.postMessage(Object.assign({__snakebridge:1,kind},extra||{}),_bridgeParentOrigin); }catch(_){} }
+async function _sigB64(msgBytes){
+  if(_BRIDGE){ const r=await _bridgeCall('signMessage',{msg:_bytesToB64(msgBytes)}); return r.sig; }
+  if(!_keypair)throw new Error('No wallet loaded');
+  return btoa(String.fromCharCode(...nacl.sign.detached(msgBytes,_keypair.secretKey)));
+}
+if(_BRIDGE){
+  try{ _bridgeParentOrigin = (document.referrer ? new URL(document.referrer).origin : '*'); }catch(_){ _bridgeParentOrigin='*'; }
+  window.addEventListener('message',(ev)=>{
+    if(_bridgeParentOrigin!=='*' && ev.origin!==_bridgeParentOrigin) return;
+    const d=ev.data; if(!d || d.__snakebridge!==1 || !d.reply) return;
+    const p=_bridgePending.get(d.id); if(!p) return; _bridgePending.delete(d.id);
+    if(d.error) p.reject(new Error(d.error)); else p.resolve(d);
+  });
+}
+
 // ═══════════════════════════════════════════════════════════
 // UI HELPERS
 // ═══════════════════════════════════════════════════════════
-function go(id){ document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on')); document.getElementById(id).classList.add('on'); window.scrollTo(0,0); if(id==='scr-home') try{ _updateChampHomeCard(); }catch(_){} }
+function go(id){ if(_BRIDGE && id==='scr-home'){ _bridgeNotify('EXIT',{reason:'home'}); return; } document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on')); document.getElementById(id).classList.add('on'); window.scrollTo(0,0); if(id==='scr-home') try{ _updateChampHomeCard(); }catch(_){} }
 function showStep(n){ ['step-email','step-otp','step-create-wallet'].forEach(s=>{ document.getElementById(s).style.display = s==='step-'+n?'block':'none'; }); }
 function showErr(m){ const e=document.getElementById('login-err'); if(e){e.textContent=m;e.style.display='block';} }
 function hideErr(){ const e=document.getElementById('login-err'); if(e) e.style.display='none'; }
@@ -1416,6 +1450,43 @@ async function finishLogin(kp){
 // ═══════════════════════════════════════════════════════════
 // SESSION RESTORE
 // ═══════════════════════════════════════════════════════════
+// Bridge login: adopt the platform's shared Privy wallet (sentinel _keypair = pubkey only, no secret;
+// every signature goes through the platform). Never shows the game's own home dashboard — goes straight
+// to the chosen lobby (or spectate).
+async function finishLoginBridge(info){
+  ST.email=info.email||''; ST.address=info.address; _jwt=info.token||'';
+  _keypair={ publicKey:new solanaWeb3.PublicKey(info.address) };
+  ST.conn=makeConnection();
+  await fetchPrice();
+  await refreshBal().catch(()=>{});
+  const rsel=document.getElementById('region-sel'); if(rsel) rsel.value=REGION;
+  syncServerBtns();
+  try{ initCustomizePanel(); }catch(_){}
+  if(info.watch){
+    const reg=(info.region==='EU'?'EU':'NA'); const tier=Number(info.stake)||1;
+    try{ await enterWatchMode(reg,tier); }catch(e){ console.error('[bridge] watch failed',e); _bridgeNotify('EXIT',{reason:'watch-error'}); }
+    return;
+  }
+  let st=Number(info.stake); if(!(st>=0)) st=0;
+  try{ await joinLobby(st); }catch(e){ console.error('[bridge] auto-join failed',e); _bridgeNotify('EXIT',{reason:'join-error'}); }
+}
+function _bridgeBoot(){
+  return new Promise((resolve)=>{
+    let done=false;
+    const onMsg=(ev)=>{
+      if(_bridgeParentOrigin!=='*' && ev.origin!==_bridgeParentOrigin) return;
+      const d=ev.data; if(!d || d.__snakebridge!==1 || d.kind!=='INIT') return;
+      if(ev.origin && ev.origin!=='null') _bridgeParentOrigin=ev.origin;
+      window.removeEventListener('message',onMsg); done=true;
+      finishLoginBridge(d).then(resolve).catch(e=>{ console.error('[bridge] login failed',e); resolve(); });
+    };
+    window.addEventListener('message',onMsg);
+    const ping=()=>{ try{ window.parent.postMessage({__snakebridge:1,kind:'HELLO'},_bridgeParentOrigin); }catch(_){} };
+    ping(); const iv=setInterval(()=>{ if(done) clearInterval(iv); else ping(); },500);
+    setTimeout(()=>{ clearInterval(iv); if(!done){ window.removeEventListener('message',onMsg); console.warn('[bridge] no INIT'); resolve(); } },30000);
+  });
+}
+
 async function checkSession(){
   const last=localStorage.getItem('pa_last'); if(!last)return;
   const raw=localStorage.getItem('pa_'+last); if(!raw)return;
@@ -1478,6 +1549,13 @@ function setupOtp(){
 // LOCAL TRANSACTION SIGNING — uses browser-stored keypair
 // ═══════════════════════════════════════════════════════════
 async function signLocalTx(tx){
+  if(_BRIDGE){
+    const raw=_bytesToB64(tx.serialize({requireAllSignatures:false,verifySignatures:false}));
+    const r=await _bridgeCall('signTransaction',{tx:raw});
+    const signed=solanaWeb3.Transaction.from(_b64ToBytes(r.tx));
+    tx.signatures=signed.signatures;
+    return tx;
+  }
   if(!_keypair) throw new Error('Wallet not loaded — please log in again.');
   tx.sign(_keypair);
   return tx;
@@ -2103,7 +2181,7 @@ async function joinLobby(usd){
   // If the player already paid for this lobby type (e.g. pkConnect failed after payment),
   // reuse the existing game token instead of charging them again.
   if(usd>0 && ST.hasEscrow && ST.entryToken){
-    const _rr=usd===1?'paid-lobby-1':'paid-lobby-25';
+    const _rr='paid-lobby-'+usd;
     go('scr-mm');
     document.getElementById('mm-sub').textContent='Wager already locked · Reconnecting…';
     lg('mm-log','Resuming existing wager — no new charge','lhi');
@@ -2113,7 +2191,7 @@ async function joinLobby(usd){
   // TX was broadcast but confirmTransaction timed out (or recordWager failed) before
   // ST.entryToken was set — retry registration with the saved sig, no new charge.
   if(usd>0 && ST.hasEscrow && ST._pendingJoinSig && !ST.entryToken){
-    const _rr=ST._pendingJoinRoom||(usd===1?'paid-lobby-1':'paid-lobby-25');
+    const _rr=ST._pendingJoinRoom||('paid-lobby-'+usd);
     go('scr-mm');
     document.getElementById('mm-sub').textContent='Retrying previous deposit…';
     lg('mm-log','Transaction already broadcast — retrying registration without new charge','lhi');
@@ -2165,6 +2243,7 @@ async function joinLobby(usd){
   if(ST.balance<ST.wagerSol+0.001){
     addToast('❌ Not enough SOL! Need '+(ST.wagerSol+0.001).toFixed(4)+' (have '+ST.balance.toFixed(4)+')','#FF4444');
     _joiningLobby=false;
+    if(_BRIDGE){ _bridgeNotify('EXIT',{reason:'insufficient-funds',need:(ST.wagerSol+0.001),have:ST.balance,usd:usd}); }
     return;
   }
   // No confirm popup — just join immediately and show a toast
@@ -2195,7 +2274,7 @@ async function joinLobby(usd){
     // Mark escrow immediately after broadcast — TX is on Solana now.
     // If confirmTransaction times out below, hasEscrow stays true so the next join
     // attempt takes the recovery path (retry without a new charge) instead of re-paying.
-    const roomId=usd===1?'paid-lobby-1':'paid-lobby-25';
+    const roomId='paid-lobby-'+usd;   // any stake gets its own room (server creates on demand, token-gated)
     ST.hasEscrow=true;
     ST._pendingJoinSig=sig;
     ST._pendingJoinLamps=lamps;
@@ -2415,7 +2494,7 @@ async function claimKillReward(victimSol, victimAddress, killProof, killTs){
     const wagerLamports=Math.floor(rewardSol*solanaWeb3.LAMPORTS_PER_SOL);
     const estKill=(rewardSol*0.9).toFixed(4);
     addToast('⚔️ KILL! +~'+estKill+' SOL incoming…','#00FF7F');
-    const {sig:_kSig,ts:_kTs}=signSettleMsg('kill',ST.address,wagerLamports);
+    const {sig:_kSig,ts:_kTs}=await signSettleMsg('kill',ST.address,wagerLamports);
     const r=await fetch('/api/settle',{
       method:'POST',
       headers:{'Content-Type':'application/json','x-settle-sig':_kSig,'x-settle-ts':String(_kTs)},
@@ -5560,7 +5639,7 @@ async function endGame(reason){
 // entryToken — HMAC-signed proof of payment; included in hello so host/guests can
 //              verify each other server-side via /api/verify-entry (can't be forged).
 async function recordWager(walletAddress, wagerLamports, txSig, lobbyId, playerName) {
-  const {sig, ts} = signSettleMsg('join', walletAddress, wagerLamports);
+  const {sig, ts} = await signSettleMsg('join', walletAddress, wagerLamports);
   const r = await fetch('/api/join', {
     method: 'POST',
     headers: {'Content-Type':'application/json','x-settle-sig':sig,'x-settle-ts':String(ts)},
@@ -5574,13 +5653,11 @@ async function recordWager(walletAddress, wagerLamports, txSig, lobbyId, playerN
 // Sign a settle request with the player's own wallet private key.
 // The server verifies the signature matches the playerAddress — only the real
 // wallet owner can produce a valid signature, so forged cashouts are impossible.
-function signSettleMsg(action, playerAddress, wagerLamports) {
-  if (!_keypair) throw new Error('No wallet loaded');
+async function signSettleMsg(action, playerAddress, wagerLamports) {
   const ts = Math.floor(Date.now() / 1000);
   const msg = 'pac-arena:' + action + ':' + (playerAddress||'') + ':' + (wagerLamports||0) + ':' + ts;
-  const msgBytes = new TextEncoder().encode(msg);
-  const sigBytes = nacl.sign.detached(msgBytes, _keypair.secretKey);
-  return { sig: btoa(String.fromCharCode(...sigBytes)), ts };
+  const sig = await _sigB64(new TextEncoder().encode(msg));
+  return { sig, ts };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -5596,7 +5673,7 @@ async function settle(result){
   lg('res-log','Processing payout via server…','lhi');
   try{
     const action=(result==='p1'||result==='draw')?'cashout':'lose';
-    const {sig:_sSig,ts:_sTs}=signSettleMsg(action,ST.address,0);
+    const {sig:_sSig,ts:_sTs}=await signSettleMsg(action,ST.address,0);
     const r=await fetch('/api/settle',{
       method:'POST',
       headers:{'Content-Type':'application/json','x-settle-sig':_sSig,'x-settle-ts':String(_sTs)},
@@ -5628,7 +5705,7 @@ async function recordLoss(){
   if(!ST.address||!pkRoomId||!ST.lobbyUsd)return; // paid lobbies only
   if(!_keypair)return;
   try{
-    const {sig,ts}=signSettleMsg('stat-loss',ST.address,0);
+    const {sig,ts}=await signSettleMsg('stat-loss',ST.address,0);
     await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':sig,'x-settle-ts':String(ts)},
       body:JSON.stringify({action:'stat-loss',playerAddress:ST.address,wagerLamports:0,lobbyId:pkRoomId})});
   }catch(e){ console.warn('[recordLoss]',e); }
@@ -6066,7 +6143,7 @@ async function instantCashout(){
   const estSol=(ST.wagerSol>0)?'~'+(ST.wagerSol*0.9).toFixed(4)+' SOL':'';
   addToast('💸 Cashing out'+(estSol?' '+estSol:'')+'…','#FFD700');
   try{
-    const {sig:_cSig,ts:_cTs}=signSettleMsg('cashout',ST.address,wagerLamports);
+    const {sig:_cSig,ts:_cTs}=await signSettleMsg('cashout',ST.address,wagerLamports);
     // Route through the game server socket — server marks p.alive=false synchronously
     // before calling settle, so kill detection and cashout run on the same Node.js event
     // loop. Only one can win. A player cannot be killed after they cash out, and cannot
@@ -6362,7 +6439,8 @@ window.addEventListener('load',()=>{
   },30000);
   // Restore region selector
   const rsel=document.getElementById('region-sel'); if(rsel) rsel.value=REGION;
-  checkSession().then(()=>{ updateExplorerLink(); updateCashoutBal(); });
+  if(_BRIDGE){ _bridgeBoot().then(()=>{ try{updateExplorerLink();updateCashoutBal();}catch(_){} }); }
+  else checkSession().then(()=>{ updateExplorerLink(); updateCashoutBal(); });
 
   // Public "watch live" links (Discord etc.): /index.html?watch=1&region=NA&tier=1
   // Takes priority over whatever checkSession() just restored — a spectator link should always

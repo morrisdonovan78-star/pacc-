@@ -382,7 +382,7 @@ module.exports = async function handler(req, res) {
     // deposit this endpoint already verified, and the game server creates the arena on demand
     // (getOrCreateRoom) validating only the token, not a fixed allowlist. So mint a token for any
     // ss-paid-lobby-<amount> (e.g. ss-paid-lobby-2, ss-paid-lobby-0.5) plus the legacy fixed set.
-    const isValidLobby = VALID_LOBBIES.has(lobbyId) || /^ss-paid-lobby-(\d{1,6})(\.\d{1,2})?$/.test(lobbyId || '');
+    const isValidLobby = VALID_LOBBIES.has(lobbyId) || /^(ss-)?paid-lobby-(\d{1,6})(\.\d{1,2})?$/.test(lobbyId || '');
     const gameToken  = isValidLobby ? makeGameToken(walletAddress, lobbyId) : null;
     const entryToken = isValidLobby ? makeEntryToken(walletAddress, lobbyId) : null;
 
