@@ -1,0 +1,27 @@
+name: event-autosettle
+
+# Server-side auto-settle trigger so Bounty-Hour payouts DON'T depend on a player's browser being
+# open. The web client only pings /api/settle {action:'event-board'} every 30s while a page is loaded,
+# and that ping is what fires the (idempotent, solvency-guarded) auto-payout once an event has ended.
+# When everyone leaves the site after a match, nothing pings it and the winner never gets paid. This
+# workflow pings it on a schedule from GitHub's runners instead — no browser required. The payout logic,
+# caps and solvency checks are unchanged; this only provides a reliable trigger.
+#
+# Requires EVENT_AUTOPAY to NOT be '0' in the Vercel env (that is the default). The ping is a public
+# read endpoint with no secrets, and settling is idempotent (per-place NX locks) so repeats are safe.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes (GitHub may delay a few min under load)
+  workflow_dispatch: {}       # lets you also fire it manually from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping event-board (triggers idempotent auto-settle of any ended event)
+        run: |
+          curl -sS -X POST "https://snakepot.com/api/settle" \
+            -H "Content-Type: application/json" \
+            -d '{"action":"event-board"}' \
+            -w '\nHTTP %{http_code}\n' || true
