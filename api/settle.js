@@ -1435,6 +1435,98 @@ module.exports = async function handler(req, res) {
       } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
     }
 
+    // ── COINFLIP "Tails Never Fails" money — cf-deposit registers a player's escrow deposit as bet
+    // liability (so the shared-escrow solvency invariant accounts for it, exactly like wagers), and
+    // cf-settle pays the winner (pot − 10%) or refunds both on a tie. Trustless: verifies the deposit
+    // ON-CHAIN and recomputes the provably-fair flip; solvency-guarded + NX-locked so it can never
+    // double-pay or overdraw the pool that funds the live snake/pac games. State lives in shared KV.
+    if (action === 'cf-deposit') {
+      const id = String(body.id || ''); const role = body.role === 'opponent' ? 'opponent' : 'creator';
+      const addr = String(body.address || ''); const sig = String(body.sig || '');
+      const lamports = Math.floor(Number(body.lamports) || 0);
+      if (!id || !addr || !sig || !(lamports > 0)) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'id, address, sig, lamports required' }); }
+      const key = 'cfdep:' + id + ':' + role;
+      // Claim the deposit slot ONCE — a replay must not re-register liability.
+      const claimed = await kvSetNX(key, JSON.stringify({ addr, sig, lamports }), 86400);
+      if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+      try {
+        const esc = getEscrow();
+        await verifyBetDepositTx(sig, addr, lamports, esc.pubkeyB58);        // must have really landed in escrow
+        await kvHincrby(BET_LEDGER, 'betLiability', lamports).catch(() => {}); // account it in the invariant
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true });
+      } catch (e) {
+        await kvDel(key).catch(() => {});                                   // release so a real deposit can retry
+        clearTimeout(guard); done = true;
+        return res.status(503).json({ error: (e && e.message) || 'deposit not verified', retry: true });
+      }
+    }
+
+    if (action === 'cf-settle') {
+      const m = body.match || {};
+      const id = String(m.id || '');
+      if (!id) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'match required' }); }
+      const shaHex = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+      const flipOf = (ss, ps) => parseInt(shaHex(ss + ':' + ps).slice(0, 8), 16) % 2;   // 0=heads 1=tails
+      if (!m.serverSeed || shaHex(m.serverSeed) !== m.serverSeedHash) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'bad server-seed commit' }); }
+      // Both deposits must be on record (registered + verified by cf-deposit).
+      const [cd, od] = await Promise.all([kvGet('cfdep:' + id + ':creator'), kvGet('cfdep:' + id + ':opponent')]);
+      if (!cd || !od) { clearTimeout(guard); done = true; return res.status(409).json({ error: 'both deposits not registered yet', retry: true }); }
+      const cDep = JSON.parse(cd), oDep = JSON.parse(od);
+      const dep = Math.min(cDep.lamports, oDep.lamports);   // pay on the smaller stake if they ever differ
+      const cFlip = flipOf(m.serverSeed, m.creatorSeed), oFlip = flipOf(m.serverSeed, m.opponentSeed);
+      const tie = cFlip === oFlip;
+      const lock = await kvSetNX('lock:cf:' + id, '1', 45);
+      if (!lock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'settlement in progress' }); }
+      try {
+        const esc = getEscrow();
+        if (tie) {
+          const out = {};
+          for (const [tag, addr] of [['c', cDep.addr], ['o', oDep.addr]]) {
+            const claimed = await kvSetNX('cfpaid:' + id + ':' + tag, '1', 86400);
+            if (!claimed) { out[tag] = { already: true }; continue; }
+            const r = await wgPayWinnerAndFee(esc, addr, dep, 0, 'cf-tie-' + tag);
+            if (!r.ok) { await kvDel('cfpaid:' + id + ':' + tag).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'refund held: ' + (r.reason || ''), retry: true }); }
+            await kvHincrby(BET_LEDGER, 'betLiability', -dep).catch(() => {});
+            out[tag] = { sig: r.sig };
+          }
+          clearTimeout(guard); done = true;
+          return res.status(200).json({ ok: true, tie: true, refunds: out });
+        }
+        const claimed = await kvSetNX('cfpaid:' + id, '1', 86400);
+        if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+        const winnerAddr = cFlip === 1 ? cDep.addr : oDep.addr;   // TAILS(1) wins
+        const pot = dep * 2;
+        const fee = Math.floor(pot * CREATOR_FEE_PCT);            // 10% to CREATOR_WALLET
+        const payout = pot - fee;
+        const pay = await wgPayWinnerAndFee(esc, winnerAddr, payout, fee, 'cf-settle');
+        if (!pay.ok) { await kvDel('cfpaid:' + id).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'payout held: ' + (pay.reason || ''), retry: true }); }
+        await kvHincrby(BET_LEDGER, 'betLiability', -pot).catch(() => {});
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true, tie: false, winner: winnerAddr, payout, fee, tx: pay.sig });
+      } finally { await kvDel('lock:cf:' + id).catch(() => {}); }
+    }
+
+    // cf-refund: a creator cancels their open flip before anyone joins → refund their deposit 100%, no
+    // fee, and clear the liability. Idempotent; only refunds a registered-but-unsettled deposit.
+    if (action === 'cf-refund') {
+      const id = String(body.id || ''); const role = body.role === 'opponent' ? 'opponent' : 'creator';
+      if (!id) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'id required' }); }
+      const raw = await kvGet('cfdep:' + id + ':' + role);
+      if (!raw) { clearTimeout(guard); done = true; return res.status(404).json({ error: 'no deposit on record' }); }
+      const d = JSON.parse(raw);
+      const claimed = await kvSetNX('cfpaid:' + id + ':' + role + ':refund', '1', 86400);
+      if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+      try {
+        const esc = getEscrow();
+        const r = await wgPayWinnerAndFee(esc, d.addr, d.lamports, 0, 'cf-refund');
+        if (!r.ok) { await kvDel('cfpaid:' + id + ':' + role + ':refund').catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'refund held: ' + (r.reason || ''), retry: true }); }
+        await kvHincrby(BET_LEDGER, 'betLiability', -d.lamports).catch(() => {});
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true, tx: r.sig });
+      } catch (e) { await kvDel('cfpaid:' + id + ':' + role + ':refund').catch(() => {}); clearTimeout(guard); done = true; return res.status(500).json({ error: (e && e.message) || 'refund failed' }); }
+    }
+
     // ── wager-return: unmatched at close → creator refunded 100%, NO fee (GAME_SECRET-HMAC) ──────
     if (action === 'wager-return') {
       const wid = String(body.wagerId || '');
