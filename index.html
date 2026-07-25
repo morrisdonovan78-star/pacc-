@@ -4133,10 +4133,10 @@ function _buildMazeCanvas(){
   for(let r=0;r<R;r++) for(let c=0;c<C;c++){
     const v=G.maze[r][c],x=c*T,y=r*T;
     if(v===1){
-      // Classic dark-blue wall fill
-      mc.fillStyle='#08014A'; mc.fillRect(x,y,T,T);
-      // Bright blue highlight on each side that faces a corridor cell
-      mc.strokeStyle='#2121DE'; mc.lineWidth=2;
+      // Dark-red wall fill (matches the snake arena border)
+      mc.fillStyle='#4A0108'; mc.fillRect(x,y,T,T);
+      // Bright red highlight on each side that faces a corridor cell
+      mc.strokeStyle='#FF2A2A'; mc.lineWidth=2;
       const adjTop   =r>0   &&G.maze[r-1][c]!==1;
       const adjBot   =r<R-1 &&G.maze[r+1][c]!==1;
       const adjLeft  =c>0   &&G.maze[r][c-1]!==1;
