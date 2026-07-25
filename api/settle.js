@@ -1467,14 +1467,24 @@ module.exports = async function handler(req, res) {
       const id = String(m.id || '');
       if (!id) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'match required' }); }
       const shaHex = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
-      const flipOf = (ss, ps) => parseInt(shaHex(ss + ':' + ps).slice(0, 8), 16) % 2;   // 0=heads 1=tails
+      // Per-round flip: each re-flip mixes the round index into the player seed, so a tie can roll
+      // again from the SAME committed serverSeed (no new commit needed). 0=heads, 1=tails.
+      const flipR = (ss, ps, r) => parseInt(shaHex(ss + ':' + ps + ':' + r).slice(0, 8), 16) % 2;
       if (!m.serverSeed || shaHex(m.serverSeed) !== m.serverSeedHash) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'bad server-seed commit' }); }
+      // Trustless round proof: the winning round must be the FIRST decisive one — every earlier round
+      // must recompute to a tie from the committed seeds, else the caller is cherry-picking a round.
+      const round = Math.max(0, Math.min(300, Math.floor(Number(m.round) || 0)));
+      for (let r = 0; r < round; r++) {
+        if (flipR(m.serverSeed, m.creatorSeed, r) !== flipR(m.serverSeed, m.opponentSeed, r)) {
+          clearTimeout(guard); done = true; return res.status(403).json({ error: 'round ' + r + ' was decisive, not a tie' });
+        }
+      }
       // Both deposits must be on record (registered + verified by cf-deposit).
       const [cd, od] = await Promise.all([kvGet('cfdep:' + id + ':creator'), kvGet('cfdep:' + id + ':opponent')]);
       if (!cd || !od) { clearTimeout(guard); done = true; return res.status(409).json({ error: 'both deposits not registered yet', retry: true }); }
       const cDep = JSON.parse(cd), oDep = JSON.parse(od);
       const dep = Math.min(cDep.lamports, oDep.lamports);   // pay on the smaller stake if they ever differ
-      const cFlip = flipOf(m.serverSeed, m.creatorSeed), oFlip = flipOf(m.serverSeed, m.opponentSeed);
+      const cFlip = flipR(m.serverSeed, m.creatorSeed, round), oFlip = flipR(m.serverSeed, m.opponentSeed, round);
       const tie = cFlip === oFlip;
       const lock = await kvSetNX('lock:cf:' + id, '1', 45);
       if (!lock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'settlement in progress' }); }
