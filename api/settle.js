@@ -120,7 +120,12 @@ async function settleBounty(ev, opts) {
     players: board.length, plan };
   if (!plan.ok) return { ok: false, reason: plan.reason, plan };   // no lock taken → retries later
   const paid = [];
-  for (const w of plan.winners) {
+  // One-off (bounty-2026-07-25): the 1st-place finisher was the operator, who entered and won fairly
+  // but DECLINED their own prize — pay ONLY 2nd place. Scoped by event id so every other/future event
+  // still pays 1st+2nd normally. Solvency was already verified on the FULL plan above, so paying this
+  // strict subset is always within float. 2nd place's amount is unchanged ($15, the second prize).
+  const _payList = ev.id === 'bounty-2026-07-25' ? plan.winners.filter(w => w.place !== 1) : plan.winners;
+  for (const w of _payList) {
     const lk = await kvSetNX('evtpaid:' + ev.id + ':' + w.place, String(Date.now()));
     if (!lk) { paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, already: true }); continue; }
     const r = await wgPayOne(esc, w.addr, w.lamports, 'bounty:' + ev.id + ':' + w.place);
