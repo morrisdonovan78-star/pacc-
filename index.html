@@ -707,7 +707,7 @@ body{touch-action:manipulation;}
 </div>
 
 <!-- REJOIN OVERLAY — shown when local player is eliminated; pay original wager to respawn -->
-<div id="rejoin-overlay" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.88);z-index:500;align-items:center;justify-content:center;flex-direction:column;">
+<div id="rejoin-overlay" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.45);z-index:500;align-items:center;justify-content:center;flex-direction:column;">
   <div class="card" style="max-width:380px;width:90%;text-align:center;padding:2rem 1.75rem;">
     <div style="font-family:'Press Start 2P',monospace;font-size:18px;margin-bottom:.5rem;">💀</div>
     <div id="rjo-head" style="font-family:'Press Start 2P',monospace;font-size:12px;color:#FF4444;margin-bottom:.6rem;">YOU WERE KILLED!</div>
@@ -3304,8 +3304,8 @@ function launchGame(spectateMode){
     try{ const saved=localStorage.getItem('pa_muted'); _muted=(saved==='1'); }catch(_){ _muted=false; }
     _mb.textContent=_muted?'🔇':'🔊';
   }
-  // Show voice chat button
-  const _vb=document.getElementById('voice-btn'); if(_vb) _vb.style.display='flex';
+  // On-screen mic button removed — mic toggles with M; muting is PER-PLAYER in the leaderboard now.
+  const _vb=document.getElementById('voice-btn'); if(_vb) _vb.style.display='none';
   // Show adaptive keybind strip
   const _kh=document.getElementById('kb-hud'); if(_kh){ _kh.style.display='flex'; _updateKbHud(); }
   // Always show spectator counter during gameplay (starts at 0)
@@ -3428,18 +3428,27 @@ function updateScoreboard(){
   const sb=document.getElementById('score-board');
   if(!sb||!G) return;
   const sorted=[...G.players.values()].sort((a,b)=>b.sc-a.sc);
-  // Skip the expensive innerHTML rebuild when nothing has changed.
-  // The signature encodes player count + each player's id prefix, score and lives.
-  // This eliminates 30 DOM rebuilds/sec during normal play — a significant CPU saving.
-  const sig=sorted.length+'|'+sorted.map(p=>p.id.slice(0,6)+':'+p.sc+','+p.lives+(_voiceSpeaking.has(p.id)?'S':'')).join('|');
-  if(sig===_lastSbSig) return;
+  const usd=ST.lobbyUsd||0, pot=usd>0?(usd*sorted.length):0;
+  // Skip the innerHTML rebuild when nothing changed (incl. mute state + voice mode). But ALWAYS keep
+  // the per-peer proximity gains fresh (players move every frame), so run that even on a no-op.
+  const sig=sorted.length+'|'+usd+'|'+(_voiceProximity?'P':'G')+'|'+[..._mutedPeers].join(',')+'|'+sorted.map(p=>p.id.slice(0,6)+':'+p.sc+','+p.lives+(_voiceSpeaking.has(p.id)?'S':'')).join('|');
+  if(sig===_lastSbSig){ _voiceUpdateProximity(); return; }
   _lastSbSig=sig;
-  sb.innerHTML=sorted.map(p=>`<div class="gi" style="border-color:${p.color}44;${_voiceSpeaking.has(p.id)?'box-shadow:0 0 6px '+p.color+';':''}"><span class="gl" style="color:${p.color};">${p.id===myPid?'YOU':'P'+(p.num+1)}</span><span class="gv" style="color:${p.color};">${p.sc}</span><span style="font-size:9px;"> ${'❤'.repeat(Math.max(0,p.lives))}${_voiceSpeaking.has(p.id)?' 🎤':''}</span></div>`).join('');
-  const _potEl=document.getElementById('hpot');
-  if(_potEl){
-    const _usd=ST.lobbyUsd||0;
-    _potEl.textContent=_usd>0?('$'+(_usd*sorted.length)):'FREE';
-  }
+  // PULP-style leaderboard: Total Pot on top, ranked players, a per-player mute, a proximity toggle.
+  let h='<div style="text-align:center;color:#9aa;font-family:\'Press Start 2P\',monospace;font-size:6px;letter-spacing:1px;">TOTAL POT</div>'
+    +'<div style="text-align:center;color:#39FF14;font-family:\'Press Start 2P\',monospace;font-size:14px;margin:1px 0 7px;">'+(usd>0?'$'+pot:'FREE')+'</div>';
+  sorted.slice(0,6).forEach((p,i)=>{
+    const me=p.id===myPid, nm=me?'YOU':('P'+(p.num+1)), muted=_mutedPeers.has(p.id);
+    const muteBtn=me?'':'<button onclick="togglePeerMute(\''+p.id+'\')" title="Mute this player" style="background:none;border:none;cursor:pointer;font-size:11px;line-height:1;padding:0 0 0 4px;color:'+(muted?'#FF4444':'#888')+';">'+(muted?'🔇':'🔊')+'</button>';
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:11px;padding:2px 0;color:'+p.color+';">'
+      +'<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:96px;">'+(i===0?'👑 ':(i+1)+'. ')+nm+(_voiceSpeaking.has(p.id)?' 🎤':'')+'</span>'
+      +'<span style="display:flex;align-items:center;gap:3px;white-space:nowrap;"><b style="color:#FFD700;">'+p.sc+'</b><span style="font-size:8px;color:#FF4d6d;">'+'❤'.repeat(Math.max(0,p.lives))+'</span>'+muteBtn+'</span></div>';
+  });
+  h+='<button onclick="toggleVoiceMode()" title="Toggle proximity / global voice" style="width:100%;text-align:center;color:#9aa;font-size:8px;margin-top:6px;border:none;border-top:1px solid rgba(255,255,255,0.12);padding-top:5px;background:none;cursor:pointer;">🎙️ Voice: '+(_voiceProximity?'Proximity':'Global')+' ⇄</button>';
+  sb.innerHTML=h;
+  sb.style.display='block'; sb.style.textAlign='left'; sb.style.pointerEvents='auto';
+  const _potEl=document.getElementById('hpot'); if(_potEl) _potEl.textContent=usd>0?('$'+pot):'FREE';
+  _voiceUpdateProximity();
 }
 
 function p1d(dx,dy){
@@ -6286,17 +6295,42 @@ function _closeVoicePeer(pid){
   _voiceReadyPids.delete(pid);
 }
 
+// Per-player mute + proximity: each peer gets its OWN gain node (analyser → gain → destination), so
+// muting one player zeroes only THAT gain, and proximity mode fades players by maze distance.
+let _mutedPeers=new Set();
+let _voiceProximity=true;
+const VOICE_MAX_TILES=13;   // silent beyond this many tiles in proximity mode
 function _getOrMakePeerAudio(pid){
   if(!_voicePlayCtx) return null;
   let s=_peerAudioCtxs.get(pid);
   if(!s){
     const an=_voicePlayCtx.createAnalyser(); an.fftSize=256;
-    an.connect(_voicePlayCtx.destination);
-    s={analyser:an,nextTime:0};
+    const g=_voicePlayCtx.createGain(); g.gain.value=_mutedPeers.has(pid)?0:1;
+    an.connect(g); g.connect(_voicePlayCtx.destination);
+    s={analyser:an,gain:g,nextTime:0};
     _peerAudioCtxs.set(pid,s);
     _voiceAnalysers.set(pid,an);
   }
   return s;
+}
+window.togglePeerMute=function(pid){
+  if(!pid)return;
+  if(_mutedPeers.has(pid))_mutedPeers.delete(pid); else _mutedPeers.add(pid);
+  const s=_peerAudioCtxs.get(pid); if(s&&s.gain){try{s.gain.gain.value=_mutedPeers.has(pid)?0:1;}catch(_){}}
+  try{updateScoreboard&&(_lastSbSig='')&&updateScoreboard();}catch(_){}
+};
+window.toggleVoiceMode=function(){ _voiceProximity=!_voiceProximity; try{addToast(_voiceProximity?'🎙️ Voice: Proximity — nearby players louder':'🌐 Voice: Global','#8cf');}catch(_){} try{_lastSbSig='';updateScoreboard();}catch(_){} };
+function _voiceUpdateProximity(){
+  if(!_voicePlayCtx||!G||!G.players||!_peerAudioCtxs.size)return;
+  const me=G.players.get(myPid);
+  _peerAudioCtxs.forEach((s,pid)=>{
+    if(!s.gain)return;
+    let g;
+    if(_mutedPeers.has(pid)) g=0;
+    else if(!_voiceProximity) g=1;
+    else { const p=G.players.get(pid); g=(!me||!p)?1:Math.max(0,Math.min(1,1-Math.hypot(p.x-me.x,p.y-me.y)/VOICE_MAX_TILES)); }
+    try{ if(Math.abs(s.gain.gain.value-g)>0.02) s.gain.gain.value=g; }catch(_){}
+  });
 }
 
 function _playVoiceChunk(from,ab){
