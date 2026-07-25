@@ -119,9 +119,19 @@ async function settleBounty(ev, opts) {
   // One-off (bounty-2026-07-25): the 1st-place finisher was the operator, who entered and won fairly
   // but DECLINED their own prize — pay ONLY 2nd place. Applied to plan.winners here so the dry-run
   // PREVIEW, the real payout, and the Discord results post are all consistent (only 2nd shown/paid).
-  // Scoped by event id → every other/future bounty still pays 1st+2nd. Solvency (plan.ok) was checked
-  // on the full 1st+2nd sum, so paying this strict subset is always within float. 2nd's $15 unchanged.
-  if (ev.id === 'bounty-2026-07-25') plan.winners = plan.winners.filter(w => w.place !== 1);
+  // Scoped by event id → every other/future bounty still pays 1st+2nd. 2nd's $15 is unchanged.
+  if (ev.id === 'bounty-2026-07-25') {
+    plan.winners = plan.winners.filter(w => w.place !== 1);
+    // RE-VERIFY solvency for the reduced set. plan.ok/totalLamports/shortfall from planBountyPayout
+    // reflect the FULL 1st+2nd sum, which the float may NOT cover even when it covers 2nd alone — so
+    // without this the !plan.ok guard below would bail and pay NOBODY. Mirror finalizePlan exactly
+    // (spendable = escrow − floor; no TX_FEE here, wgPayOne's assertSolvency does the on-chain check).
+    plan.totalLamports = plan.winners.reduce((s, w) => s + w.lamports, 0);
+    const _spendable = Math.max(0, bal - RENT_MIN);
+    plan.ok = plan.totalLamports > 0 && plan.totalLamports <= _spendable;
+    plan.reason = plan.ok ? 'ok' : (plan.totalLamports > 0 ? 'insufficient float' : 'zero payout');
+    if (plan.ok) delete plan.shortfall; else plan.shortfall = plan.totalLamports - _spendable;
+  }
   if (dryRun) return { dryRun: true, id: ev.id, solPriceUsd: price || 0, escrowSol: bal / 1e9,
     players: board.length, plan };
   if (!plan.ok) return { ok: false, reason: plan.reason, plan };   // no lock taken → retries later
