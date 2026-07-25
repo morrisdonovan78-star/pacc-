@@ -5592,6 +5592,9 @@ function _onVisibility(){
     const t=performance.now();
     _hostPredTs=0;_guestPredTs=0;_lastTickTs=t;
     if(SG)SG.snakes.forEach(s=>{s._predTs=0;});
+    // Backgrounding can silently drop GPU-backed offscreen canvases (the body sprites) without ever
+    // firing a 2D 'contextlost' on the main canvas. Rebuild them so no snake returns invisible.
+    _invalidateRenderCaches();
   }
 }
 document.addEventListener('visibilitychange',_onVisibility);
@@ -6665,6 +6668,15 @@ function launchSnakeGame(){
   const sbar=document.getElementById('spectate-bar');if(sbar)sbar.style.display='none';
   canvas=document.getElementById('gc');
   ctx=canvas.getContext('2d');
+  // Recover from a GPU/canvas context loss (see _invalidateRenderCaches): if the browser wipes the
+  // canvas backing stores, rebuild the cached body sprites so snakes don't stay invisible after the
+  // screen "goes black and comes back". preventDefault() asks the browser to fire 'contextrestored'.
+  // Hook once — launchSnakeGame reuses the same #gc element every match.
+  if(!canvas._ctxLossHooked){
+    canvas._ctxLossHooked=true;
+    canvas.addEventListener('contextlost',e=>{ e.preventDefault(); },{passive:false});
+    canvas.addEventListener('contextrestored',_invalidateRenderCaches);
+  }
   canvas.width=window.innerWidth;
   canvas.height=window.innerHeight;
   mmCanvas=document.getElementById('minimap');
@@ -8150,6 +8162,16 @@ function _strokeBodyPath(pts,n){ let started=false; ctx.beginPath();
 function _hx2rgb(h){ if(h&&h.charCodeAt(0)===35&&h.length>=7) return [parseInt(h.substr(1,2),16),parseInt(h.substr(3,2),16),parseInt(h.substr(5,2),16)]; return null; }
 function _mixc(rgb,t,tg){ return 'rgb('+((rgb[0]+(tg-rgb[0])*t)|0)+','+((rgb[1]+(tg-rgb[1])*t)|0)+','+((rgb[2]+(tg-rgb[2])*t)|0)+')'; }
 const _bodySpriteCache=new Map();
+// ── GPU/canvas CONTEXT-LOSS recovery ("screen went black, came back, ALL snakes invisible") ──────────
+// The browser can wipe every offscreen-canvas backing store on a GPU driver reset / GPU switch (laptops)
+// / tab-backgrounding under memory pressure. Everything drawn DIRECTLY each frame — hex grid, food,
+// eyes, nameplates, minimap, arena border — repaints fine, so it looks like only the snakes vanished.
+// But each snake BODY is a CACHED shaded-sphere sprite (_bodySprite), and the cache is only rebuilt on a
+// MISS; its key (colour|radius) never changes mid-match, so the now-BLANK cached canvases keep getting
+// blitted forever → every body stays invisible until reload. (The hex grid self-heals only because ITS
+// cache key includes camX/camY/zoom, so it rebuilds as the camera moves — the sprites never do.)
+// Dropping the caches forces a fresh createElement('canvas') on the next draw, restoring the bodies.
+function _invalidateRenderCaches(){ try{ _bodySpriteCache.clear(); if(typeof _hexCache!=='undefined'&&_hexCache)_hexCache.cv=null; }catch(_){} }
 function _bodySprite(col,r){
   // Built at SCREEN resolution (radius bucketed in screen px): the camera zoom is ~2.0 at fullscreen,
   // so a world-sized sprite was being UPSCALED 2× through the canvas transform on every stamp —
