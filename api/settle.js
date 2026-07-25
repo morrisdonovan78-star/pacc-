@@ -2039,6 +2039,10 @@ module.exports = async function handler(req, res) {
             try{
               const _wname = await kvHget('ph:'+playerAddress,'name');
               await postWinToDiscord(payout, _wname, sig);
+              // Public "Live Cashouts" feed — the platform home reads cashouts:recent (name + lamports + game).
+              await kvLpush('cashouts:recent', JSON.stringify({ name:_wname||'player', lamports:payout, game, ts:Date.now() }));
+              await kvLtrim('cashouts:recent', 0, 49);
+              await kvExpire('cashouts:recent', 172800);
             }catch(_){}
             break;
           } catch (e) {
