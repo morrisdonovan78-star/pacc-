@@ -116,16 +116,17 @@ async function settleBounty(ev, opts) {
   catch (e) { return { ok: false, reason: 'escrow load: ' + (e && e.message) }; }
   const plan = PAYOUT.planBountyPayout({ board, solPriceUsd: price || 0, escrowLamports: bal,
     floorLamports: RENT_MIN, prizes: { first: 25, second: 15, bump: 35 }, bumpMinPlayers: 10 });
+  // One-off (bounty-2026-07-25): the 1st-place finisher was the operator, who entered and won fairly
+  // but DECLINED their own prize — pay ONLY 2nd place. Applied to plan.winners here so the dry-run
+  // PREVIEW, the real payout, and the Discord results post are all consistent (only 2nd shown/paid).
+  // Scoped by event id → every other/future bounty still pays 1st+2nd. Solvency (plan.ok) was checked
+  // on the full 1st+2nd sum, so paying this strict subset is always within float. 2nd's $15 unchanged.
+  if (ev.id === 'bounty-2026-07-25') plan.winners = plan.winners.filter(w => w.place !== 1);
   if (dryRun) return { dryRun: true, id: ev.id, solPriceUsd: price || 0, escrowSol: bal / 1e9,
     players: board.length, plan };
   if (!plan.ok) return { ok: false, reason: plan.reason, plan };   // no lock taken → retries later
   const paid = [];
-  // One-off (bounty-2026-07-25): the 1st-place finisher was the operator, who entered and won fairly
-  // but DECLINED their own prize — pay ONLY 2nd place. Scoped by event id so every other/future event
-  // still pays 1st+2nd normally. Solvency was already verified on the FULL plan above, so paying this
-  // strict subset is always within float. 2nd place's amount is unchanged ($15, the second prize).
-  const _payList = ev.id === 'bounty-2026-07-25' ? plan.winners.filter(w => w.place !== 1) : plan.winners;
-  for (const w of _payList) {
+  for (const w of plan.winners) {
     const lk = await kvSetNX('evtpaid:' + ev.id + ':' + w.place, String(Date.now()));
     if (!lk) { paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, already: true }); continue; }
     const r = await wgPayOne(esc, w.addr, w.lamports, 'bounty:' + ev.id + ':' + w.place);
