@@ -131,6 +131,11 @@ async function settleBounty(ev, opts) {
     plan.ok = plan.totalLamports > 0 && plan.totalLamports <= _spendable;
     plan.reason = plan.ok ? 'ok' : (plan.totalLamports > 0 ? 'insufficient float' : 'zero payout');
     if (plan.ok) delete plan.shortfall; else plan.shortfall = plan.totalLamports - _spendable;
+    // 2nd place ($15) was PAID MANUALLY (a direct SOL transfer outside the settle system) after the
+    // event, so the per-place NX pay-lock was never taken. Now that EVENT_AUTOPAY is gone and any poll
+    // triggers a real settle, the automated path would try to pay him AGAIN → double-pay. Short-circuit
+    // the REAL settle for this one event to prevent it. The dry-run above still returns the info plan.
+    if (!dryRun) return { ok: true, id: ev.id, reason: 'settled-manually (2nd paid out-of-band)', winners: [] };
   }
   if (dryRun) return { dryRun: true, id: ev.id, solPriceUsd: price || 0, escrowSol: bal / 1e9,
     players: board.length, plan };
@@ -1042,8 +1047,9 @@ module.exports = async function handler(req, res) {
       }
       // Auto-settle: once a bounty window has ended, pay the winners from the float — idempotent
       // (per-place NX locks) and solvency-guarded, so only the first post-event reader does the work
-      // and it can never overpay or touch player funds. Kill-switch: set env EVENT_AUTOPAY=0.
-      if (state === 'ended' && ev && process.env.EVENT_AUTOPAY !== '0') { try { await settleBounty(ev, { dryRun: false }); } catch (_) {} }
+      // and it can never overpay or touch player funds. Always on (the EVENT_AUTOPAY kill-switch was
+      // removed 2026-07-25 — it had been silently disabling every event payout).
+      if (state === 'ended' && ev) { try { await settleBounty(ev, { dryRun: false }); } catch (_) {} }
       clearTimeout(guard); done = true;
       if (!ev) return res.status(200).json({ active: false });
       const h = (await kvHgetall('evtk:' + ev.id).catch(() => null)) || {};
