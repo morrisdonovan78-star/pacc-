@@ -7008,8 +7008,14 @@ function onMouseMove(e){
     // to +/-100000 would make small mouse moves barely change the angle (sluggish aim) and would
     // re-create the dead zone we're fixing. movementX/Y can be huge on one event — clamp per axis.
     const W=(canvas&&canvas.width)||window.innerWidth, H=(canvas&&canvas.height)||window.innerHeight;
-    _mouseX=Math.max(0,Math.min(W,_mouseX+(e.movementX||0)));
-    _mouseY=Math.max(0,Math.min(H,_mouseY+(e.movementY||0)));
+    // Spike guard: Chrome occasionally reports a single bogus movement of tens of thousands of px
+    // (a cursor-warp / signed-16-bit-overflow glitch). No real mouse crosses more than one screen
+    // between two mousemove events, so clamp each event's delta to the viewport — a legit fast flick
+    // is spread across many events, so this never throttles real aim but kills the teleport spike.
+    let dx=e.movementX||0, dy=e.movementY||0;
+    dx=Math.max(-W,Math.min(W,dx)); dy=Math.max(-H,Math.min(H,dy));
+    _mouseX=Math.max(0,Math.min(W,_mouseX+dx));
+    _mouseY=Math.max(0,Math.min(H,_mouseY+dy));
     return; // no _specDrag while locked — spectators are never locked (see _plWant)
   }
   _mouseX=e.clientX;_mouseY=e.clientY;
@@ -7046,7 +7052,16 @@ function _plRequest(){
   if(!_plWant() || _plActive()) return;
   if(Date.now()<_plCooldown) return;           // Chrome rejects a re-lock right after an Esc exit
   const t=_plTarget(); if(!t||!t.requestPointerLock) return;
-  try{ const p=t.requestPointerLock(); if(p&&p.catch)p.catch(()=>{}); }catch(_){}
+  // Request RAW (unadjusted) movement: without this Chrome hands us OS-ACCELERATED deltas, so with
+  // Windows "Enhance pointer precision" on, a FAST flick gets multiplied by the acceleration curve and
+  // the virtual cursor shoots straight to the viewport edge — that's the "aim jumps/teleports when I
+  // move the mouse fast" bug. unadjustedMovement gives 1:1 deltas at every speed (what FPS games use).
+  // The options form returns a Promise (Chrome 88+); if raw movement isn't supported it rejects with
+  // NotSupportedError → fall back to a plain accelerated lock so aim still works.
+  try{
+    const p=t.requestPointerLock({unadjustedMovement:true});
+    if(p&&p.then){ p.catch((err)=>{ if(!err||err.name==='NotSupportedError'){ try{ t.requestPointerLock(); }catch(_){} } }); }
+  }catch(_){ try{ t.requestPointerLock(); }catch(__){} }
 }
 function _plRelease(){ try{ if(document.pointerLockElement) document.exitPointerLock(); }catch(_){} }
 document.addEventListener('pointerlockchange',()=>{
