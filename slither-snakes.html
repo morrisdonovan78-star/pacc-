@@ -5543,8 +5543,13 @@ function _checkHost(){
 // so fast/boosting snakes don't tunnel through collisions). On return we hand back to RAF.
 function _bgSimStep(){
   if(!SG||SG.over)return;
-  // Own snake (host or guest) — identical motion to rafDraw's prediction, one full tick.
-  if(!_localDead){
+  // Own snake — ONLY dead-reckon in practice (client runs physics). LIVE (server-authoritative) games:
+  // the SERVER already moves the snake toward its last aim every tick and kills it on collision even
+  // while your tab is hidden (ssTick runs on a server timer, not on your input), so predicting it here
+  // just DIVERGES from the server — that's the "it said I was eliminated but my snake was still moving in
+  // the background" desync (and the snap/weird-turn on return). Let live games follow the server; on
+  // return, snapshot interpolation shows the true position (coasted-and-maybe-dead), no ghost, no snap.
+  if(!_localDead && _isPractice){
     const my=SG.snakes.get(myPid);
     if(my&&my.alive&&my.path.length){
       if(_autoCircle||_cashoutActive){my.angle+=MAX_TURN;}else if(!document.hidden){const da=angleDiff(targetAngleToMouse(my),my.angle);my.angle+=Math.max(-MAX_TURN,Math.min(MAX_TURN,da));}
