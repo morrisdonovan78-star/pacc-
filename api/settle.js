@@ -4,7 +4,7 @@ const nacl    = require('tweetnacl');
 const crypto  = require('crypto');
 const GAME_SECRET = (process.env.GAME_SECRET || '').trim();
 const { kvPing, kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvZrevrange, kvHincrby,
-        kvLpush, kvLtrim, kvLrange, kvHget, kvHset, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
+        kvLpush, kvLtrim, kvLrange, kvHget, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
 // Pure pari-mutuel engine (spectator betting). All money math lives here so it is unit-tested
 // offline; this file only does auth, KV, and the on-chain transfers. See lib/betting.js.
 const BET = require('../lib/betting');
@@ -1207,57 +1207,66 @@ module.exports = async function handler(req, res) {
       return res.status(200).json(await settleRecruiter(wk, { dryRun: true }));
     }
 
-    // ── bj-audit: inventory every registered blackjack ante and (ADMIN) QUARANTINE the dead ones ─────
-    // Each ante is `bjdep:<tableId>:<handNum>:<addr>`; it is "consumed" once `bjpaid:…` is flagged (won
-    // out, split, pushed or refunded). An ante whose TABLE no longer exists in KV is ORPHANED: the engine
-    // can never settle or refund it, so the lamports sit in escrow uncredited and the liability counter
-    // never clears. Orphans are also what the operator ends up paying BY HAND — and a hand-paid ante is
-    // dangerous precisely because it is still unflagged, so any later automated retry would pay it a
-    // SECOND time out of escrow. Quarantining sets the paid flag (every payout path is NX-guarded on it,
-    // so this makes a re-pay impossible) and clears the matching liability.
+    // ── bj-audit: inventory every registered blackjack ante; find UNPAID hands; (ADMIN) seal dead ones ─
+    // Each ante is `bjdep:<tableId>:<handNum>:<addr>`, flagged `bjpaid:…` once it has been paid out or
+    // refunded. ⚠️ Only WINNERS get flagged on a win, so "unflagged" does NOT mean "unpaid" — a loser's
+    // ante is unflagged forever and its money correctly went to the winner. Classifying per ANTE is what
+    // makes that mistake; this classifies per HAND:
+    //   settled  — some ante in the hand was paid out (or the fee was taken). Unflagged antes in it are
+    //              LOSERS. Nothing is owed and their liability was already cleared by bj-settle, which
+    //              decrements the WHOLE pot. Decrementing again would understate real obligations and let
+    //              escrow be overdrawn, so quarantine NEVER touches the ledger.
+    //   unpaid   — nothing in the hand was ever paid and its table is gone: the pot was collected and the
+    //              winner never got it. THIS is the money to chase (`unpaidHands` below).
+    // Quarantine seals a dead hand's antes by setting the NX `bjpaid` flag every payout path is guarded
+    // on, which makes paying it again impossible — the point after the operator has settled up by hand.
     // Read-only dry-run by default so anyone can inspect; writing requires ADMIN_SECRET.
     if (action === 'bj-audit') {
       const keys = await kvScan('bjdep:*', 5000);
       const rows = [];
       for (const k of keys) {
-        const rest = k.slice('bjdep:'.length);
-        const parts = rest.split(':');
-        const addr = parts.length >= 3 ? parts[parts.length - 1] : '';
-        const handNum = parts.length >= 3 ? parts[parts.length - 2] : '';
-        const tableId = parts.slice(0, Math.max(0, parts.length - 2)).join(':');
-        const handId = tableId + ':' + handNum;
+        const parts = k.slice('bjdep:'.length).split(':');
+        if (parts.length < 3) continue;
+        const addr = parts[parts.length - 1];
+        const handId = parts.slice(0, parts.length - 1).join(':');
         let lamports = 0, sig = '';
         try { const d = JSON.parse(await kvGet(k) || '{}'); lamports = Math.floor(Number(d.lamports) || 0); sig = String(d.sig || ''); } catch (_) {}
-        const consumed = !!(await kvGet('bjpaid:' + handId + ':' + addr));
-        const tableAlive = !!(await kvGet('bjt:' + tableId));
-        rows.push({ handId, addr, lamports, sig, consumed, tableAlive, orphaned: !consumed && !tableAlive });
+        rows.push({ handId, tableId: parts.slice(0, parts.length - 2).join(':'), addr, lamports, sig, consumed: !!(await kvGet('bjpaid:' + handId + ':' + addr)) });
       }
-      const orphans = rows.filter((r) => r.orphaned);
+      const hands = {};
+      for (const r of rows) {
+        const h = hands[r.handId] || (hands[r.handId] = { handId: r.handId, tableId: r.tableId, antes: 0, pot: 0, paidSeats: 0, seats: [] });
+        h.antes++; h.pot += r.lamports; if (r.consumed) h.paidSeats++; h.seats.push(r);
+      }
+      for (const h of Object.values(hands)) {
+        h.feeTaken = !!(await kvGet('bjfee:' + h.handId));
+        h.tableAlive = !!(await kvGet('bjt:' + h.tableId));
+        h.queued = !!(await kvGet('bjq:' + h.handId));                 // still in the settlement retry queue
+        h.settled = h.paidSeats > 0 || h.feeTaken;
+        h.unpaid = !h.settled && !h.tableAlive && !h.queued;           // pot collected, winner never paid
+      }
+      const all = Object.values(hands).sort((a, b) => a.handId.localeCompare(b.handId));
+      const unpaidHands = all.filter((h) => h.unpaid);
+      const sealable = rows.filter((r) => !r.consumed && !hands[r.handId].tableAlive && !hands[r.handId].queued);
       const info = {
-        antes: rows.length,
-        consumed: rows.filter((r) => r.consumed).length,
-        liveTable: rows.filter((r) => !r.consumed && r.tableAlive).length,
-        orphaned: orphans.length,
-        orphanedLamports: orphans.reduce((n, r) => n + r.lamports, 0),
-        rows,
+        antes: rows.length, hands: all.length,
+        settledHands: all.filter((h) => h.settled).length,
+        liveHands: all.filter((h) => h.tableAlive || h.queued).length,
+        unpaidHands: unpaidHands.map((h) => ({ handId: h.handId, potLamports: h.pot, potSol: +(h.pot / 1e9).toFixed(6), seats: h.seats.map((s) => s.addr) })),
+        unpaidLamports: unpaidHands.reduce((n, h) => n + h.pot, 0),
+        sealableAntes: sealable.length,
+        handSummary: all.map((h) => ({ handId: h.handId, antes: h.antes, potLamports: h.pot, paidSeats: h.paidSeats, feeTaken: h.feeTaken, tableAlive: h.tableAlive, queued: h.queued, settled: h.settled, unpaid: h.unpaid })),
       };
       if (body.dryRun === false) {
         const adminSec = (req.headers['x-admin-secret'] || '').trim(), serverSec = (process.env.ADMIN_SECRET || '').trim();
         if (!(adminSec && serverSec && adminSec === serverSec)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'admin only' }); }
-        let flagged = 0, cleared = 0;
-        for (const r of orphans) {
-          const c = await kvSetNX('bjpaid:' + r.handId + ':' + r.addr, 'quarantined', 604800);
-          if (!c) continue;                                   // someone else flagged it in the meantime
-          flagged++; cleared += r.lamports;
-          await kvHincrby(BET_LEDGER, 'betLiability', -r.lamports).catch(() => {});
-        }
-        const led = await readBetLedger();
-        if (led.betLiability < 0) await kvHset(BET_LEDGER, 'betLiability', '0').catch(() => {});
+        let sealed = 0;
+        for (const r of sealable) { if (await kvSetNX('bjpaid:' + r.handId + ':' + r.addr, 'sealed', 604800)) sealed++; }
         clearTimeout(guard); done = true;
-        return res.status(200).json({ ok: true, applied: true, flagged, clearedLamports: cleared, betLiability: (await readBetLedger()).betLiability, ...info });
+        return res.status(200).json({ ok: true, applied: true, sealed, ledgerUntouched: true, ...info });
       }
       clearTimeout(guard); done = true;
-      return res.status(200).json({ ok: true, applied: false, dryRun: true, ...info, howToApply: 'POST again with {"action":"bj-audit","dryRun":false} and header x-admin-secret: <ADMIN_SECRET>' });
+      return res.status(200).json({ ok: true, applied: false, dryRun: true, ...info, howToApply: 'POST again with {"action":"bj-audit","dryRun":false} and header x-admin-secret: <ADMIN_SECRET> — seals every dead ante so it can never be paid again. Does NOT touch betLiability.' });
     }
 
     // ── bet-reconcile: repair the shared bet/blackjack liability ledger (ADMIN, read-safe dry-run) ──
