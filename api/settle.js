@@ -1693,6 +1693,14 @@ module.exports = async function handler(req, res) {
     if (action === 'bj-refund') {
       const handId = String(body.handId || ''); const addr = String(body.address || '');
       if (!handId || !addr) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'handId, address required' }); }
+      // Server-to-server only — the trusted blackjack engine signs each refund it authorizes (same
+      // GAME_SECRET-HMAC trust model as bj-settle). ⚠️ Without this, bj-refund was UNAUTHENTICATED: any
+      // client could POST {handId,address} and reclaim ANY registered, unsettled ante — including their
+      // OWN losing ante (a hand's payout only NX-flags the WINNER as paid, so a loser's bjdep looked
+      // refundable) — double-spending the pot straight out of escrow. The engine only ever requests a
+      // refund for an ante NOT dealt into a live hand (see undealtAnteHandId), so real refunds are unaffected.
+      const gts = Number(req.headers['x-game-ts'] || 0);
+      if (!verifyGameProof(req, 'bj-refund:' + handId + ':' + addr + ':' + gts)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
       const raw = await kvGet('bjdep:' + handId + ':' + addr);
       if (!raw) { clearTimeout(guard); done = true; return res.status(404).json({ error: 'no deposit on record' }); }
       const d = JSON.parse(raw);
