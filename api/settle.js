@@ -1185,6 +1185,36 @@ module.exports = async function handler(req, res) {
       return res.status(200).json(await settleRecruiter(wk, { dryRun: true }));
     }
 
+    // ── bet-reconcile: repair the shared bet/blackjack liability ledger (ADMIN, read-safe dry-run) ──
+    // `betLiability` is a running counter: EVERY ante/bet deposit adds to it, EVERY settle/refund
+    // subtracts. When a settlement fails to complete — a payout the solvency gate refused, or a winner
+    // the operator paid BY HAND from escrow outside the system — the `+deposit` lands but the `−settle`
+    // never does. It RATCHETS above the escrow's real balance, and once `betLiability > escrow` the
+    // solvency invariant refuses EVERY blackjack/bet payout AND its fee (they would "eat another
+    // bettor's stake"), so payouts freeze until a human sends the money. Blackjack pots are self-funded
+    // (each hand's antes are in escrow at settle), so the honest counter at rest is 0 — nothing is
+    // mid-hand, and a live hand re-adds its own antes on the next deposit. This resets the counter to a
+    // target (default 0). Dry-run by default so anyone can inspect; the real write requires ADMIN_SECRET.
+    if (action === 'bet-reconcile') {
+      const escR = getEscrow();
+      const led = await readBetLedger();
+      const balR = await rpc('getBalance', [escR.pubkeyB58, { commitment: 'confirmed' }]);
+      const escrowLamports = (balR && typeof balR.value === 'number') ? balR.value : (typeof balR === 'number' ? balR : 0);
+      const cur = Math.max(0, Math.floor(Number(led.betLiability) || 0));
+      const target = body.setLamports != null ? Math.max(0, Math.floor(Number(body.setLamports) || 0)) : 0;
+      const info = { escrowLamports, currentBetLiability: cur, accruedFee: led.accruedFee, proposedBetLiability: target, deltaLamports: target - cur };
+      if (body.dryRun === false) {
+        const adminSec = (req.headers['x-admin-secret'] || '').trim(), serverSec = (process.env.ADMIN_SECRET || '').trim();
+        if (!(adminSec && serverSec && adminSec === serverSec)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'admin only' }); }
+        if (target !== cur) await kvHincrby(BET_LEDGER, 'betLiability', target - cur);
+        const after = await assertSolvency(escR.pubkeyB58, 0);
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true, applied: true, ...info, newBetLiability: target, payoutsWouldSucceed: !!after.ok });
+      }
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, applied: false, dryRun: true, ...info, howToApply: 'POST again with {"action":"bet-reconcile","dryRun":false} and header x-admin-secret: <ADMIN_SECRET>' });
+    }
+
     // ── park-food / get-food: persist a paid lobby's UNCLAIMED gold food across an empty room ──────
     // Server-to-server only (GAME_SECRET-HMAC, exactly like elim-lock). Touches ONLY KV, never escrow:
     // the dead players' SOL is already pooled in escrow — these persist the CLAIM TICKETS (gold orbs)
