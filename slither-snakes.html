@@ -1203,12 +1203,9 @@ body.mctl #voice-speakers{left:150px;}
       <button class="btn btn-c btn-sm" style="padding:4px 10px;font-size:10px;" onclick="goHome()">⌂ HOME</button>
     </div>
     <!-- Public "watch live" viewer: lobby switcher, only shown while spectating via a watch link -->
-    <div id="watch-switch" style="display:none;gap:6px;flex-wrap:wrap;justify-content:center;">
-      <button class="copy-btn" onclick="enterWatchMode('NA',1)">🇺🇸 NA $1</button>
-      <button class="copy-btn" onclick="enterWatchMode('NA',5)">🇺🇸 NA $5</button>
-      <button class="copy-btn" onclick="enterWatchMode('EU',1)">🇩🇪 EU $1</button>
-      <button class="copy-btn" onclick="enterWatchMode('EU',5)">🇩🇪 EU $5</button>
-    </div>
+    <!-- Filled in by _renderWatchSwitch() from the LIVE lobby list. It used to be these four fixed
+         buttons, which is why only $1 and $5 arenas were ever watchable. -->
+    <div id="watch-switch" style="display:none;gap:6px;flex-wrap:wrap;justify-content:center;"></div>
   </div>
   <canvas id="minimap" width="120" height="120"></canvas>
 </div>
@@ -4374,7 +4371,10 @@ function pkDisconnect(){
 // server only ever lets join the room to receive broadcasts (see _server_na.js's dedicated
 // spectator connection branch) — there is no code path from here that could join, move a
 // snake, or claim money, even from a hand-modified client.
-async function enterWatchMode(region,tier){
+// lobbyIdOpt = the EXACT room the caller wants (from the live lobby list / a Live Matches card).
+// Without it we can only rebuild an id from the stake, which is how spectating a $0.25 arena ended up
+// in a $1 room. When given, it wins outright — it came from the server's own /counts.
+async function enterWatchMode(region,tier,lobbyIdOpt){
   // NEVER let spectating tear down a paid session. This function begins by dropping the current
   // socket, so if a paid join is in flight (or already live) it would kill a connection the player
   // just PAID for — they'd be charged and then dumped to the home screen seconds after joining.
@@ -4384,11 +4384,12 @@ async function enterWatchMode(region,tier){
   if(_lobbyIsPaid&&!isSpectating&&SG&&!SG.over){ addToast('Cash out or finish your run before spectating','#FFD700',4000); return; }
   if(_sio)pkDisconnect(); // switching lobbies from an existing watch session, or first entry
   document.getElementById('watch-switch').style.display='flex';
+  _renderWatchSwitch();   // list the arenas that are actually live, not a fixed $1/$5 grid
   useGameServerForSession(region==='EU'?'EU':'NA');   // watch this region, keep the saved play preference
   // ONE automatic retry over polling if the first attempt times out. Watching is free and
   // read-only, so a retry can't cost anyone anything — and previously a stalled WebSocket just
   // failed the watch outright, which is why spectating sometimes took several manual attempts.
-  const _watchRoom=lobbyIdFor(tier);
+  const _watchRoom=(lobbyIdOpt&&/^ss-(free-lobby|paid-lobby-\d+(?:\.\d+)?)$/.test(lobbyIdOpt))?lobbyIdOpt:lobbyIdFor(tier);
   let _ok=await pkConnect(_watchRoom,null,true);
   if(!_ok){
     lg('mm-log','Retrying over HTTP polling…','lwarn');
@@ -5300,6 +5301,54 @@ async function _wgAccept(id){
   }catch(e){ console.warn('[wg accept]',e); addToast('Error: '+(e.message||e),'#FF4444',6000); }
   finally{ _wg.busy=false; }
 }
+// ── LIVE LOBBY DISCOVERY (both regions) ──────────────────────────────────────────────────────────
+// Spectating used to offer a HARDCODED [$1, $5] × [NA, EU] grid, so any other arena — $0.25, $0.50,
+// $2, $12, the FREE lobby — was simply unwatchable, and clicking a card for one of them just opened
+// whichever of those four rooms matched the shape of the request. Both pickers now enumerate what is
+// ACTUALLY running from each node's /counts and watch that EXACT room id, so every live lobby at any
+// stake is spectatable and the button always lands on the arena it names.
+async function _fetchLiveLobbies(){
+  const out=[];
+  await Promise.all(Object.keys(GAME_SERVERS).map(async (reg)=>{
+    try{
+      const r=await fetch(GAME_SERVERS[reg].url+'/counts',{cache:'no-store'});
+      const d=await r.json();
+      for(const k of Object.keys(d||{})){
+        if(k==='_players')continue;
+        const n=d[k];
+        if(typeof n!=='number'||n<1)continue;
+        let stake=null;
+        if(k==='ss-free-lobby')stake=0;
+        else{ const m=/^ss-paid-lobby-(\d+(?:\.\d+)?)$/.exec(k); if(m)stake=parseFloat(m[1]); }
+        if(stake===null)continue;                      // pac / test / unknown rooms aren't snake arenas
+        const names=(d._players&&Array.isArray(d._players[k]))?d._players[k]:[];
+        out.push({region:reg,lobbyId:k,stake,count:n,names});
+      }
+    }catch(_){}
+  }));
+  out.sort((a,b)=>b.stake-a.stake||b.count-a.count);
+  return out;
+}
+const _stakeLabel=(s)=>(Number(s)>0?('$'+Number(s)):'FREE');
+
+// Rebuild the "switch arena" strip shown while spectating from the live lobby list, so it offers the
+// arenas that exist right now instead of the same four fixed tiers.
+async function _renderWatchSwitch(){
+  const ws=document.getElementById('watch-switch');
+  if(!ws)return;
+  let rows=[];
+  try{ rows=await _fetchLiveLobbies(); }catch(_){}
+  if(!rows.length){ ws.innerHTML='<span style="font-size:10px;color:#8a7c54">No other live arenas right now</span>'; return; }
+  ws.innerHTML=rows.slice(0,10).map(r=>
+    '<button class="copy-btn" data-ws="'+r.region+'|'+r.lobbyId+'|'+r.stake+'">'+(r.region==='EU'?'🇩🇪':'🇺🇸')+' '+r.region+' '+_stakeLabel(r.stake)+' ('+r.count+')</button>'
+  ).join('');
+  ws.querySelectorAll('[data-ws]').forEach(b=>b.onclick=(e)=>{
+    e.preventDefault(); e.stopPropagation();
+    const [reg,lid,st]=b.getAttribute('data-ws').split('|');
+    enterWatchMode(reg,Number(st),lid);
+  });
+}
+
 // ── home-screen entry: pick an arena to watch & bet on ───────────────────────
 function openWatchBet(){
   let m=document.getElementById('wb-modal');
@@ -5311,15 +5360,41 @@ function openWatchBet(){
   h+='<span style="font-size:13px;font-weight:800;color:#FFD700;letter-spacing:.06em">🎲 WATCH &amp; BET</span>';
   h+='<span id="wb-x" style="cursor:pointer;color:#b8a97a;font-size:20px;font-weight:700;line-height:1">×</span></div>';
   h+='<div style="font-size:10px;color:#8a7c54;margin-bottom:14px;line-height:1.5">Spectate a live arena and bet against other watchers. Even money — you keep your winnings minus an 8% fee. No opponent? You get 100% back.</div>';
-  for(const [region,flag] of [['NA','🇺🇸'],['EU','🇩🇪']]){
-    h+='<div style="font-size:9px;color:#8a7c54;margin:8px 0 5px">'+flag+' '+region+'</div><div style="display:flex;gap:7px">';
-    for(const tier of [1,5]){
-      h+='<button data-wb="'+region+':'+tier+'" style="flex:1;background:rgba(255,215,0,.08);border:1px solid #6b5a20;color:#FFD700;border-radius:9px;font-weight:800;font-size:12px;padding:11px;cursor:pointer">$'+tier+' ARENA</button>';
-    }
-    h+='</div>';
-  }
+  h+='<div id="wb-list" style="font-size:11px;color:#8a7c54;padding:10px 0">Finding live arenas…</div>';
   h+='</div>';
   m.innerHTML=h;
+  // Filled in from the LIVE lobby list (see _fetchLiveLobbies) rather than a fixed $1/$5 grid, so
+  // every arena that is actually running is watchable and each button opens that exact room.
+  _fetchLiveLobbies().then((rows)=>{
+    const list=m.querySelector('#wb-list');
+    if(!list)return;
+    if(!rows.length){ list.innerHTML='<div style="color:#8a7c54">No live arenas right now — start one and it will appear here.</div>'; return; }
+    let byReg={};
+    for(const r of rows)(byReg[r.region]=byReg[r.region]||[]).push(r);
+    let x='';
+    for(const region of Object.keys(byReg)){
+      x+='<div style="font-size:9px;color:#8a7c54;margin:8px 0 5px">'+(region==='EU'?'🇩🇪':'🇺🇸')+' '+region+'</div>';
+      x+='<div style="display:flex;flex-direction:column;gap:6px">';
+      for(const r of byReg[region]){
+        const who=r.names&&r.names.length?r.names.slice(0,3).join(', '):(r.count+' playing');
+        x+='<button data-wb="'+region+'|'+r.lobbyId+'|'+r.stake+'" style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:rgba(255,215,0,.08);border:1px solid #6b5a20;color:#FFD700;border-radius:9px;font-weight:800;font-size:12px;padding:11px;cursor:pointer;text-align:left">'
+          +'<span>'+_stakeLabel(r.stake)+' ARENA</span>'
+          +'<span style="font-weight:600;font-size:10px;color:#b8a97a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px">'+r.count+' · '+who+'</span></button>';
+      }
+      x+='</div>';
+    }
+    list.innerHTML=x;
+    list.querySelectorAll('[data-wb]').forEach(b=>b.onclick=async (e)=>{
+      e.preventDefault(); e.stopPropagation();
+      if(_enteringWatch) return;                       // ignore a rapid second click
+      _enteringWatch=true;
+      const [region,lid,st]=b.getAttribute('data-wb').split('|');
+      closeWb();
+      try{ await enterWatchMode(region,Number(st),lid); }
+      catch(err){ addToast('Could not open arena','#FF4444'); }
+      finally{ _enteringWatch=false; _wbSuppressUntil=Date.now()+900; }
+    });
+  }).catch(()=>{});
   // Closing the picker arms a short suppression window. Without it, a fast second click lands on
   // whatever sits beneath the modal on the home screen (▶ PLAY NOW) and CHARGES the player for a
   // paid lobby they never meant to join. joinLobby() honours _wbSuppressUntil.
@@ -5329,16 +5404,7 @@ function openWatchBet(){
   // very click that opened it.
   const openedAt=Date.now();
   m.onclick=(e)=>{ if(e.target===m&&Date.now()-openedAt>250) closeWb(); };
-  m.querySelectorAll('[data-wb]').forEach(b=>b.onclick=async (e)=>{
-    e.preventDefault(); e.stopPropagation();
-    if(_enteringWatch) return;                       // ignore a rapid second click
-    _enteringWatch=true;
-    const [region,tier]=b.getAttribute('data-wb').split(':');
-    closeWb();
-    try{ await enterWatchMode(region,Number(tier)); }
-    catch(err){ addToast('Could not open arena','#FF4444'); }
-    finally{ _enteringWatch=false; _wbSuppressUntil=Date.now()+900; }
-  });
+  // (Arena buttons are bound when the live list resolves, above — there are none in the markup yet.)
 }
 
 // ══ SNAKE GAME LOGIC ════════════════════════════════════════
@@ -6661,18 +6727,25 @@ function _wclipDecorateShareBtn(){
 // the owner pulls with scripts/fetch-discord-clips.js to cut into promo montages. Fires at most once per
 // win, only for real paid cash-outs at/above the wall-of-winners threshold. Best-effort: any failure is
 // swallowed (the player's own SHARE MY WIN is the primary path — this is a bonus feed).
+// ⚠️ THE WIN ANNOUNCEMENT IS NOT CONDITIONAL ON A VIDEO. It used to bail whenever there was no clip
+// blob, so the wall-of-winners only ever saw wins from players whose recorder happened to succeed —
+// which is why real cash-outs (the reported missing $5) never appeared in the feed even though they
+// were paid. With automatic cash-out clips now OFF by default, that gate would have silenced the feed
+// completely. The win posts either way; the video is attached only when one exists.
 function _wclipAutoPost(){
   if(_wclipPosted) return;
   if(!SS_WIN_WEBHOOK){ console.info('[winclip] no post: SS_WIN_WEBHOOK unset'); return; }
   if(!_winShare){ return; } // fired before the win is armed — the arm site calls again
-  if(!_winShare.clip){ console.info('[winclip] no post: clip blob not ready yet (recorder still finalizing)'); return; }
   if(!(Number(_winShare.usd)>=SS_WIN_CLIP_MIN_USD)){ console.info('[winclip] no post: win $'+Number(_winShare.usd).toFixed(2)+' is below the $'+SS_WIN_CLIP_MIN_USD+' feed floor'); return; }
-  const blob=_winShare.clip;
-  if(blob.size > 25*1024*1024){ console.info('[winclip] no post: clip is '+(blob.size/1048576).toFixed(1)+'MB, over the 25MB Discord cap'); return; }
+  // Attach the clip only if we actually have a usable one. Too big for Discord = post without it
+  // rather than dropping the win.
+  let blob=_winShare.clip||null;
+  if(blob && blob.size>25*1024*1024){ console.info('[winclip] clip is '+(blob.size/1048576).toFixed(1)+'MB, over the 25MB cap — posting the win without video'); blob=null; }
+  // A clip may still be finalizing. Give the recorder a moment, but only when one is actually being
+  // made — otherwise post immediately. _wclipPosted is set on the real attempt so this can't double.
+  if(!blob && _wclipRec && _wclipStream){ setTimeout(()=>{ if(!_wclipPosted) _wclipAutoPost(); }, 1200); return; }
   _wclipPosted=true;
   try{
-    const ext=(_wclipMime && _wclipMime.indexOf('mp4')!==-1) ? 'mp4' : 'webm';
-    const fname='snakepot-win-'+Date.now()+'.'+ext;
     const who=((typeof getMyName==='function' && getMyName()) || 'A player');
     const usd=(Number(_winShare.usd)||0).toFixed(2);
     const sol=(Number(_winShare.sol)||0).toFixed(4);
@@ -6681,8 +6754,11 @@ function _wclipAutoPost(){
     if(_winShare.sig) content+='\n✅ Proof: https://explorer.solana.com/tx/'+_winShare.sig;
     const fd=new FormData();
     fd.append('content',content);
-    fd.append('file', blob, fname);
-    console.info('[winclip] posting '+(blob.size/1048576).toFixed(2)+'MB win-clip to Discord…');
+    if(blob){
+      const ext=(_wclipMime && _wclipMime.indexOf('mp4')!==-1) ? 'mp4' : 'webm';
+      fd.append('file', blob, 'snakepot-win-'+Date.now()+'.'+ext);
+    }
+    console.info('[winclip] posting win to Discord'+(blob?(' with a '+(blob.size/1048576).toFixed(2)+'MB clip'):' (no video)')+'…');
     fetch(SS_WIN_WEBHOOK,{method:'POST',body:fd})
       .then(r=>{ console.info('[winclip] Discord post '+(r.ok?'OK ✓':'FAILED — HTTP '+r.status)); })
       .catch(e=>{ console.warn('[winclip] Discord post network error',e); });
