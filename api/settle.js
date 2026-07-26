@@ -943,7 +943,9 @@ async function wgPayWinnerAndFee(esc, winner, payout, fee, tag) {
     // If the sweep would breach that floor, the FEE is trimmed — never the winner's payout. The
     // winner is owed their money; the platform cut is what should absorb the shortfall.
     const spendable = bal - RENT_MIN - TX_FEE;          // most we can move and stay rent-valid
-    let feeCut = cut;
+    // The rake absorbs this tx's ~5000-lamport network fee so escrow's net outflow equals exactly the
+    // pot (winner + fee), keeping it self-funding — no operator top-ups. The winner is never reduced.
+    let feeCut = Math.max(0, cut - TX_FEE);
     if (win > spendable) {
       // Can't even cover the winner while staying rent-valid — refuse rather than send a doomed tx.
       return { ok: false, reason: 'insufficient escrow for a rent-valid payout' };
@@ -1697,10 +1699,18 @@ module.exports = async function handler(req, res) {
         if (feeTotal > 0) {
           const fc = await kvSetNX('bjfee:' + handId, '1', 86400);
           if (fc) {
-            const fr = await wgPayOne(esc, CREATOR_WALLET, feeTotal, 'bj-fee');
-            if (!fr.ok) { await kvDel('bjfee:' + handId).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'fee held: ' + (fr.reason || ''), retry: true }); }
+            // Each winner payout above cost escrow a ~5000-lamport network fee that its own tx had no
+            // rake to absorb (wgPayWinnerAndFee was called with fee=0). Take the WHOLE hand's network
+            // cost — W winner txs + this fee tx — out of the rake, so escrow nets exactly the pot and
+            // stays funded purely by antes (no operator top-ups). betLiability is still cleared by the
+            // full feeTotal; the lamports withheld from the rake are the network fees already spent.
+            const feeToSend = Math.max(0, feeTotal - (W + 1) * TX_FEE);
+            if (feeToSend > 0) {
+              const fr = await wgPayOne(esc, CREATOR_WALLET, feeToSend, 'bj-fee');
+              if (!fr.ok) { await kvDel('bjfee:' + handId).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'fee held: ' + (fr.reason || ''), retry: true }); }
+              feeSig = fr.sig;
+            }
             await kvHincrby(BET_LEDGER, 'betLiability', -feeTotal).catch(() => {});
-            feeSig = fr.sig;
           }
         }
         clearTimeout(guard); done = true;
@@ -2206,8 +2216,13 @@ module.exports = async function handler(req, res) {
           let payout = wagerLamports > 0 ? Math.min(wagerLamports, avail) : avail;
           const remaining = avail - payout;
           if (remaining > 0 && remaining < RENT_MIN) { payout = avail; }
-          creatorCut = Math.floor(payout * CREATOR_FEE_PCT);
-          playerCut  = payout - creatorCut;
+          const rake = Math.floor(payout * CREATOR_FEE_PCT);
+          playerCut  = payout - rake;                    // player keeps their full 90% — never reduced
+          // The rake absorbs THIS tx's ~5000-lamport network fee. Escrow's net outflow is then exactly
+          // `payout` (playerCut + creatorCut + networkFee = payout), so it stays funded purely by player
+          // deposits and never drifts below what players are owed — no operator top-ups. (Previously the
+          // full 10% was swept out AND escrow paid the 5000 on top, leaking ~5000 lamports per cashout.)
+          creatorCut = Math.max(0, rake - TX_FEE);
           console.log('[settle] cashout payout=' + payout + ' (wager=' + wagerLamports + ' avail=' + avail + ' remaining=' + remaining + ') player=' + playerCut + ' creator=' + creatorCut);
           const transfers = creatorCut > 0
             ? [{ to: playerPubkey, lamports: playerCut }, { to: b58Decode(CREATOR_WALLET), lamports: creatorCut }]
@@ -2343,8 +2358,9 @@ module.exports = async function handler(req, res) {
         let total = Math.min(kvKillWager, killAvail);
         const killRemaining = killAvail - total;
         if (killRemaining > 0 && killRemaining < RENT_MIN) { total = killAvail; }
-        creatorCut = Math.floor(total * CREATOR_FEE_PCT);
-        killerCut  = total - creatorCut;
+        const killRake = Math.floor(total * CREATOR_FEE_PCT);
+        killerCut  = total - killRake;                  // killer keeps their full share — never reduced
+        creatorCut = Math.max(0, killRake - TX_FEE);    // rake absorbs the network fee → escrow stays self-funding (see cashout note)
         console.log('[settle] kill total=' + total + ' killer=' + killerCut + ' creator=' + creatorCut);
         const transfers = creatorCut > 0
           ? [{ to: killPubkey, lamports: killerCut }, { to: b58Decode(CREATOR_WALLET), lamports: creatorCut }]
@@ -2401,7 +2417,10 @@ module.exports = async function handler(req, res) {
         const loseAmt = Math.min(kvLoseWager, loseAvail);
         const remaining = loseAvail - loseAmt;
         const finalAmt  = (remaining > 0 && remaining < RENT_MIN) ? loseAvail : loseAmt;
-        const tx = buildTx(esc, loseHash, [{ to: b58Decode(CREATOR_WALLET), lamports: finalAmt }]);
+        // House takes the forfeited stake MINUS this tx's network fee, so escrow nets exactly the
+        // cleared liability instead of leaking ~5000 lamports (self-funding — see cashout note).
+        const houseTake = Math.max(0, finalAmt - TX_FEE);
+        const tx = buildTx(esc, loseHash, [{ to: b58Decode(CREATOR_WALLET), lamports: houseTake }]);
         const { sig: loseSig, confirmed: loseConfirmed } = await sendAndConfirm(tx);
         await kvDel('pw:' + playerAddress);
         // Awaited (not fire-and-forget) — see cashout block above for why.
