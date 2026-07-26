@@ -1205,12 +1205,7 @@ module.exports = async function handler(req, res) {
       const info = { escrowLamports, currentBetLiability: cur, accruedFee: led.accruedFee, proposedBetLiability: target, deltaLamports: target - cur };
       if (body.dryRun === false) {
         const adminSec = (req.headers['x-admin-secret'] || '').trim(), serverSec = (process.env.ADMIN_SECRET || '').trim();
-        // TEMPORARY one-shot auth for the 2026-07-26 betLiability reset (owner refunded all old blackjack
-        // hands by hand, so the stale counter must go to 0). ADMIN_SECRET is a Sensitive Vercel var and
-        // unreadable anywhere, so this throwaway token authorizes exactly this reset. REMOVE after use.
-        const oneShot = String(body.oneShot || '') === 'reconcile-oneshot-6a19fb619390e5b4c633365e3035fc34';
-        const adminOk = (adminSec && serverSec && adminSec === serverSec);
-        if (!(adminOk || oneShot)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'admin only' }); }
+        if (!(adminSec && serverSec && adminSec === serverSec)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'admin only' }); }
         if (target !== cur) await kvHincrby(BET_LEDGER, 'betLiability', target - cur);
         const after = await assertSolvency(escR.pubkeyB58, 0);
         clearTimeout(guard); done = true;
