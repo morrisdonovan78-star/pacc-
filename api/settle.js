@@ -4,7 +4,7 @@ const nacl    = require('tweetnacl');
 const crypto  = require('crypto');
 const GAME_SECRET = (process.env.GAME_SECRET || '').trim();
 const { kvPing, kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvZrevrange, kvHincrby,
-        kvLpush, kvLtrim, kvLrange, kvHget, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
+        kvLpush, kvLtrim, kvLrange, kvHget, kvHset, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
 // Pure pari-mutuel engine (spectator betting). All money math lives here so it is unit-tested
 // offline; this file only does auth, KV, and the on-chain transfers. See lib/betting.js.
 const BET = require('../lib/betting');
@@ -1207,6 +1207,59 @@ module.exports = async function handler(req, res) {
       return res.status(200).json(await settleRecruiter(wk, { dryRun: true }));
     }
 
+    // ── bj-audit: inventory every registered blackjack ante and (ADMIN) QUARANTINE the dead ones ─────
+    // Each ante is `bjdep:<tableId>:<handNum>:<addr>`; it is "consumed" once `bjpaid:…` is flagged (won
+    // out, split, pushed or refunded). An ante whose TABLE no longer exists in KV is ORPHANED: the engine
+    // can never settle or refund it, so the lamports sit in escrow uncredited and the liability counter
+    // never clears. Orphans are also what the operator ends up paying BY HAND — and a hand-paid ante is
+    // dangerous precisely because it is still unflagged, so any later automated retry would pay it a
+    // SECOND time out of escrow. Quarantining sets the paid flag (every payout path is NX-guarded on it,
+    // so this makes a re-pay impossible) and clears the matching liability.
+    // Read-only dry-run by default so anyone can inspect; writing requires ADMIN_SECRET.
+    if (action === 'bj-audit') {
+      const keys = await kvScan('bjdep:*', 5000);
+      const rows = [];
+      for (const k of keys) {
+        const rest = k.slice('bjdep:'.length);
+        const parts = rest.split(':');
+        const addr = parts.length >= 3 ? parts[parts.length - 1] : '';
+        const handNum = parts.length >= 3 ? parts[parts.length - 2] : '';
+        const tableId = parts.slice(0, Math.max(0, parts.length - 2)).join(':');
+        const handId = tableId + ':' + handNum;
+        let lamports = 0, sig = '';
+        try { const d = JSON.parse(await kvGet(k) || '{}'); lamports = Math.floor(Number(d.lamports) || 0); sig = String(d.sig || ''); } catch (_) {}
+        const consumed = !!(await kvGet('bjpaid:' + handId + ':' + addr));
+        const tableAlive = !!(await kvGet('bjt:' + tableId));
+        rows.push({ handId, addr, lamports, sig, consumed, tableAlive, orphaned: !consumed && !tableAlive });
+      }
+      const orphans = rows.filter((r) => r.orphaned);
+      const info = {
+        antes: rows.length,
+        consumed: rows.filter((r) => r.consumed).length,
+        liveTable: rows.filter((r) => !r.consumed && r.tableAlive).length,
+        orphaned: orphans.length,
+        orphanedLamports: orphans.reduce((n, r) => n + r.lamports, 0),
+        rows,
+      };
+      if (body.dryRun === false) {
+        const adminSec = (req.headers['x-admin-secret'] || '').trim(), serverSec = (process.env.ADMIN_SECRET || '').trim();
+        if (!(adminSec && serverSec && adminSec === serverSec)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'admin only' }); }
+        let flagged = 0, cleared = 0;
+        for (const r of orphans) {
+          const c = await kvSetNX('bjpaid:' + r.handId + ':' + r.addr, 'quarantined', 604800);
+          if (!c) continue;                                   // someone else flagged it in the meantime
+          flagged++; cleared += r.lamports;
+          await kvHincrby(BET_LEDGER, 'betLiability', -r.lamports).catch(() => {});
+        }
+        const led = await readBetLedger();
+        if (led.betLiability < 0) await kvHset(BET_LEDGER, 'betLiability', '0').catch(() => {});
+        clearTimeout(guard); done = true;
+        return res.status(200).json({ ok: true, applied: true, flagged, clearedLamports: cleared, betLiability: (await readBetLedger()).betLiability, ...info });
+      }
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, applied: false, dryRun: true, ...info, howToApply: 'POST again with {"action":"bj-audit","dryRun":false} and header x-admin-secret: <ADMIN_SECRET>' });
+    }
+
     // ── bet-reconcile: repair the shared bet/blackjack liability ledger (ADMIN, read-safe dry-run) ──
     // `betLiability` is a running counter: EVERY ante/bet deposit adds to it, EVERY settle/refund
     // subtracts. When a settlement fails to complete — a payout the solvency gate refused, or a winner
@@ -1637,6 +1690,24 @@ module.exports = async function handler(req, res) {
         clearTimeout(guard); done = true;
         return res.status(503).json({ error: (e && e.message) || 'deposit not verified', retry: true });
       }
+    }
+
+    // bj-dep-status: is this seat's ante for this hand ALREADY sitting in escrow, unspent? Read-only.
+    // The blackjack engine asks this before charging: the table object is not the only record of a paid
+    // ante — the on-chain deposit is registered here the instant it lands. A `ready` that was lost after
+    // the transfer (dropped response, erased write, closed tab) used to leave the player paid but shown
+    // as un-anted, so pressing ANTE again charged them a SECOND time. `creditable` lets the engine seat
+    // them on the money already in escrow. It is false once the ante has been consumed (won out or
+    // refunded — bjpaid is set), so a spent ante can never be re-credited into a pot it no longer funds.
+    if (action === 'bj-dep-status') {
+      const handId = String(body.handId || ''); const addr = String(body.address || '');
+      if (!handId || !addr) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'handId, address required' }); }
+      const raw = await kvGet('bjdep:' + handId + ':' + addr);
+      const spent = raw ? await kvGet('bjpaid:' + handId + ':' + addr) : null;
+      let lamports = 0;
+      if (raw) { try { lamports = Math.floor(Number(JSON.parse(raw).lamports) || 0); } catch (_) {} }
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, registered: !!raw, consumed: !!spent, creditable: !!raw && !spent && lamports > 0, lamports });
     }
 
     if (action === 'bj-settle') {
