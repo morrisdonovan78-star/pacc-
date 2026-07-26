@@ -1205,15 +1205,7 @@ module.exports = async function handler(req, res) {
       const info = { escrowLamports, currentBetLiability: cur, accruedFee: led.accruedFee, proposedBetLiability: target, deltaLamports: target - cur };
       if (body.dryRun === false) {
         const adminSec = (req.headers['x-admin-secret'] || '').trim(), serverSec = (process.env.ADMIN_SECRET || '').trim();
-        const adminOk = !!(adminSec && serverSec && adminSec === serverSec);
-        // One-shot repair authorization for the 2026-07-26 stale-liability cleanup. kvSetNX claims a
-        // single key so this can fire AT MOST ONCE ever — after that it is inert even if the token is
-        // seen. Lets the operator's fix run without exposing ADMIN_SECRET; removed in a follow-up.
-        let oneShotOk = false;
-        if (!adminOk && body.oneShot === 'bjfix-7a3f9c2e-2026-07-26' && (target === 0)) {
-          oneShotOk = await kvSetNX('bjreconcile:oneshot:2026-07-26', '1', 315360000);
-        }
-        if (!adminOk && !oneShotOk) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'admin only' }); }
+        if (!(adminSec && serverSec && adminSec === serverSec)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'admin only' }); }
         if (target !== cur) await kvHincrby(BET_LEDGER, 'betLiability', target - cur);
         const after = await assertSolvency(escR.pubkeyB58, 0);
         clearTimeout(guard); done = true;
