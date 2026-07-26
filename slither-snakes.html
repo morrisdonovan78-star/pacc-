@@ -1254,7 +1254,7 @@ body.mctl #voice-speakers{left:150px;}
     <div style="color:#FFD700;font-size:9px;margin:2px 0 6px;letter-spacing:1px;border-top:1px solid #2a1a3a;padding-top:8px;">◆ CIRCLE GRAZE — independent knobs (graze kill ONLY; nothing here touches normal body / H2H / movement)</div>
     <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="MAX BODY OVERLAP: exactly how many visual px a graze may sink INTO the body before it kills. 0 = die on contact. 6 = you can be ~6px inside before dying. This ONLY changes the overlap depth.">① Max body overlap (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.0 px</span></div>
-      <input type="range" id="tun-grazePx" min="0" max="20" step="0.5" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
+      <input type="range" id="tun-grazePx" min="0" max="20" step="0.05" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0 = contact</span><span>20 = exaggerated</span></div>
     </div>
     <div style="margin-bottom:11px;">
@@ -1274,7 +1274,7 @@ body.mctl #voice-speakers{left:150px;}
     </div>
     <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;">◆ Circle completion (°)</span><span id="tun-circ-val" style="color:#FFD700;min-width:44px;text-align:right;">360°</span></div>
-      <input type="range" id="tun-circDeg" min="180" max="360" step="5" value="360" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
+      <input type="range" id="tun-circDeg" min="180" max="360" step="1" value="360" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>partial loop</span><span>full loop</span></div>
     </div>
     <div style="margin-bottom:11px;">
@@ -3949,6 +3949,21 @@ async function pkConnect(roomId,gameToken,spectate){
 
     // Non-fatal server message (bot limits, etc.) — toast only, never touches the connection.
     _sio.on('ss-notice',(msg)=>{ try{ addToast(String(msg||''),'#FF6600'); }catch(_){} });
+
+    // The server's authoritative collision tuning for this lobby. Sent on request (panel open) and
+    // broadcast to EVERYONE whenever the owner changes it, so every client's rendered hitboxes and
+    // local prediction match what the server is actually killing with. This is also what makes the
+    // panel open on the REAL live values instead of a stale localStorage copy.
+    _sio.on('ss-tuning',(t)=>{
+      try{
+        if(!t||typeof t!=='object')return;
+        Object.assign(_tuningTest,t);
+        if(_showTuning)_syncTuningUI();
+      }catch(_){}
+    });
+    // Pull the lobby's live tuning right away (socket.io buffers until connected) so hitbox rendering
+    // is correct from the first frame, panel open or not.
+    try{ _sio.emit('ss-tuning-get'); }catch(_){}
 
     // Voice chat — relay-based PCM (server forwards voice-audio to the room)
     _sio.on('voice-audio',(d)=>{
@@ -6855,7 +6870,7 @@ function launchSnakeGame(){
   if(localStorage.getItem('ss_owner')==='1'){
     if(_isTestLobby()){
       try{const _sv=localStorage.getItem('ss_tuning_test8');if(_sv)Object.assign(_tuningTest,JSON.parse(_sv));}catch(_){}
-      if(_sio)_sio.emit('ss-tune',_tuningTest); // separate nose/body tuning — test lobby only
+      _pushTuning(); // separate nose/body tuning — test lobby only
     }
     // LIVE lobbies: deliberately NO auto-push on join — collision starts on the locked defaults every
     // room, and only changes when the owner explicitly moves a panel slider (_onTuning emits then).
@@ -6890,12 +6905,51 @@ function launchSnakeGame(){
 }
 
 // ── Combat Tuning Suite ──────────────────────────────────────
+// ── COMBAT TUNING PANEL — OWNER ONLY, LIVE, SERVER-VERIFIED (restored 2026-07-26) ─────────────────
+// It was hard-locked because it trusted `localStorage.ss_owner`, which ANY player could set in
+// DevTools — and these constants decide real-money kills, so that was a way to steal money. The
+// panel is back because the trust model changed: the SERVER now verifies an ed25519 signature from
+// the owner's wallet over the exact tuning payload (see ssOwnerVerify in server.js) and clamps every
+// value. The localStorage flag below only decides whether the UI is DRAWN; it grants no authority, so
+// a player who flips it just gets sliders whose every emit the server rejects.
+function _tuningUnlocked(){ try{ return localStorage.getItem('ss_owner')==='1'; }catch(_){ return false; } }
 function _toggleTuning(){
-  // RE-LOCKED (owner request 2026-07-16): the panel is disabled again now that the harder circle/graze
-  // hitboxes (grazePx 3.5 / grazeHead 1.20) are hardcoded everywhere. No key/button/DevTools ss_owner
-  // trick opens it, and the server ignores ss-tune. Always force hidden and bail.
-  // To re-enable: restore the owner-gated branch (git history around commit 919e76b) + un-noop server ss-tune.
-  _showTuning=false; const _p=document.getElementById('tuning-panel'); if(_p)_p.style.display='none';
+  const _p=document.getElementById('tuning-panel'); if(!_p)return;
+  if(!_tuningUnlocked()){ _showTuning=false; _p.style.display='none'; return; }
+  _showTuning=!_showTuning;
+  _p.style.display=_showTuning?'block':'none';
+  if(_showTuning){
+    // Always open on the values the SERVER is really running, never a stale local copy.
+    try{ if(_sio)_sio.emit('ss-tuning-get'); }catch(_){}
+    _syncTuningUI();
+  }
+}
+// Sign + push the current knobs to the server. Debounced: dragging a slider fires oninput per pixel
+// and each send costs a wallet signature (a bridge round-trip to Privy), so coalesce to the last
+// value. Only the newest payload is ever sent — an out-of-order older one would fight the slider.
+let _tuneSendT=null,_tuneSeq=0;
+function _pushTuning(){
+  if(!_tuningUnlocked()||!_sio) return;
+  if(_tuneSendT) clearTimeout(_tuneSendT);
+  _tuneSendT=setTimeout(async()=>{
+    _tuneSendT=null;
+    const seq=++_tuneSeq;
+    const t={grazePx:_tuningTest.grazePx,grazeHead:_tuningTest.grazeHead,bodyScale:_tuningTest.bodyScale,
+             grazeReach:_tuningTest.grazeReach,circDeg:_tuningTest.circDeg,faceDeg:_tuningTest.faceDeg,
+             n2nScale:(_tuningTest.n2nScale!=null?_tuningTest.n2nScale:0.30),rule:_tuningTest.rule};
+    try{
+      // Canonical form MUST match the server's ssTuneCanon byte for byte — fixed key order, and the
+      // sha256 is over that text, so any tampering in flight invalidates the signature.
+      const canon=JSON.stringify(['grazePx','grazeHead','bodyScale','grazeReach','circDeg','faceDeg','n2nScale','rule']
+        .map(k=>(t[k]===undefined||t[k]===null?null:t[k])));
+      const hashBuf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canon));
+      const hash=[...new Uint8Array(hashBuf)].map(b=>b.toString(16).padStart(2,'0')).join('');
+      const ts=Date.now();
+      const sig=await _sigB64(new TextEncoder().encode('ss-tune:'+pkRoomId+':'+ts+':'+hash));
+      if(seq!==_tuneSeq) return;                     // a newer drag superseded this one
+      _sio.emit('ss-tune',{tuning:t,ts,sig});
+    }catch(e){ console.warn('[tune] sign/push failed',e); addToast('Tuning not sent — signature failed','#FF4444'); }
+  },260);
 }
 function _onTuning(){
   // Owner uses the circle-graze knobs EVERYWHERE (the live model IS the promoted test-lobby model);
@@ -6911,14 +6965,14 @@ function _onTuning(){
     _tuningTest.rule      = g('tun-rule').value;
     _tuningTest.dbg       = !!(g('tun-dbgChk')&&g('tun-dbgChk').checked);
     _grazeViz             = !!(g('tun-vizChk')&&g('tun-vizChk').checked);
-    g('tun-graze-val').textContent    =_tuningTest.grazePx.toFixed(1)+' px';
+    g('tun-graze-val').textContent    =_tuningTest.grazePx.toFixed(2)+' px';
     g('tun-grazehead-val').textContent=_tuningTest.grazeHead.toFixed(2)+'×';
     g('tun-body-val').textContent     =_tuningTest.bodyScale.toFixed(2)+'×';
     g('tun-grazereach-val').textContent=_tuningTest.grazeReach.toFixed(2)+'×';
     g('tun-circ-val').textContent     =_tuningTest.circDeg+'°';
     g('tun-faceT-val').textContent    =_tuningTest.faceDeg+'°';
     if(_isTestLobby()){try{localStorage.setItem('ss_tuning_test8',JSON.stringify(_tuningTest));}catch(_){}} // don't contaminate saved test-lobby values from live tuning
-    if(_sio)_sio.emit('ss-tune',_tuningTest);
+    _pushTuning();   // signed — the server verifies the owner wallet and clamps before applying
     _drawTuningPreview(); // two-snakes H2H preview + stats (was only drawn in the legacy branch → black box)
     return;
   }
@@ -6931,7 +6985,6 @@ function _onTuning(){
   document.getElementById('tun-face-val').textContent =_tuning.faceDeg+'°';
   _drawTuningPreview();
   try{localStorage.setItem('ss_tuning_v4',JSON.stringify(_tuning));}catch(_){}
-  if(_sio)_sio.emit('ss-tune',_tuning);
 }
 function _syncTuningUI(){
   const e=id=>document.getElementById(id);
@@ -6941,7 +6994,7 @@ function _syncTuningUI(){
   if(e('tun-nose'))  e('tun-nose').style.display  =_test?'block':'none';
   if(_test){
     const gv=(id,v)=>{const x=e(id); if(x)x.value=v;};
-    gv('tun-grazePx',_tuningTest.grazePx);   if(e('tun-graze-val'))e('tun-graze-val').textContent=(_tuningTest.grazePx??1).toFixed(1)+' px';
+    gv('tun-grazePx',_tuningTest.grazePx);   if(e('tun-graze-val'))e('tun-graze-val').textContent=(_tuningTest.grazePx??1).toFixed(2)+' px';
     gv('tun-grazeHead',_tuningTest.grazeHead??1); if(e('tun-grazehead-val'))e('tun-grazehead-val').textContent=(_tuningTest.grazeHead??1).toFixed(2)+'×';
     gv('tun-bodyScale',_tuningTest.bodyScale); if(e('tun-body-val'))e('tun-body-val').textContent=(_tuningTest.bodyScale??1).toFixed(2)+'×';
     gv('tun-grazeReach',_tuningTest.grazeReach??1); if(e('tun-grazereach-val'))e('tun-grazereach-val').textContent=(_tuningTest.grazeReach??1).toFixed(2)+'×';
@@ -6966,7 +7019,7 @@ function _resetTuning(){
     _tuningTest={..._TEST_DEFAULTS};
     try{localStorage.removeItem('ss_tuning_test8');}catch(_){}
     _syncTuningUI();
-    if(_sio)_sio.emit('ss-tune',_tuningTest);
+    _pushTuning();
     addToast('Test tuning reset to current defaults','#888');
     return;
   }
@@ -6974,14 +7027,15 @@ function _resetTuning(){
     // Owner panel outside the test lobby: reset to the LIVE locked defaults (what every lobby runs).
     Object.assign(_tuningTest,_LIVE_TUNING_DEFAULTS);
     _syncTuningUI();
-    if(_sio)_sio.emit('ss-tune',_tuningTest);
+    _pushTuning();
     addToast('Tuning reset to LIVE locked defaults','#888');
     return;
   }
   _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
   try{localStorage.removeItem('ss_tuning_v4');}catch(_){}
   _syncTuningUI();
-  if(_sio)_sio.emit('ss-tune',_tuning);
+  // Legacy hbs/hhbs model — client-render only. The server runs the circle-graze model and would
+  // reject this shape anyway, so nothing is emitted.
   addToast('Tuning reset to moneyslither defaults','#888');
 }
 function _drawTuningPreview(){
