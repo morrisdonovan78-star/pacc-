@@ -1041,15 +1041,15 @@ module.exports = async function handler(req, res) {
     if (action === 'event-board') {
       const now = Date.now();
       let ev = activeKillEvent(now), state = 'live';
-      if (!ev) {                                    // no live event → show the last one's final board for 6h
+      if (!ev) {                                    // no live event → keep showing the LAST event's final
         const past = KILL_EVENTS.filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
-        if (past && (now - past.end) < 6 * 3600 * 1000) { ev = past; state = 'ended'; }
+        if (past) { ev = past; state = 'ended'; }    // board on the homescreen until the NEXT event runs
       }
       // Auto-settle: once a bounty window has ended, pay the winners from the float — idempotent
       // (per-place NX locks) and solvency-guarded, so only the first post-event reader does the work
       // and it can never overpay or touch player funds. Always on (the EVENT_AUTOPAY kill-switch was
       // removed 2026-07-25 — it had been silently disabling every event payout).
-      if (state === 'ended' && ev) { try { await settleBounty(ev, { dryRun: false }); } catch (_) {} }
+      if (state === 'ended' && ev && (now - ev.end) < 24 * 3600 * 1000) { try { await settleBounty(ev, { dryRun: false }); } catch (_) {} }
       clearTimeout(guard); done = true;
       if (!ev) return res.status(200).json({ active: false });
       const h = (await kvHgetall('evtk:' + ev.id).catch(() => null)) || {};

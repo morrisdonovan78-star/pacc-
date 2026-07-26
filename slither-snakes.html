@@ -7067,6 +7067,22 @@ function onMouseMove(e){
 let _plToastShown=false, _plCooldown=0;
 function _plTarget(){ return document.getElementById('gc')||canvas; }
 function _plActive(){ const t=_plTarget(); return !!t && document.pointerLockElement===t; }
+// While the crosshair DWELLS over the in-game leaderboard (top-right), hand the real cursor back so its
+// voice controls — the per-player mute buttons and the Proximity/Global/Off toggle — can be hovered and
+// clicked normally, with NO Esc. A short dwell (not a quick pass-through) is required so aiming toward
+// the top-right corner mid-fight never drops the lock. rafDraw's auto-release frees it on the next frame;
+// a canvas click re-locks. This is the same "a held lock makes DOM buttons unclickable" fix as the panel.
+let _lbHoverStart=0;
+function _overLeaderboard(){
+  const lb=document.getElementById('leaderboard');
+  if(!lb || lb.style.display==='none'){ _lbHoverStart=0; return false; }
+  const r=lb.getBoundingClientRect();
+  if(!(r.width>0)){ _lbHoverStart=0; return false; }
+  const inside=_mouseX>=r.left-8 && _mouseX<=r.right+8 && _mouseY>=r.top-8 && _mouseY<=r.bottom+8;
+  if(!inside){ _lbHoverStart=0; return false; }
+  if(!_lbHoverStart) _lbHoverStart=Date.now();
+  return (Date.now()-_lbHoverStart)>360;   // deliberate dwell, not a fast aim sweep past the corner
+}
 function _plWant(){
   // Only while actually playing. Spectators pan by dragging with real clientX/clientY, so locking
   // them would break spectate; menus obviously must keep a usable cursor.
@@ -7075,6 +7091,7 @@ function _plWant(){
   // and the next canvas click re-locks — the player never has to press Esc.
   if(_wg.panel) return false;
   if(_cmdHelpOn) return false;   // same reason: a held lock makes GOT IT unclickable
+  if(_overLeaderboard()) return false;   // dwelling on the leaderboard → free the cursor for its voice buttons
   return !!(SG && !SG.over && !isSpectating && !_localDead &&
             document.getElementById('scr-game') && document.getElementById('scr-game').classList.contains('on'));
 }
@@ -8884,7 +8901,7 @@ function drawHUD(mySnake){
       const muteBtn=me?'':'<button onclick="togglePeerMute(\''+s.id+'\')" title="Mute this player’s voice" style="background:none;border:none;cursor:pointer;font-size:12px;line-height:1;padding:0 0 0 4px;color:'+(muted?'#FF4444':'#888')+';">'+(muted?'🔇':'🔊')+'</button>';
       html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:12px;padding:2px 0;color:'+(me?'#39FF14':'#fff')+';"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px;">'+(i===0?'👑 ':(i+1)+'. ')+nm+'</span><span style="display:flex;align-items:center;gap:2px;white-space:nowrap;"><b style="color:#FFD700;">'+amt+'</b>'+muteBtn+'</span></div>';
     });
-    html+='<button onclick="toggleVoiceMode()" title="Toggle proximity / global voice" style="width:100%;text-align:center;color:#9aa;font-size:9px;margin-top:7px;border:none;border-top:1px solid rgba(255,255,255,0.12);padding-top:6px;background:none;cursor:pointer;">🎙️ Voice Chat: '+(_voiceProximity?'Proximity':'Global')+' ⇄</button>';
+    html+='<button onclick="toggleVoiceMode()" title="Cycle Proximity → Global → Off" style="width:100%;text-align:center;color:'+(_voiceOff?'#FF6666':'#9aa')+';font-size:9px;margin-top:7px;border:none;border-top:1px solid rgba(255,255,255,0.12);padding-top:6px;background:none;cursor:pointer;">🎙️ Voice: '+(_voiceOff?'Off':(_voiceProximity?'Proximity':'Global'))+' ⇄</button>';
     lb.innerHTML=html;
     lb.style.display=SG.over?'none':'block';
     _voiceUpdateProximity();   // keep per-peer voice gains matched to distance (proximity mode)
@@ -8969,17 +8986,25 @@ window.togglePeerMute=function(pid){
 };
 // Voice mode: PROXIMITY (default) attenuates each player by distance so nearby snakes are loud and far
 // ones fade out; GLOBAL = everyone at full volume. Toggled from the leaderboard "Voice Chat" line.
-let _voiceProximity=true;
+let _voiceProximity=true, _voiceOff=false;
 const VOICE_MAX_DIST=1500; // world units — silent beyond this in proximity mode
-window.toggleVoiceMode=function(){ _voiceProximity=!_voiceProximity; try{addToast(_voiceProximity?'🎙️ Voice: Proximity — nearby players are louder':'🌐 Voice: Global — everyone at full volume','#8cf');}catch(_){} };
-// Per-frame gain update: mute wins, else proximity distance falloff, else full. Cheap (just sets gain).
+// The leaderboard "Voice" line cycles through THREE states so a player can pick their whole voice
+// experience from one control: PROXIMITY (nearby louder) → GLOBAL (everyone full volume) → OFF (hear
+// no one — full silence). Off is the "turn voice chat off" many players asked for.
+window.toggleVoiceMode=function(){
+  if(_voiceOff){ _voiceOff=false; _voiceProximity=true; }        // Off → Proximity
+  else if(_voiceProximity){ _voiceProximity=false; }             // Proximity → Global
+  else { _voiceOff=true; }                                       // Global → Off
+  try{addToast(_voiceOff?'🔕 Voice: Off — you won’t hear other players':(_voiceProximity?'🎙️ Voice: Proximity — nearby players are louder':'🌐 Voice: Global — everyone at full volume'),'#8cf');}catch(_){}
+};
+// Per-frame gain update: mute (or Off) wins, else proximity distance falloff, else full. Cheap (sets gain).
 function _voiceUpdateProximity(){
   if(!_voicePlayCtx||!SG||!_peerAudioCtxs.size)return;
   const me=SG.snakes.get(myPid); const mh=me&&me.path&&me.path[0];
   _peerAudioCtxs.forEach((s,pid)=>{
     if(!s.gain)return;
     let g;
-    if(_mutedPeers.has(pid)) g=0;
+    if(_mutedPeers.has(pid)||_voiceOff) g=0;
     else if(!_voiceProximity) g=1;
     else { const ps=SG.snakes.get(pid); const ph=ps&&ps.path&&ps.path[0];
       g=(!mh||!ph)?1:Math.max(0,Math.min(1,1-Math.hypot(ph.x-mh.x,ph.y-mh.y)/VOICE_MAX_DIST)); }
