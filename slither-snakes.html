@@ -3527,7 +3527,21 @@ async function joinLobby(usd){
     await signLocalTx(tx);
     const _rawB64=btoa(String.fromCharCode(...tx.serialize()));
     lg('mm-log','Sending to Solana…','lwarn');
-    const _sndr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:2,method:'sendTransaction',params:[_rawB64,{encoding:'base64',preflightCommitment:'confirmed'}]})});
+    // ── skipPreflight:true — DO NOT RE-ENABLE PREFLIGHT HERE ────────────────────────────────────────
+    // "Send failed: Transaction simulation failed: Blockhash not found" was blocking paid joins
+    // outright (repeatable across refreshes). It is NOT a bad transaction — it is a race we cause
+    // ourselves: getLatestBlockhash above is resolved by api/rpc to the FRESHEST node (highest
+    // lastValidBlockHeight, deliberately, so the hash never expires early). sendTransaction then fans
+    // the tx out to EVERY node, and each runs its OWN preflight simulation. Any node a few slots
+    // behind has not seen that just-minted blockhash yet, so its simulation fails with -32002 before
+    // the tx is ever broadcast. When every node is momentarily behind the one that issued the hash,
+    // all of them fail and the error surfaces to the player — who is never charged and cannot join.
+    // Picking the freshest hash MAXIMISES this mismatch, so it hits real players repeatedly.
+    // Preflight buys us nothing here: this tx is a plain SystemProgram transfer built by our own code
+    // (no program logic to simulate), the client already balance-checks before joining, and the
+    // AUTHORITY on whether the money landed is api/join.js's on-chain verifyWagerTx. So skip the
+    // simulation and let the network judge the real transaction.
+    const _sndr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:2,method:'sendTransaction',params:[_rawB64,{encoding:'base64',skipPreflight:true,preflightCommitment:'confirmed',maxRetries:3}]})});
     const _sndd=await _sndr.json();if(_sndd.error)throw new Error('Send failed: '+_sndd.error.message);
     const sig=_sndd.result;
     lg('mm-log','Confirming on-chain…','lwarn');
