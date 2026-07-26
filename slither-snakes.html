@@ -2785,7 +2785,10 @@ async function finishLoginBridge(info){
   // Spectate from the platform (Live Matches 👁): watch the lobby, no deposit.
   if(info.watch){
     const reg=(info.region==='EU'?'EU':'NA');
-    const tier=Number(info.stake)||1;
+    // `||1` turned a FREE lobby (stake 0) into the $1 lobby, so the 👁 button showed an EMPTY arena
+    // that wasn't the one clicked. Keep the stake EXACTLY as sent — 0, 0.50, 2, whatever — so
+    // spectate lands on the real lobby at any denomination.
+    const _s=Number(info.stake); const tier=(_s>=0?_s:1);
     try{ await enterWatchMode(reg,tier); }catch(e){ console.error('[bridge] watch failed',e); _bridgeNotify('EXIT',{reason:'watch-error'}); }
     return;
   }
@@ -2794,6 +2797,16 @@ async function finishLoginBridge(info){
   // right in; a paid tier runs the normal deposit flow (the Privy signature IS the explicit confirm) or,
   // if the wallet is short, bounces back to the platform instead of stranding them on a game screen.
   let st=Number(info.stake); if(!(st>=0)) st=0;   // any non-negative stake: 0=free, else its own arena
+  // ── JOIN THE REGION THE PLAYER ACTUALLY CLICKED ────────────────────────────────────────────────
+  // The platform's Live Matches JOIN link carries ?region=NA|EU for the lobby shown, but only the
+  // `watch` branch above ever read it — the play path connected to whatever GAME_SERVER the player's
+  // SAVED preference happened to be. So clicking JOIN on an NA lobby while your saved server was EU
+  // put you in the EU arena of the same stake: a different, usually empty room with the same name.
+  // That is the reported "joining a separate lobby / making another lobby", and "some people trying
+  // to join NA end up in EU". Honour the clicked region for this session only —
+  // useGameServerForSession deliberately does NOT overwrite the saved preference, so spectating or
+  // joining one EU match never permanently moves an NA player off NA.
+  try{ if(info.region){ useGameServerForSession(info.region==='EU'?'EU':'NA'); } }catch(_){}
   try{ if(st===0||st===1||st===5) selLobby(st); }catch(_){}
   try{ await joinLobby(st); }catch(e){ console.error('[bridge] auto-join failed',e); _bridgeNotify('EXIT',{reason:'join-error'}); }
 }
@@ -3565,7 +3578,14 @@ async function joinLobby(usd){
       const _st=_sd?.result?.value?.[0];
       if(_st){if(_st.err)throw new Error('Transaction rejected by network');if(_st.confirmationStatus==='confirmed'||_st.confirmationStatus==='finalized'){_txConfirmed=true;break;}}
       if(_ci===12)lg('mm-log','Still confirming — searching history…','lwarn');
-      if(_ci>0&&_ci%8===0){const _bhr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:4,method:'getBlockHeight',params:[]})});const _bhd=await _bhr.json().catch(()=>({}));if(typeof _bhd.result==='number'&&_bhd.result>lb.lastValidBlockHeight)throw new Error('Transaction expired — please try again');}
+      // Blockhash height passed? STOP POLLING — but never throw. Throwing here kicked the player out
+      // to the home screen with "Transaction expired" EVEN WHEN THE DEPOSIT HAD LANDED (a laggard
+      // getBlockHeight, or a tx that confirmed just as the height ticked over) — so they were charged
+      // and locked out, which is the reported "it takes my money and boots me". It is the exact same
+      // mistake the comment below this loop warns about. api/join.js re-verifies the deposit on-chain
+      // and is the AUTHORITY: if the tx really expired it refuses cleanly and no money moved; if it
+      // landed, the player gets in. So break and let the server decide.
+      if(_ci>0&&_ci%8===0){const _bhr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:4,method:'getBlockHeight',params:[]})});const _bhd=await _bhr.json().catch(()=>({}));if(typeof _bhd.result==='number'&&_bhd.result>lb.lastValidBlockHeight){lg('mm-log','Blockhash aged out — verifying with server…','lwarn');break;}}
     }
     // NOT confirmed client-side? Carry on anyway. Throwing here was the single biggest cause of
     // "paid but never got in": the deposit had usually landed and we abandoned it.
