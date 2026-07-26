@@ -775,6 +775,11 @@ body.mctl #voice-speakers{left:150px;}
     <!-- Voice chat -->
     <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">🎙 VOICE CHAT</div>
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:7px;">
+      <span style="font-family:'Press Start 2P',monospace;font-size:8px;color:#fff;">MIC ON WHEN I JOIN</span>
+      <button id="vauto-toggle-btn" class="copy-btn" style="min-width:64px;" onclick="_toggleVoiceAuto()">ON</button>
+    </div>
+    <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:9px;">Voice turns itself on every round — no button to press. Your browser asks for microphone permission once, then never again.</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:7px;">
       <span style="font-family:'Press Start 2P',monospace;font-size:8px;color:#fff;">PUSH-TO-TALK</span>
       <button id="ptt-toggle-btn" class="copy-btn" style="min-width:64px;" onclick="_togglePtt()">OFF</button>
     </div>
@@ -1987,8 +1992,19 @@ async function _loadAccountName(){
 // owner toggles) on ANY device — previously ss_owner had to be set by hand in DevTools, so a fresh
 // browser never got it ("panel not popping up on T"). Safe: this flag only unlocks UI; every owner
 // ACTION (ss-tune etc.) is separately gated SERVER-side by the wallet address, so forging it does nothing.
-const OWNER_WALLET='CVW1EsXZ4HqNp2oyF9ZbFqLVxMC5o6RoUb69cgLjPRAk';
-function _ownerCheck(){ try{ if(ST.address===OWNER_WALLET)localStorage.setItem('ss_owner','1'); }catch(_){} }
+// Owner wallets that may open the COMBAT TUNING panel (F9). A LIST, not one constant, so switching
+// or adding a wallet never silently locks the owner out again — the old hardcoded address was a
+// legacy local game wallet that no longer matched the Privy embedded wallet actually played on, so
+// ss_owner was never set and F9 did nothing. This only decides whether the UI is DRAWN; authority is
+// the ed25519 signature the SERVER verifies (keep SS_OWNER_SPKI_B64 in server.js in sync with these).
+const OWNER_WALLETS=['4B9MgNPUgDiKKQRhsC3pmdWoAehs4yjHb8VfL2Nahzpv'];
+const OWNER_WALLET=OWNER_WALLETS[0];
+function _ownerCheck(){
+  try{
+    if(OWNER_WALLETS.indexOf(ST.address)>=0) localStorage.setItem('ss_owner','1');
+    else localStorage.removeItem('ss_owner');   // signed in as someone else: drop a stale flag
+  }catch(_){}
+}
 // Was localStorage-only — the SAVE button showed a "Name saved!" confirmation but never told
 // the server at all. The ONLY thing that ever pushed a name server-side was joining a PAID
 // lobby (api/join.js), which meant fixing a wrong/stuck name required spending real money on
@@ -6438,6 +6454,7 @@ const SS_SET_DEFS = [
   {k:'ss_keybinds',    def:'{}',   apply:v=>{ try{ _ssBinds=JSON.parse(v)||{}; }catch(_){ _ssBinds={}; } }},
   {k:'ss_gpbinds',     def:'{}',   apply:v=>{ try{ _gpBinds=JSON.parse(v)||{}; }catch(_){ _gpBinds={}; } }},
   {k:'ss_snake_color', def:'',     apply:null},
+  {k:'ss_voice_auto',  def:'1',     apply:null},   // mic arms itself on join; '0' = player opted out
   {k:'ss_voice_ptt',   def:'',      apply:v=>{ _voicePtt = v==='1'; _pttHeld=false; }},
   {k:'ss_voice_gate',  def:'0.005', apply:v=>{ const n=parseFloat(v); if(!isNaN(n)&&n>0)_voiceGate=n; }},
   {k:'ss_voice_vol',   def:'1',     apply:v=>{ const n=parseFloat(v); if(!isNaN(n))_voiceVol=Math.max(0,Math.min(1,n)); _voiceApplyVol(); }},
@@ -6784,6 +6801,8 @@ function _renderSettings(){
   }
   const wcOn=_wclipEnabled(); const wtb=document.getElementById('winclip-toggle-btn');
   if(wtb){ wtb.textContent = wcOn?'ON':'OFF'; wtb.style.color = wcOn?'#39FF14':'#FF4444'; }
+  const vaOn=_voiceAutoOn(); const vab=document.getElementById('vauto-toggle-btn');
+  if(vab){ vab.textContent = vaOn?'ON':'OFF'; vab.style.color = vaOn?'#39FF14':'#FF4444'; }
   const list=document.getElementById('keybind-list');
   if(list){
     list.innerHTML = SS_BIND_DEFS.map(d=>
@@ -6822,6 +6841,15 @@ function _renderSettings(){
   }
 }
 function _setGfx(v){ _gfx=v; ssSetSetting('ss_gfx',v); _applyGfx(); _renderSettings(); try{window.getSelection&&window.getSelection().removeAllRanges();}catch(_){} addToast('Graphics: '+(v==='low'?'Performance':v==='med'?'Balanced':'Best Look'),'#8cf'); }
+// Opting out of the automatic mic. Turning it OFF also drops the live mic immediately, so the toggle
+// means what it says in the round you're already in.
+function _toggleVoiceAuto(){
+  const on=_voiceAutoOn();
+  ssSetSetting('ss_voice_auto', on?'0':'1');
+  if(on){ if(_voiceEnabled) voiceToggle(); }        // was on → turn the mic off now
+  else { _voiceAutoTried=false; _voiceAutoStart(); }// was off → arm it for this round too
+  _renderSettings();
+}
 function _togglePtt(){
   _voicePtt=!_voicePtt; ssSetSetting('ss_voice_ptt',_voicePtt?'1':'');
   _pttHeld=false;                       // switching modes must never leave the mic latched open
@@ -6978,6 +7006,7 @@ function launchSnakeGame(){
   const _bb=document.getElementById('bot-bar');if(_bb)_bb.style.display=((_isPractice||_bbFree)&&!isSpectating)?'flex':'none';
   if(_firstRemoteSync){const _jo=document.getElementById('join-sync');if(_jo)_jo.style.display='flex';}
   _clipStart(); // begin rolling clip buffer (PC + enabled only; no-op otherwise)
+  _voiceAutoStart(); // voice chat is ON by default — no hunting for the 🎙️ button every round
 }
 
 // ── Combat Tuning Suite ──────────────────────────────────────
@@ -7380,7 +7409,7 @@ document.addEventListener('pointerlockerror',()=>{ _plCooldown=Date.now()+1500; 
 // every click inside the betting panel (or the chat box, or the bot bar) also fired boost — place a
 // bet mid-run and your snake burns length, which is worst while auto-circling since you can't steer
 // out of it. A click that lands on one of these is UI, not a game input.
-const SS_UI_NOBOOST='#wg-panel,#wg-tab,#ss-chat,#bot-bar';
+const SS_UI_NOBOOST='#wg-panel,#wg-tab,#ss-chat,#bot-bar,#leaderboard,#tuning-panel';
 function _overGameUi(el){ return !!(el && el.closest && el.closest(SS_UI_NOBOOST)); }
 
 function onGameMouseDown(e){
@@ -9157,7 +9186,7 @@ function drawHUD(mySnake){
       html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:12px;padding:2px 0;color:'+(me?'#39FF14':'#fff')+';"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px;">'+(i===0?'👑 ':(i+1)+'. ')+nm+'</span><span style="display:flex;align-items:center;gap:2px;white-space:nowrap;"><b style="color:#FFD700;">'+amt+'</b>'+muteBtn+'</span></div>';
     });
     html+='<button onclick="toggleVoiceMode()" title="Cycle Proximity → Global → Off" style="width:100%;text-align:center;color:'+(_voiceOff?'#FF6666':'#9aa')+';font-size:9px;margin-top:7px;border:none;border-top:1px solid rgba(255,255,255,0.12);padding-top:6px;background:none;cursor:pointer;">🎙️ Voice: '+(_voiceOff?'Off':(_voiceProximity?'Proximity':'Global'))+' ⇄</button>';
-    lb.innerHTML=html;
+    if(lb._lastHtml!==html){ lb.innerHTML=html; lb._lastHtml=html; }
     lb.style.display=SG.over?'none':'block';
     _voiceUpdateProximity();   // keep per-peer voice gains matched to distance (proximity mode)
   }
@@ -9322,6 +9351,34 @@ function _voiceUpdateSpeaking(){
       return '<div style="font-family:\'Exo 2\',sans-serif;font-size:11px;font-weight:bold;color:'+color+';background:rgba(0,0,0,0.75);border:1px solid '+color+'88;border-radius:5px;padding:3px 8px;">🎤 '+label+'</div>';
     }).join('');
   }else{vs.style.display='none';}
+}
+// ── VOICE ON BY DEFAULT ──────────────────────────────────────────────────────────────────────────
+// Voice used to be entirely opt-in: nothing ever called voiceToggle(), so every player had to find
+// and press the 🎙️ button EVERY round or the lobby was silent. Now it arms itself the moment the
+// game starts.
+//
+// ⚠️ What can and cannot be removed: the browser's OWN microphone permission dialog is a hard
+// security boundary — no site can suppress it, playpulp included. What a site CAN do (and what this
+// now does) is ask for the mic automatically on join, so the player sees that native prompt ONCE and
+// the browser remembers the grant for this origin forever after. Every subsequent round is silent,
+// zero clicks. What's gone is OUR extra step. Same lesson as the extension-wallet popups.
+//
+// Never nags: if the player has already denied mic access we skip silently rather than re-prompting
+// on every join, and we only ever try once per page load.
+let _voiceAutoTried=false;
+function _voiceAutoOn(){ try{ return localStorage.getItem('ss_voice_auto')!=='0'; }catch(_){ return true; } }
+async function _voiceAutoStart(){
+  if(_voiceAutoTried||_voiceEnabled||isSpectating||!_voiceAutoOn())return;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)return;
+  _voiceAutoTried=true;
+  try{
+    // Don't re-prompt someone who has already said no — that's the "doing too much" part.
+    if(navigator.permissions&&navigator.permissions.query){
+      const st=await navigator.permissions.query({name:'microphone'}).catch(()=>null);
+      if(st&&st.state==='denied')return;
+    }
+  }catch(_){}
+  try{ await voiceToggle(); }catch(_){}
 }
 async function voiceToggle(){
   const btn=document.getElementById('voice-btn');
