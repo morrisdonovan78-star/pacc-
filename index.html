@@ -1466,11 +1466,15 @@ async function finishLoginBridge(info){
   try{ const _ci=Math.floor(Math.random()*CHAMPIONS.length); localStorage.setItem('pa_champ',String(_ci)); _mySkin.color=CHAMPIONS[_ci].col; }catch(_){}
   try{ initCustomizePanel(); }catch(_){}
   if(info.watch){
-    const reg=(info.region==='EU'?'EU':'NA'); const tier=Number(info.stake)||1;
+    const reg=(info.region==='EU'?'EU':'NA');
+    const _s=Number(info.stake); const tier=(_s>=0?_s:1);   // ||1 turned a FREE lobby into $1 = empty maze
     try{ await enterWatchMode(reg,tier); }catch(e){ console.error('[bridge] watch failed',e); _bridgeNotify('EXIT',{reason:'watch-error'}); }
     return;
   }
   let st=Number(info.stake); if(!(st>=0)) st=0;
+  // Honour the region of the lobby the player actually CLICKED. Without this the join went to
+  // whatever GAME_SERVER their saved preference happened to be, so a NA card opened an empty EU maze.
+  try{ if(info.region){ useGameServerForSessionPac(info.region==='EU'?'EU':'NA'); } }catch(_){}
   try{ await joinLobby(st); }catch(e){ console.error('[bridge] auto-join failed',e); _bridgeNotify('EXIT',{reason:'join-error'}); }
 }
 function _bridgeBoot(){
@@ -1620,7 +1624,28 @@ const GAME_SERVERS={
 };
 let GAME_SERVER=localStorage.getItem('pa_server')||'NA';
 function getSioUrl(){return GAME_SERVERS[GAME_SERVER].url;}
+// ── THE ONE PLACE A PAC LOBBY ID IS BUILT ────────────────────────────────────────────────────────
+// Same trap snake had: every call site concatenated its own id, so stake 0 became 'paid-lobby-0'
+// (a room that never exists) and a stake arriving as the string "0.50" built paid-lobby-0.50 while
+// 0.5 built paid-lobby-0.5 — two rooms for one lobby. Number() canonicalises every spelling.
+function lobbyIdForPac(usd){
+  const n=Number(usd);
+  if(!(n>0)) return 'free-lobby';
+  return 'paid-lobby-'+n;
+}
+// Point the connection at a region for THIS session (a Live Matches JOIN/spectate link) WITHOUT
+// changing the saved preference, and LOCK it so nothing quietly moves the player to another node
+// mid-join — the snake bug where clicking a busy NA lobby dropped you into an empty EU one.
+let _serverSessionLockPac=null;
+function useGameServerForSessionPac(r){
+  if(r!=='NA'&&r!=='EU')r='NA';
+  _serverSessionLockPac=r;
+  GAME_SERVER=r; REGION=(r==='EU')?'EU':'US';
+  const rsel=document.getElementById('region-sel'); if(rsel) rsel.value=REGION;
+  syncServerBtns();
+}
 function setGameServer(r){
+  if(_serverSessionLockPac&&r!==_serverSessionLockPac) return;   // entered via a lobby link — that region wins
   GAME_SERVER=r;
   localStorage.setItem('pa_server',r);
   // Sync REGION + lobby selector to match
@@ -2184,7 +2209,7 @@ async function joinLobby(usd){
   // If the player already paid for this lobby type (e.g. pkConnect failed after payment),
   // reuse the existing game token instead of charging them again.
   if(usd>0 && ST.hasEscrow && ST.entryToken){
-    const _rr='paid-lobby-'+usd;
+    const _rr=lobbyIdForPac(usd);
     go('scr-mm');
     document.getElementById('mm-sub').textContent='Wager already locked · Reconnecting…';
     lg('mm-log','Resuming existing wager — no new charge','lhi');
@@ -2194,7 +2219,7 @@ async function joinLobby(usd){
   // TX was broadcast but confirmTransaction timed out (or recordWager failed) before
   // ST.entryToken was set — retry registration with the saved sig, no new charge.
   if(usd>0 && ST.hasEscrow && ST._pendingJoinSig && !ST.entryToken){
-    const _rr=ST._pendingJoinRoom||('paid-lobby-'+usd);
+    const _rr=ST._pendingJoinRoom||lobbyIdForPac(usd);
     go('scr-mm');
     document.getElementById('mm-sub').textContent='Retrying previous deposit…';
     lg('mm-log','Transaction already broadcast — retrying registration without new charge','lhi');
@@ -2277,7 +2302,7 @@ async function joinLobby(usd){
     // Mark escrow immediately after broadcast — TX is on Solana now.
     // If confirmTransaction times out below, hasEscrow stays true so the next join
     // attempt takes the recovery path (retry without a new charge) instead of re-paying.
-    const roomId='paid-lobby-'+usd;   // any stake gets its own room (server creates on demand, token-gated)
+    const roomId=lobbyIdForPac(usd);   // any stake gets its own room (server creates on demand, token-gated)
     ST.hasEscrow=true;
     ST._pendingJoinSig=sig;
     ST._pendingJoinLamps=lamps;
@@ -2678,11 +2703,11 @@ async function enterWatchMode(region,tier){
   document.getElementById('watch-switch').style.display='flex';
   ST.lobbyUsd=tier; // cosmetic only — drives the POT readout, spectators never wager/cash out
   setGameServer(region==='EU'?'EU':'NA');
-  await pkConnect('paid-lobby-'+tier, null, true);
+  await pkConnect(lobbyIdForPac(tier), null, true);
   const hud=document.getElementById('watch-hud');
   if(hud){
     hud.style.display='flex';
-    const lbl=document.getElementById('watch-label'); if(lbl) lbl.textContent='👁 WATCHING '+region+' $'+tier;
+    const lbl=document.getElementById('watch-label'); if(lbl) lbl.textContent='👁 WATCHING '+region+' '+(Number(tier)>0?('$'+Number(tier)):'FREE');
   }
 }
 
