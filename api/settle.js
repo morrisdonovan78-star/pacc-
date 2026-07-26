@@ -484,15 +484,28 @@ async function sendAndConfirm(txBytes) {
   }
   console.log('[settle] sent sig=' + sig);
 
-  // Quick poll — 2 checks at 1.5s intervals (3s total).
-  // This catches most confirmations (Solana typically confirms in 1-2 slots ≈ 0.4-0.8s).
-  // If not confirmed within 3s we return immediately with confirmed:false — the TX is
-  // already in the network and WILL confirm. Keeping the poll short prevents the function
-  // from approaching the 60s Vercel timeout when RPCs are slow.
-  for (let i = 0; i < 2; i++) {
+  // Confirm with REBROADCAST — poll up to ~12s, searching tx history, and re-send the identical
+  // signed bytes every few seconds until it confirms.
+  //
+  // Why this matters (this was a live, intermittent "winner not paid / can't cash out" bug): a
+  // broadcast transaction can be DROPPED before it lands — the leader skips it, it only ever reached
+  // one node's mempool, or the network is briefly congested. The old code polled once for 3s and, if
+  // it hadn't confirmed, returned {confirmed:false} and NEVER rebroadcast. Every caller treats
+  // confirmed:false like success (snake cashout deletes the wager; blackjack sets the paid flag), so a
+  // dropped tx meant the money never moved yet the accounting said it did — and the idempotency guard
+  // then blocked the retry that would have re-sent it. Result: silent, intermittent non-payment.
+  //
+  // A SystemProgram transfer is idempotent by signature (fixed by its blockhash), so re-sending the
+  // exact same bytes can NEVER double-pay: if it already landed the re-send is a no-op, if it was
+  // dropped it gets another chance while the blockhash is still valid (~150 slots / 60-90s).
+  // searchTransactionHistory:true ensures a tx that already landed is always found. 12s stays well
+  // inside the 55s handler guard even when a settle pays several winners back-to-back.
+  const DEADLINE = Date.now() + 12000;
+  let polls = 0;
+  while (Date.now() < DEADLINE) {
     await sleep(1500);
     try {
-      const res = await rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: false }]);
+      const res = await rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: true }]);
       const s = res && res.value && res.value[0];
       if (s) {
         if (s.err) {
@@ -506,11 +519,18 @@ async function sendAndConfirm(txBytes) {
       }
     } catch (e) {
       if (e.message.startsWith('TX rejected')) throw e;
-      // RPC poll error — keep trying
+      // transient RPC poll error — keep trying
+    }
+    // Every ~4.5s with no confirmation yet, rebroadcast the same bytes to survive a mempool drop.
+    // skipPreflight:true — no re-simulation (the balance may have shifted; the tx itself is unchanged).
+    if (++polls % 3 === 0) {
+      try { await rpc('sendTransaction', [b64, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }]); }
+      catch (_) {}
     }
   }
-  // Not confirmed in 3s — return optimistically. TX is in the mempool and will land.
-  console.log('[settle] sent (unconfirmed yet) sig=' + sig + ' — client will see balance update shortly');
+  // Still unconfirmed after 12s of polling + rebroadcasts — genuinely rare now. The tx is in the
+  // network and will most likely still land; the caller keeps its optimistic-success behaviour.
+  console.log('[settle] sent (unconfirmed after 12s) sig=' + sig);
   return { sig, confirmed: false };
 }
 
@@ -2176,6 +2196,7 @@ module.exports = async function handler(req, res) {
         console.log('[settle] cashout kv=' + kvWager + ' signed=' + wagerLamportsRaw + ' using=' + wagerLamports);
 
         let sig, playerCut, creatorCut, txConfirmed = false;
+        try {
         for (let attempt = 1; attempt <= 2; attempt++) {
           if (attempt > 1) await sleep(1200);
           const { bal, blockhash } = await fetchBalAndHash(esc.pubkeyB58);
@@ -2232,6 +2253,18 @@ module.exports = async function handler(req, res) {
             }
             throw e;
           }
+        }
+        } catch (payErr) {
+          // The payout never landed — sendAndConfirm only throws on a failed broadcast or a tx that was
+          // rejected on-chain, and in BOTH cases no SOL left escrow (a rejected SystemProgram transfer
+          // moves nothing). We consumed the wager with kvGetDel above, so restore it — otherwise the
+          // player is stranded: their next Cash Out finds no `pw:` record and returns "No wager on
+          // record" while their money sits in escrow (the hand-refund cases). Restoring is money-safe
+          // precisely because nothing was paid. Short TTL mirrors the live-wager window.
+          await kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
+          console.error('[settle] cashout FAILED, wager restored, wallet=' + playerAddress + ' — ' + (payErr && payErr.message || payErr));
+          clearTimeout(guard); done = true;
+          return res.status(503).json({ error: 'Payout could not be confirmed — your wager is safe, press Cash Out again.', retry: true });
         }
         clearTimeout(guard); done = true;
         return res.status(200).json({ sig, playerCut, creatorCut, confirmed: txConfirmed });
