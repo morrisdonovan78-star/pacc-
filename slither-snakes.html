@@ -2499,16 +2499,21 @@ async function fetchPrice(){
 }
 async function fetchBalanceLamports(addr){
   const body=JSON.stringify({jsonrpc:'2.0',id:1,method:'getBalance',params:[addr,{commitment:'confirmed'}]});
-  for(const rpc of[getRpc(),'https://api.mainnet-beta.solana.com']){
+  // Retry a few times. A single /api/rpc hiccup used to return 0 — which is INDISTINGUISHABLE from an
+  // empty wallet — and that is exactly what told funded players "Not enough SOL" at join. Return null
+  // when we genuinely could not read the balance, so callers keep the last known value instead of
+  // pretending the wallet is empty.
+  for(let attempt=0;attempt<3;attempt++){
     try{const r=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body});const d=await r.json();if(typeof d.result?.value==='number')return d.result.value;}
     catch(e){}
+    if(attempt<2)await new Promise(r=>setTimeout(r,400));
   }
-  return 0;
+  return null;
 }
 async function refreshBal(){
   if(!ST.address)return;
   const lamps=await fetchBalanceLamports(ST.address);
-  ST.balance=lamps/1e9;
+  if(lamps!=null) ST.balance=lamps/1e9;   // null ⇒ read failed → keep last known balance, never fake a $0
   const usd=(ST.balance*ST.solPrice).toFixed(2);
   const short=ST.address.slice(0,6)+'…'+ST.address.slice(-4);
   const solStr=ST.balance.toFixed(4)+' SOL';
@@ -3463,11 +3468,19 @@ async function joinLobby(usd){
     pkConnect('ss-free-lobby');
     return;
   }
+  await fetchPrice().catch(()=>{});   // live price so wagerSol is correct (stale/0 price → wagerSol 0 → lenient, never a false block)
+  ST.wagerSol=usdToSol(usd);
   await refreshBal();
-  if(ST.balance<ST.wagerSol+0.001){
-    addToast('❌ Not enough SOL! Need '+(ST.wagerSol+0.001).toFixed(4)+' (have '+ST.balance.toFixed(4)+')','#FF4444');
+  const _need=ST.wagerSol+0.001;
+  // Only block when we actually READ a balance and it is genuinely short. A failed/zero read (an RPC
+  // hiccup, or the balance not yet synced in the embedded/bridge context) must NOT tell a funded
+  // player they are broke — that was the "$2 in my wallet but it says not enough SOL for a $1 lobby"
+  // bug. When the balance is unknown, let the on-chain deposit be the authority: it fails cleanly with
+  // a clear "short on SOL" message if they truly can't cover it.
+  if(ST.balance>0 && ST.balance<_need){
+    addToast('❌ Not enough SOL! Need '+_need.toFixed(4)+' (have '+ST.balance.toFixed(4)+')','#FF4444');
     _joiningLobby=false;
-    if(_BRIDGE){ _bridgeNotify('EXIT',{reason:'insufficient-funds',need:(ST.wagerSol+0.001),have:ST.balance,usd:usd}); }  // back to the platform to deposit
+    if(_BRIDGE){ _bridgeNotify('EXIT',{reason:'insufficient-funds',need:_need,have:ST.balance,usd:usd}); }  // back to the platform to deposit
     return;
   }
   addToast('🐍 Joining $'+usd+' lobby — wagering '+ST.wagerSol.toFixed(4)+' SOL…','#FFD700');
