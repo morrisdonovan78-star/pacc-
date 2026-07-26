@@ -3482,6 +3482,26 @@ async function joinLobby(usd){
     const tx=new solanaWeb3.Transaction().add(
       solanaWeb3.SystemProgram.transfer({fromPubkey:from,toPubkey:escPubkey,lamports:lamps})
     );
+    // ── UNIQUE-DEPOSIT NONCE ────────────────────────────────────────────────────────────────────
+    // A bare transfer's signature is a signature over {from, to, lamports, feePayer, blockhash}.
+    // Between two joins to the SAME lobby every field is identical EXCEPT the blockhash — so if a
+    // player cashes out and rejoins fast enough that getLatestBlockhash hands back the same
+    // blockhash, the second deposit is byte-identical to the first → SAME signature. That old
+    // signature is still sitting in the server's 24h `tx:{sig}` replay guard, so /api/join answers
+    // "Transaction already registered — make a new deposit to play again" and the rejoin dies. Worse,
+    // Solana itself treats the duplicate as already-processed and never moves the SOL. Adding a memo
+    // instruction with a random nonce makes every deposit's message — and therefore its signature —
+    // unique no matter what the blockhash is. Memo moves no lamports, so the server's escrow-delta
+    // check (verifyWagerTx) is unaffected. Best-effort: if the SDK ever lacks it, a bare transfer
+    // still works (just isn't collision-proof), so never let this throw the join.
+    try{
+      const _nonce='ss:'+Date.now().toString(36)+':'+Math.random().toString(36).slice(2,10);
+      tx.add(new solanaWeb3.TransactionInstruction({
+        keys:[],
+        programId:new solanaWeb3.PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),
+        data:new TextEncoder().encode(_nonce)
+      }));
+    }catch(_){}
     // Use direct HTTP fetch to /api/rpc — avoids Connection WebSocket hang on confirmTransaction
     const _lbr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'getLatestBlockhash',params:[{commitment:'confirmed'}]})});
     const _lbd=await _lbr.json();if(_lbd.error)throw new Error('Blockhash: '+_lbd.error.message);

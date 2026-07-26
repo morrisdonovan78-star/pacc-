@@ -29,6 +29,24 @@ function makeEntryToken(walletAddress, lobbyId) {
     .digest('hex').slice(0, 32);
 }
 
+// Mint the entry credentials for a paid room. The game token is a deterministic HMAC of
+// (lobbyId, wallet) — it carries no per-tx state — so it can be re-issued at any time for a
+// wallet that has already paid. That property is what makes the join endpoint safely idempotent
+// (see the replay-guard block below). Returns { gameToken, entryToken } — both null for a lobby
+// id we don't recognise.
+function mintTokensFor(walletAddress, lobbyId) {
+  // ss-paid-* are the snake game's paid rooms (authoritative sim); paid-lobby-* are legacy Pac-Man
+  // rooms. Snake paid lobbies can be ANY stake — the room id is just a label; the money is the
+  // on-chain deposit this endpoint verified, and the game server creates the arena on demand
+  // (getOrCreateRoom) validating only the token, not a fixed allowlist.
+  const VALID_LOBBIES = new Set(['ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
+  const isValidLobby = VALID_LOBBIES.has(lobbyId) || /^(ss-)?paid-lobby-(\d{1,6})(\.\d{1,2})?$/.test(lobbyId || '');
+  return {
+    gameToken:  isValidLobby ? makeGameToken(walletAddress, lobbyId)  : null,
+    entryToken: isValidLobby ? makeEntryToken(walletAddress, lobbyId) : null,
+  };
+}
+
 const ESCROW_PUBKEY = '2SYFfCsSmKr8qwK1AfWd36JtAc1BCaRaSSxyECKUJjBb';
 
 // ── Referral program ────────────────────────────────────────────────────────────────────────────
@@ -297,6 +315,30 @@ module.exports = async function handler(req, res) {
     const txKey = 'tx:' + txSig;
     const alreadyUsed = await kvGet(txKey);
     if (alreadyUsed !== null) {
+      // This txSig is already on record. Two very different situations both land here:
+      //
+      //  1. LEGIT LOST-RESPONSE RETRY (the common case, and the bug this guards against too
+      //     eagerly): the FIRST /api/join for this deposit already succeeded server-side — it
+      //     wrote this replay guard, wrote the pw: wager, and minted a token — but its HTTP
+      //     response never reached the client. Vercel froze/killed the function the instant the
+      //     KV writes finished, or the network dropped the reply, or the client's _redeemDeposit
+      //     retry loop fired again after a slow first call. The player DID pay, and their wager is
+      //     still on record and unconsumed. Rejecting here is exactly the "it charged me a dollar
+      //     then sent me home saying transaction already registered" report — the money left their
+      //     wallet and they got nothing. Because the game token is a deterministic HMAC of
+      //     (wallet, lobby), we can re-issue the SAME credentials and let them into the room they
+      //     already paid for. No new charge, no new pw:, no double-counted stats.
+      //
+      //  2. TRUE REPLAY (the attack the guard exists for): an OLD txSig re-submitted AFTER the
+      //     wager was consumed. Cashout, being killed, and losing all kvDel the pw: entry, so a
+      //     spent deposit has no active wager to re-enter. Keep rejecting.
+      //
+      // pw: present ⇔ an active, unconsumed paid wager ⇔ case 1. pw: absent ⇔ case 2.
+      const existingWager = await kvGet('pw:' + walletAddress);
+      if (existingWager !== null) {
+        const { gameToken, entryToken } = mintTokensFor(walletAddress, lobbyId);
+        return res.status(200).json({ ok: true, recorded: Number(existingWager) || lamps, gameToken, entryToken, resumed: true });
+      }
       return res.status(400).json({ error: 'Transaction already registered — make a new deposit to play again' });
     }
 
@@ -376,15 +418,8 @@ module.exports = async function handler(req, res) {
 
     // Issue a game token — HMAC-signed proof of payment for the Socket.io server.
     // The Socket.io server validates this on connection; without it paid lobbies are rejected.
-    // ss-paid-* are the snake game's paid rooms (authoritative sim); paid-lobby-* are legacy Pac-Man rooms.
-    const VALID_LOBBIES = new Set(['ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
-    // Snake paid lobbies can be ANY stake — the room id is just a label; the money is the on-chain
-    // deposit this endpoint already verified, and the game server creates the arena on demand
-    // (getOrCreateRoom) validating only the token, not a fixed allowlist. So mint a token for any
-    // ss-paid-lobby-<amount> (e.g. ss-paid-lobby-2, ss-paid-lobby-0.5) plus the legacy fixed set.
-    const isValidLobby = VALID_LOBBIES.has(lobbyId) || /^(ss-)?paid-lobby-(\d{1,6})(\.\d{1,2})?$/.test(lobbyId || '');
-    const gameToken  = isValidLobby ? makeGameToken(walletAddress, lobbyId) : null;
-    const entryToken = isValidLobby ? makeEntryToken(walletAddress, lobbyId) : null;
+    // (Same mint is re-used by the idempotent lost-response retry path above.)
+    const { gameToken, entryToken } = mintTokensFor(walletAddress, lobbyId);
 
     return res.status(200).json({ ok: true, recorded: lamps, gameToken, entryToken });
   } catch (e) {
