@@ -762,7 +762,7 @@ body.mctl #voice-speakers{left:150px;}
       <button id="clip-toggle-btn" class="copy-btn" style="min-width:64px;" onclick="_toggleClip()">ON</button>
     </div>
     <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:1.1rem;">
-      Records the last 20 seconds in your browser. Press <b>G</b> (keyboard) or click the <b>right stick</b> (controller) to save a clip. <b>PC only</b> — off on phones. Runs on your device, never on the game server.
+      <b>On by default</b> so the clip button always works. Records the last 20 seconds in your browser. Press <b>G</b> (keyboard) or click the <b>right stick</b> (controller) to save a clip. <b>PC only</b> — off on phones. Runs on your device, never on the game server. Turn it off if you want every last frame of performance.
     </div>
     <!-- Auto win-clip -->
     <div id="winclip-setting-row" style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px;">
@@ -770,7 +770,7 @@ body.mctl #voice-speakers{left:150px;}
       <button id="winclip-toggle-btn" class="copy-btn" style="min-width:64px;" onclick="_toggleWinClip()">ON</button>
     </div>
     <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:1.1rem;">
-      Auto-records your cash-out and hands the video to <b>SHARE MY WIN</b> — one tap to post it to TikTok / X / Instagram. Only records during the cash-out circle, so it never affects gameplay.
+      <b>Off by default.</b> Turn it on and your cash-out is auto-recorded and handed to <b>SHARE MY WIN</b> — one tap to post it to TikTok / X / Instagram. Only records during the cash-out circle, so it never affects gameplay.
     </div>
     <!-- Voice chat -->
     <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--g);margin-bottom:8px;">🎙 VOICE CHAT</div>
@@ -1876,6 +1876,33 @@ let _botCount=0,_isPractice=false;
 
 function getRpc(){return '/api/rpc';} // proxy through Vercel to avoid 403 from public RPCs
 function getSioUrl(){return GAME_SERVERS[GAME_SERVER].url;}
+// ── THE ONE PLACE A LOBBY ID IS BUILT ────────────────────────────────────────────────────────────
+// Every site used to concatenate its own: `'ss-paid-lobby-'+usd`. Two ways that sent players to a
+// room that wasn't the one they clicked:
+//   • stake 0 became `ss-paid-lobby-0`, which no server ever creates — spectating a FREE lobby always
+//     showed an empty arena. The free room is `ss-free-lobby`.
+//   • the value came in as a STRING from the platform's ?stake= in some paths and a NUMBER in others,
+//     so "0.50" built `ss-paid-lobby-0.50` while 0.5 built `ss-paid-lobby-0.5` — two DIFFERENT rooms
+//     for one lobby. That is "watching certain amounts shows the wrong paid lobby".
+// Number() collapses every spelling of the same stake to one canonical id, so join, spectate and the
+// room the server actually made always agree.
+// Belt and braces: the platform's Live Matches card knows the room's EXACT name (it read it from the
+// server's /counts), so it hands it over rather than making us reconstruct it from a parsed float. A
+// legacy room whose label isn't canonical (`ss-paid-lobby-0.50`) is then still joinable. Accepted only
+// when it really is a room for THIS stake — a URL param must never be able to aim a paid join at some
+// other lobby. Compared NUMERICALLY: a prefix/trailing-zero match would let $2 resolve to $20.
+let _lobbyIdOverride=null;
+function lobbyIdFor(usd){
+  const n=Number(usd);
+  if(_lobbyIdOverride){
+    if(n>0){
+      const m=/^ss-paid-lobby-(\d+(?:\.\d+)?)$/.exec(_lobbyIdOverride);
+      if(m && Number(m[1])===n) return _lobbyIdOverride;
+    } else if(_lobbyIdOverride==='ss-free-lobby') return _lobbyIdOverride;
+  }
+  if(!(n>0)) return 'ss-free-lobby';
+  return 'ss-paid-lobby-'+n;
+}
 function usdToSol(usd){return ST.solPrice>0?parseFloat((usd/ST.solPrice).toFixed(4)):0;}
 
 // ══ UI HELPERS ═══════════════════════════════════════════════
@@ -2461,9 +2488,14 @@ function syncServerBtns(){
 // account-settings load must never override a choice the user made AFTER that load began, or the
 // region visibly snaps back a second or two later — the "I pick EU, it shows NA, then flips" bug.
 let _serverPickedAt=0;
+// Set by useGameServerForSession when the player entered via a specific lobby's JOIN/spectate link.
+// While set, NO quiet restore may move them off it (see the comment on useGameServerForSession).
+let _serverSessionLock=null;
 function setGameServer(r,quiet){
   if(r!=='NA'&&r!=='EU')r='NA';
   if(quiet){
+    // Entered through a specific lobby's link — that region is authoritative for this session.
+    if(_serverSessionLock){ syncServerBtns(); return; }
     // Stale restore: the user has since picked a server themselves — do not clobber it.
     if(Date.now()-_serverPickedAt<8000) { syncServerBtns(); return; }
     GAME_SERVER=r; REGION=(r==='EU')?'EU':'US';
@@ -2480,10 +2512,22 @@ function setGameServer(r,quiet){
 }
 // Point the connection at a region for THIS session (e.g. spectating an EU arena) WITHOUT changing
 // the player's saved preference. Watching EU must not permanently move someone off NA.
+//
+// ⚠️ THIS IS A HARD LOCK, and it has to be. The region a player CLICKED must survive the whole join,
+// and a paid join is slow (deposit → on-chain confirm → /api/join → pkConnect can take tens of
+// seconds). The account-settings restore calls setGameServer(saved,'quiet') asynchronously, and its
+// only guard was `_serverPickedAt`, which only an explicit BUTTON press set. So a quiet restore
+// landing mid-join reset GAME_SERVER to the player's SAVED region, and the pkConnect at the END of
+// joinLobby read that — putting someone whose saved server is EU into the EU arena of the stake they
+// clicked, i.e. a different, empty room with the same name, while the NA lobby they picked from Live
+// Matches carried on without them. That is the "I click a NA lobby with players in it and get an
+// empty EU one", and it only hit players whose saved preference differed from the lobby they clicked.
+// _serverSessionLock makes the clicked region authoritative until the page is reloaded. It is still
+// session-only: nothing is written to localStorage or the account, so the saved preference is intact.
 function useGameServerForSession(r){
   if(r!=='NA'&&r!=='EU')r='NA';
   GAME_SERVER=r; REGION=(r==='EU')?'EU':'US';
-  try{ localStorage.setItem('ss_region',REGION); }catch(_){}
+  _serverSessionLock=r; _serverPickedAt=Date.now();
   syncServerBtns();
 }
 
@@ -2643,7 +2687,7 @@ async function settle(){
   // someone's winnings, and never return without telling the caller what happened.
   if(!ST.address){ console.error('[settle] no wallet loaded — cannot pay out'); return null; }
   if(ST.lobbyUsd===0) return null;                       // free lobby: nothing to pay
-  const _payLobby = pkRoomId || _lastRoomId || ('ss-paid-lobby-'+ST.lobbyUsd);
+  const _payLobby = pkRoomId || _lastRoomId || lobbyIdFor(ST.lobbyUsd);
   try{
     // Refresh price right before cashout so lamport conversion is exact
     await fetchPrice().catch(()=>{});
@@ -2771,6 +2815,10 @@ async function finishLogin(kp){
 // No local keypair is created, stored or synced.
 async function finishLoginBridge(info){
   ST.email=info.email||''; ST.address=info.address; _jwt=info.token||'';
+  // The exact room the Live Matches card was showing, straight from the game server's own /counts —
+  // so we join THAT room rather than rebuilding its name from a parsed number. Validated per-stake
+  // inside lobbyIdFor(); a bad value simply falls back to the canonical id.
+  try{ if(info.lobby && /^ss-(free-lobby|paid-lobby-\d+(?:\.\d+)?)$/.test(String(info.lobby))) _lobbyIdOverride=String(info.lobby); }catch(_){}
   _keypair={ publicKey:new solanaWeb3.PublicKey(info.address) };
   ST.conn=makeConnection();
   try{ _ownerCheck(); }catch(_){}
@@ -3453,7 +3501,7 @@ async function joinLobby(usd){
   // Explicit switch to a DIFFERENT lobby (e.g. leaving the test lobby to JOIN FREE): never let a
   // stale join-guard from the previous lobby block it — that's the "join free sends me to the test
   // lobby" bug (the guard early-returns and leaves you where you were). Only clears on a real switch.
-  const _target=(usd===0?'ss-free-lobby':('ss-paid-lobby-'+usd));
+  const _target=lobbyIdFor(usd);
   if(pkRoomId&&pkRoomId!==_target){ _joiningLobby=false; if(_sio){try{_sio.disconnect();}catch(_){}  _sio=null;} }
   // Only clear a STUCK join flag — one with no socket AND older than any real join could take
   // (the paid deposit+confirm loop can run ~90s). A rapid double-click, or a second click during
@@ -3596,7 +3644,7 @@ async function joinLobby(usd){
     // not the legacy relay. Without this the server never simulates food/collisions for paid rooms.
     // Any stake gets its own arena — the server creates the room on demand and gates by token, so a
     // $2 / $0.50 / $12 lobby works exactly like $1 or $5 (the id is just a label).
-    const roomId='ss-paid-lobby-'+usd;
+    const roomId=lobbyIdFor(usd);
     const _pName=getMyName();
     // api/join.js is the authority — it re-checks the chain with its own retries. Give it a few goes
     // (each call does real on-chain work) so a tx that just needed a few more seconds still gets in.
@@ -4325,18 +4373,19 @@ async function enterWatchMode(region,tier){
   // ONE automatic retry over polling if the first attempt times out. Watching is free and
   // read-only, so a retry can't cost anyone anything — and previously a stalled WebSocket just
   // failed the watch outright, which is why spectating sometimes took several manual attempts.
-  let _ok=await pkConnect('ss-paid-lobby-'+tier,null,true);
+  const _watchRoom=lobbyIdFor(tier);
+  let _ok=await pkConnect(_watchRoom,null,true);
   if(!_ok){
     lg('mm-log','Retrying over HTTP polling…','lwarn');
     _ssForcePolling=true;
-    try{ _ok=await pkConnect('ss-paid-lobby-'+tier,null,true); }
+    try{ _ok=await pkConnect(_watchRoom,null,true); }
     finally{ _ssForcePolling=false; }
     if(!_ok){ addToast('Could not reach that arena — try another server','#FF4444',5000); go('scr-lobby'); return; }
   }
   const bar=document.getElementById('spectate-bar');
   if(bar){
     bar.style.display='flex';
-    const lbl=document.getElementById('spec-label'); if(lbl)lbl.textContent='👁 WATCHING '+region+' $'+tier;
+    const lbl=document.getElementById('spec-label'); if(lbl)lbl.textContent='👁 WATCHING '+region+' '+(Number(tier)>0?('$'+Number(tier)):'FREE');
     const rb=document.getElementById('spec-rejoin-btn'); if(rb)rb.style.display='none';
     const pb=document.getElementById('spec-play-btn'); if(pb)pb.style.display='inline-flex';
   }
@@ -6303,8 +6352,8 @@ function _applyGfx(){
 const SS_SET_DEFS = [
   {k:'ss_server',      def:'NA',   apply:v=>{ if(v==='NA'||v==='EU') setGameServer(v,true); }},
   {k:'ss_gfx',         def:'high', apply:v=>{ _gfx=v; _applyGfx(); }},
-  {k:'ss_clip_on',     def:'',     apply:null},
-  {k:'ss_winclip_off', def:'',     apply:null},
+  {k:'ss_clip_on',     def:'1',    apply:null},   // clips ON by default; '0' = player turned them off
+  {k:'ss_winclip_off', def:'1',    apply:null},   // auto cash-out clips OFF by default; '0' = opted in
   {k:'ss_keybinds',    def:'{}',   apply:v=>{ try{ _ssBinds=JSON.parse(v)||{}; }catch(_){ _ssBinds={}; } }},
   {k:'ss_gpbinds',     def:'{}',   apply:v=>{ try{ _gpBinds=JSON.parse(v)||{}; }catch(_){ _gpBinds={}; } }},
   {k:'ss_snake_color', def:'',     apply:null},
@@ -6398,7 +6447,7 @@ let _clipStream=null,_clipMime='',_clipRec=null,_clipChunks=[],_clipSegStart=0,_
 // play into) — nodes cannot be connected across AudioContexts, so the mix has to live there.
 let _clipMixDest=null,_clipMicSrc=null,_clipMicGain=null;
 function _clipMicOn(){ return localStorage.getItem('ss_clip_mic')!=='0'; } // your own mic, default ON
-function _clipEnabled(){ return SS_IS_PC && localStorage.getItem('ss_clip_on')==='1'; } // opt-in, default OFF
+function _clipEnabled(){ return SS_IS_PC && localStorage.getItem('ss_clip_on')!=='0'; } // default ON (owner 2026-07-26); '0' = explicitly off
 function _clipDrawLoop(ts){
   if(!_clipStream){ _clipRaf=0; return; }
   _clipRaf=requestAnimationFrame(_clipDrawLoop);
@@ -6532,7 +6581,11 @@ function _clipUpload(blob){
 const WCLIP_W=1280, WCLIP_H=720, WCLIP_FPS=24, WCLIP_MAX_MS=12000;
 let _wclipCanvas=null,_wclipCtx=null,_wclipStream=null,_wclipRec=null,_wclipChunks=[],_wclipMime='',
     _wclipRaf=0,_wclipLast=0,_wclipBlob=null,_wclipStopTimer=null,_wclipPosted=false;
-function _wclipEnabled(){ return localStorage.getItem('ss_winclip_off')!=='1' && typeof MediaRecorder!=='undefined'; }
+// AUTO win-clips are OPT-IN now (owner 2026-07-26: 'turn off the automatic cash-out clips'). The
+// encoder only ever ran inside the 5s server-locked auto-circle so it never cost skill-play FPS, but
+// the owner does not want cash-outs recorded automatically at all. ss_winclip_off==='' now means OFF;
+// only an explicit '0' (set by the settings toggle) opts back in.
+function _wclipEnabled(){ return localStorage.getItem('ss_winclip_off')==='0' && typeof MediaRecorder!=='undefined'; }
 function _wclipDraw(ts){
   if(!_wclipStream){ _wclipRaf=0; return; }
   _wclipRaf=requestAnimationFrame(_wclipDraw);
@@ -6632,7 +6685,7 @@ function _keyLabel(k){
 function _openSettings(){ _renderSettings(); document.getElementById('settings-modal').style.display='flex'; }
 function _closeSettings(){ _cancelRebind(); _gpCapAct=null; document.getElementById('settings-modal').style.display='none'; }
 function _renderSettings(){
-  const on = SS_IS_PC && localStorage.getItem('ss_clip_on')==='1';
+  const on = SS_IS_PC && localStorage.getItem('ss_clip_on')!=='0';
   const tb=document.getElementById('clip-toggle-btn');
   if(tb){
     tb.textContent = !SS_IS_PC ? 'PC ONLY' : (on?'ON':'OFF');
@@ -6702,14 +6755,14 @@ function _cancelRebind(){ if(_kbCapBtn) _kbCapBtn.style.color=''; _kbCapturing=f
 function _resetBinds(){ _ssBinds={}; ssSetSetting('ss_keybinds','{}'); _renderSettings(); }
 function _toggleClip(){
   if(!SS_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
-  if(localStorage.getItem('ss_clip_on')==='1'){ ssSetSetting('ss_clip_on',''); _clipStop(); }
+  if(localStorage.getItem('ss_clip_on')!=='0'){ ssSetSetting('ss_clip_on','0'); _clipStop(); }
   else{ ssSetSetting('ss_clip_on','1'); if(SG&&!SG.over&&!isSpectating)_clipStart(); }
   _renderSettings();
 }
 function _toggleWinClip(){
   // Default ON — store the OFF state as ss_winclip_off so a fresh player gets win-clips automatically.
   if(_wclipEnabled()){ ssSetSetting('ss_winclip_off','1'); _wclipTeardown(); }
-  else{ ssSetSetting('ss_winclip_off',''); }
+  else{ ssSetSetting('ss_winclip_off','0'); }
   _renderSettings();
 }
 // Global capture-phase listener: while rebinding, the next key press becomes the new binding.
