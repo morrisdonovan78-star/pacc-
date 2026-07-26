@@ -126,6 +126,42 @@ module.exports = async function handler(req, res) {
     return;
   }
 
+  // ── sendTransaction needs "first node that ACCEPTED it", not "first node to answer" ─────────────
+  // The tx is broadcast to every RPC at once (a transfer is idempotent by signature, so multi-send is
+  // safe and gives it the best chance of landing). But preflight runs independently on each node, and a
+  // node that is a few slots BEHIND doesn't have our fresh blockhash yet — its preflight fails with
+  //   { error: { code: -32002, message: "Transaction simulation failed: Blockhash not found" } }
+  // -32002 is NOT an INFRA_CODE, so a plain race (Promise.any) treats that error as a valid answer and,
+  // if the laggard replies first, returns it to the caller. The join then dies with "Transaction
+  // simulation failed" — EVEN THOUGH a fresher node in the same race accepted and broadcast the very
+  // same tx, so the player's SOL already left their wallet into escrow. They aren't credited, they
+  // retry, they deposit again: that is the "wallet drains to zero / transaction simulation failed /
+  // can't join" report. Fix: take the FIRST node that returns a real signature; only surface an error
+  // once every node has errored (a genuine failure like insufficient funds fails on all of them, so it
+  // still passes through cleanly).
+  if (req.body && req.body.method === 'sendTransaction') {
+    const chosen = await new Promise((resolve) => {
+      let pending = rpcs.length;
+      let firstErr = null;
+      if (!pending) return resolve({ ok: false, data: null });
+      for (const url of rpcs) {
+        attempt(url).then((d) => {
+          if (d && typeof d.result === 'string' && d.result && !d.error) {
+            resolve({ ok: true, data: d });               // this node accepted + broadcast — the signature is truth
+          } else if (d && d.error && !firstErr) {
+            firstErr = d;                                  // hold a real RPC error (e.g. insufficient funds) in case ALL fail
+          }
+        }).catch(() => {}).finally(() => {
+          if (--pending === 0) resolve({ ok: false, data: firstErr });  // nobody accepted it
+        });
+      }
+    });
+    if (chosen.ok) { res.status(200).json(chosen.data); return; }
+    if (chosen.data) { res.status(200).json(chosen.data); return; }     // consistent, genuine error across all nodes
+    res.status(502).json({ jsonrpc: '2.0', error: { code: -32603, message: 'All RPC endpoints failed (send)' }, id: null });
+    return;
+  }
+
   // Two quick rounds: a transient blip across all nodes still recovers, but we never spend
   // anywhere near the old worst case.
   let lastError = 'no endpoints tried';
