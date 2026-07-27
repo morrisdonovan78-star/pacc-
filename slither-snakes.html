@@ -9243,7 +9243,17 @@ function drawHUD(mySnake){
 function drawMinimap(mySnake){
   if(!mmCanvas||!mmCtx||!SG)return;
   const mm=mmCtx,mw=mmCanvas.width,mh=mmCanvas.height;
-  const scale=mw/(ARENA_R*2);
+  // ── MINIMAP FOLLOWS THE LIVE ARENA ─────────────────────────────────────────────────────────────
+  // This used to map world->minimap as `mw/2 + x*scale` against the CONSTANT full radius, i.e. it
+  // hard-assumed the arena is a fixed circle centred on the origin. Both halves of that stopped
+  // being true: the anti-camp push MOVES the centre and the squeeze SHRINKS the radius. So every
+  // dot was plotted against a frame the arena had left — food and snakes drifted off the minimap
+  // ring, or sat inside it while really being out near the border.
+  // The minimap circle now IS the live border: positions are taken relative to the arena's current
+  // centre and scaled by its current radius, so what you see there always matches the real arena
+  // wherever it has moved to.
+  const _mR=_arenaR||ARENA_R, _mcx=_arenaCX||0, _mcy=_arenaCY||0;
+  const scale=(mw/2)/_mR;
   mm.clearRect(0,0,mw,mh);
   mm.save();
   mm.beginPath();mm.arc(mw/2,mh/2,mw/2,0,Math.PI*2);mm.clip();
@@ -9251,13 +9261,13 @@ function drawMinimap(mySnake){
   // Food dots
   SG.food.forEach(f=>{
     mm.fillStyle=foodColor(f)+'88';
-    mm.fillRect(mw/2+f.x*scale-1,mh/2+f.y*scale-1,2,2);
+    mm.fillRect(mw/2+(f.x-_mcx)*scale-1,mh/2+(f.y-_mcy)*scale-1,2,2);
   });
   // Snake dots
   SG.snakes.forEach(s=>{
     if(!s.alive||!s.path.length)return;
     const h=s.path[0];
-    const mx=mw/2+h.x*scale, my=mh/2+h.y*scale;
+    const mx=mw/2+(h.x-_mcx)*scale, my=mh/2+(h.y-_mcy)*scale;
     const isMe=s.id===myPid;
     mm.beginPath();mm.arc(mx,my,isMe?5:3,0,Math.PI*2);
     mm.fillStyle=s.color;mm.fill();
