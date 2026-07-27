@@ -1366,7 +1366,7 @@ const FOOD_TARGET  = 95;    // 95 pebbles on map (30% fewer, was 135)
 const FOOD_GROW    = 2;     // sections added per food orb
 const MIN_SECTIONS = 8;     // die below this
 const BOOST_MIN    = 12;    // boost stops draining below this length
-const INIT_SECTIONS= 17;    // starting section count (join length)
+const INIT_SECTIONS= 30;    // starting section count (join length) — owner 2026-07-26; MUST match SS_INIT_NS on the game servers (they are authoritative for ss- lobbies)
 // Eye size grows at half the rate of head radius past spawn size (eyes were scaling 1:1
 // with head radius and looked oversized on big/long snakes) — see _drawHeadCircle's eR.
 const EYE_BASE_R   = BASE_RADIUS+Math.pow(INIT_SECTIONS*SIZE_PER_SEGMENT,RADIUS_GROWTH)*RADIUS_SCALE;
@@ -7367,7 +7367,20 @@ function _overLeaderboard(){
   if(!_lbHoverStart) _lbHoverStart=Date.now();
   return (Date.now()-_lbHoverStart)>360;   // deliberate dwell, not a fast aim sweep past the corner
 }
+// ── POINTER LOCK REMOVED (owner, 2026-07-26) ─────────────────────────────────────────────────────
+// The lock trapped the mouse on the game page — you could not leave without Esc or the Windows key,
+// which is unacceptable on a site people tab in and out of. Returning false here disables it
+// everywhere in one place: no lock is ever requested, rafDraw's auto-release frees any stray one, and
+// aiming falls back to the real cursor position (_mouseX/_mouseY from mousemove), which is how the
+// game worked before the lock existed.
+//
+// KNOWN TRADE-OFF, deliberately accepted: a page cannot read the mouse once it leaves the window, so
+// the aim direction now stops updating at the window edge instead of continuing. That edge behaviour
+// is exactly what the lock was added to solve. Play fullscreen (F11) or with a maximised window and
+// it is unnoticeable. Everything below is left intact so this is a one-line revert.
+const SS_POINTER_LOCK=false;
 function _plWant(){
+  if(!SS_POINTER_LOCK) return false;
   // Only while actually playing. Spectators pan by dragging with real clientX/clientY, so locking
   // them would break spectate; menus obviously must keep a usable cursor.
   // The betting panel counts as a menu: a held lock makes every DOM button inside it unclickable,
