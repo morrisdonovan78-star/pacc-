@@ -8166,6 +8166,13 @@ function _guestPredictiveEat(my){
   for(let i=SG.food.length-1;i>=0;i--){
     const f=SG.food[i];
     if(f.k)continue;                                       // never predict money/kill orbs
+    // SHED COOLDOWN — the reason pebbles ''stopped working'' for a few seconds after boosting.
+    // Your own boost-shed trail is un-eatable server-side for SHED_NOEAT_MS (anti circle-farm). The
+    // client never knew that (o/ne were not in the food packet), so it predicted the eat, wiped the
+    // pebble from the screen via _eatenLocal, and the server went on refusing it — you ran over
+    // nothing, collected nothing, then it ''randomly'' worked once both timers lapsed. Same rule
+    // both sides now. Pickup RANGE is untouched.
+    if(f.o&&f.o===myPid&&f.ne&&now<f.ne)continue;
     const dx=h.x-f.x, dy=h.y-f.y;
     if(dx*dx+dy*dy<r2){ _eatenLocal.set(Math.round(f.x)+'_'+Math.round(f.y),now+_eatenLocalTTL); SG.food.splice(i,1); }
   }
@@ -8179,7 +8186,7 @@ function _mapServerFood(arr){
   const out=[];
   for(const f of arr){
     if(!f[4]&&_eatenLocal.has(Math.round(f[0])+'_'+Math.round(f[1])))continue;
-    out.push({x:f[0],y:f[1],ci:f[2]||0,size:f[3]||6,k:f[4]||0,w:f[5]?f[5]/1e6:0});
+    out.push({x:f[0],y:f[1],ci:f[2]||0,size:f[3]||6,k:f[4]||0,w:f[5]?f[5]/1e6:0,o:f[6]||0,ne:f[7]||0});
   }
   return out;
 }
