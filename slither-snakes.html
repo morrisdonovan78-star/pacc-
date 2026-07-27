@@ -8621,7 +8621,7 @@ function _hexUseCache(){ return window._GRIDMODE!=='off'; }
 function drawArena(){
   ctx.save();
   // Dark background inside arena
-  ctx.beginPath();ctx.arc(_arenaCX,_arenaCY,ARENA_R,0,Math.PI*2);
+  ctx.beginPath();ctx.arc(_arenaCX,_arenaCY,_arenaR,0,Math.PI*2);
   ctx.fillStyle='#07071a';ctx.fill();
   // Hex grid — adaptive cached blit or live stroke; both pixel-identical (shared _paintHexStrokes +
   // the live arena-circle clip below). ctx.clip() here uses the arena-arc path built just above.
@@ -8740,7 +8740,7 @@ function drawArena(){
   // and its shaded death-band are then invisible, so skipping them is pixel-identical. reach = half the
   // viewport diagonal in world units; if the farthest visible point is still inside the ring, skip.
   const _reach=Math.hypot(canvas.width,canvas.height)/(2*_camZoom);
-  if(Math.hypot(_camX,_camY)+_reach>=bR-1){
+  if(Math.hypot(_camX-_arenaCX,_camY-_arenaCY)+_reach>=bR-1){
     // Red danger band + shaded death-zone REMOVED in ALL lobbies (owner request) — only the cyan border
     // (below) marks the boundary now, same clean look as the test lobby.
     // Border glow — layered translucent strokes + one soft halo stroke + a crisp core. The halo stroke
