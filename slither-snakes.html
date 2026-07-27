@@ -8601,7 +8601,15 @@ function _paintHexStrokes(g,camX,camY,zoom,W,H){
     const cx=c*hx, yoff=(c&1)?hy/2:0;
     for(let rr=rMin;rr<=rMax;rr++){
       const cy=rr*hy+yoff;
-      if(cx*cx+cy*cy>ARENA_R*ARENA_R)continue;
+      // ARENA-CENTRE CULL REMOVED (2026-07-27). This used to skip any hex further than ARENA_R from
+      // the world ORIGIN — fine while the arena was permanently centred there, but the anti-camp push
+      // MOVES it, so every hex in the newly-covered ground failed the test and the grid simply stopped
+      // being drawn behind the moving map: a black wedge that followed the border around.
+      // Culling here saved almost nothing anyway: cMin..cMax / rMin..rMax are already bounded by the
+      // CAMERA VIEWPORT above, so the loop only ever visits hexes that are on screen, and the live
+      // arena-circle clip in drawArena is what actually hides anything outside the ribbon. Re-adding a
+      // centre-aware cull would also mean invalidating the grid cache every time the arena slid, which
+      // costs far more than the handful of hexes it would skip.
       for(let k=0;k<6;k++){ const a=Math.PI/3*k, vx=cx+R*Math.cos(a), vy=cy+R*Math.sin(a);
         if(k===0)g.moveTo(vx,vy);else g.lineTo(vx,vy); }
       g.closePath();
