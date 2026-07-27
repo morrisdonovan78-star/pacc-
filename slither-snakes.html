@@ -1198,6 +1198,9 @@ body.mctl #voice-speakers{left:150px;}
     <button onclick="spawnBotSnake('fight')" style="padding:7px 10px;background:#AA3300;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">⚔ FIGHTER</button>
     <button onclick="clearBotSnakes()" style="padding:7px 10px;background:#1a0000;border:1px solid #FF4444;color:#FF4444;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">✕ BOTS (C)</button>
   </div>
+  <!-- Owner-only. Shown by _syncOwnerUi() so the tuning panel has a real entry point that does not
+       depend on a function key surviving the keyboard, the browser, or another handler. -->
+  <button id="tune-open-btn" onclick="_toggleTuning()" style="display:none;position:fixed;bottom:170px;left:12px;z-index:200;padding:7px 10px;background:#241a00;border:1px solid #FFB400;color:#FFD700;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;">⚔ COMBAT TUNING (F4)</button>
   <!-- Column wrapper: spectate-bar + watch-switch stack via normal flow, so a wrapped/taller
        bar (long "WATCHING LIVE" label on narrow screens) can never overlap the buttons below it. -->
   <div id="watch-hud" style="position:absolute;top:10px;left:10px;display:flex;flex-direction:column;align-items:flex-start;gap:8px;z-index:100;max-width:calc(100vw - 220px);">
@@ -1351,6 +1354,11 @@ const ARENA_R      = 3000;  // world radius (full/normal)
 // broadcast in each ss-state as `ar`. Used for drawing the ring AND for own-snake death prediction
 // so the client stays in step with the authoritative border. Defaults to the full radius.
 let _arenaR = ARENA_R;
+// ARENA CENTRE. The anti-camp push (ssCampPush on the game server) slides the whole ring away from
+// anyone who holds a circle past the trigger, so the arena is no longer necessarily centred on the
+// origin. The server sends it every state packet as acx/acy; everything that draws or tests against
+// the border reads these. Stays 0,0 in practice mode and whenever nobody is camping.
+let _arenaCX = 0, _arenaCY = 0, _campPushing = false;
 const SNAKE_SPD    = 288 / 30;  // moneyslither BASE_SPEED  288 px/s ÷ 30 TPS = 9.6 px/tick
 const BOOST_SPD    = 630 / 30;  // moneyslither BOOST_SPEED 630 px/s ÷ 30 TPS = 21 px/tick
 const TICK_MS      = 33;    // 30 TPS
@@ -1365,7 +1373,7 @@ const RADIUS_SCALE       = 0.8;  // multiplier for radius curve
 const FOOD_TARGET  = 95;    // 95 pebbles on map (30% fewer, was 135)
 const FOOD_GROW    = 2;     // sections added per food orb
 const MIN_SECTIONS = 8;     // die below this
-const BOOST_MIN    = 12;    // boost stops draining below this length
+const BOOST_MIN    = 8;     // boost stops draining below this length (owner 2026-07-26: 12 -> 8; MUST match SS_BOOST_MIN on the game servers)
 const INIT_SECTIONS= 30;    // starting section count (join length) — owner 2026-07-26; MUST match SS_INIT_NS on the game servers (they are authoritative for ss- lobbies)
 // Eye size grows at half the rate of head radius past spawn size (eyes were scaling 1:1
 // with head radius and looked oversized on big/long snakes) — see _drawHeadCircle's eR.
@@ -4150,6 +4158,9 @@ async function pkConnect(roomId,gameToken,spectate){
     _sio.on('ss-state',d=>{
       if(!SG||SG.over)return;
       if(typeof d.ar==='number'&&d.ar>0)_arenaR=d.ar; // live (shrinking/expanding) border radius
+      if(typeof d.acx==='number')_arenaCX=d.acx;         // anti-camp push — the ring itself moves
+      if(typeof d.acy==='number')_arenaCY=d.acy;
+      if(_campPushing!==!!d.cpush){ _campPushing=!!d.cpush; if(_campPushing){ try{ addToast('⚠ ARENA CLOSING IN — someone is camping','#FF6600',3000); }catch(_){} } }
       // Sync food (sent every ~250ms or when changed)
       if(d.food){
         SG.food=_mapServerFood(d.food);
@@ -6908,7 +6919,7 @@ window.addEventListener('pagehide', function(){
 
 function launchSnakeGame(){
   go('scr-game');
-  _arenaR=ARENA_R; // reset the live border each game; ss-state will drive it after
+  _arenaR=ARENA_R; _arenaCX=0; _arenaCY=0; _campPushing=false; // reset the live border each game; ss-state will drive it after
   const sbar=document.getElementById('spectate-bar');if(sbar)sbar.style.display='none';
   canvas=document.getElementById('gc');
   ctx=canvas.getContext('2d');
@@ -7004,6 +7015,9 @@ function launchSnakeGame(){
   // — a console emit still can't put a bot in a paid room.
   const _bbFree=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
   const _bb=document.getElementById('bot-bar');if(_bb)_bb.style.display=((_isPractice||_bbFree)&&!isSpectating)?'flex':'none';
+  // Owner-only tuning entry point — a button, so it works even if F9 is eaten by the OS/browser.
+  const _tob=document.getElementById('tune-open-btn');
+  if(_tob)_tob.style.display=(_tuningUnlocked()&&!isSpectating)?'block':'none';
   if(_firstRemoteSync){const _jo=document.getElementById('join-sync');if(_jo)_jo.style.display='flex';}
   _clipStart(); // begin rolling clip buffer (PC + enabled only; no-op otherwise)
   _voiceAutoStart(); // voice chat is ON by default — no hunting for the 🎙️ button every round
@@ -7468,7 +7482,10 @@ function onGameKey(e){
   // 'H' hitboxes stays hardcoded (dev tool, not in the remap list) unless the key is bound elsewhere.
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
-  if(!a && (e.code==='Backquote'||e.key==='`'||e.key==='9')){togglePerf();return;} // perf overlay (measurement only) — 9 or backtick
+  if(!a && (e.code==='Backquote'||e.key==='`')){togglePerf();return;} // perf overlay (measurement only) — BACKTICK only.
+  // '9' used to toggle this too, which is why pressing for the tuning panel put the PERF overlay on
+  // screen instead: this check runs before the F9 handler and returned early. A bare number key is a
+  // bad binding for a dev overlay anyway.
   // Bots on the keyboard (N = spawn circle, Shift+N = clear). The bot bar lives INSIDE #scr-game, so
   // while the pointer is locked its buttons can't be clicked — without a key you'd have to Esc out
   // mid-game just to spawn a practice target. Same gating as the buttons; the server still enforces
@@ -7976,11 +7993,11 @@ document.addEventListener('keydown',function(e){
     openChat();
     return;
   }
-  // ── F9 — owner tuning panel ────────────────────────────────────────────────────────────────
+  // ── F4 (F9 still works) — owner tuning panel ───────────────────────────────────────────────
   // MOVED OFF 'T', which is now chat for everyone. Not Shift+T: Shift is the BOOST key, so any
   // Shift combo would boost at the same time. F9 is unused, matches the F8 betting shortcut, and
   // can't collide with a chat message.
-  if(e.key==='F9'&&!e.repeat&&localStorage.getItem('ss_owner')==='1'&&!_ssTypingInField()){
+  if((e.key==='F4'||e.key==='F9')&&!e.repeat&&localStorage.getItem('ss_owner')==='1'&&!_ssTypingInField()){
     e.preventDefault(); _toggleTuning();
   }
   // Shift+P — dump the circle-probe trace (render-vs-server same-frame geometry). Test lobby only.
@@ -8604,7 +8621,7 @@ function _hexUseCache(){ return window._GRIDMODE!=='off'; }
 function drawArena(){
   ctx.save();
   // Dark background inside arena
-  ctx.beginPath();ctx.arc(0,0,ARENA_R,0,Math.PI*2);
+  ctx.beginPath();ctx.arc(_arenaCX,_arenaCY,ARENA_R,0,Math.PI*2);
   ctx.fillStyle='#07071a';ctx.fill();
   // Hex grid — adaptive cached blit or live stroke; both pixel-identical (shared _paintHexStrokes +
   // the live arena-circle clip below). ctx.clip() here uses the arena-arc path built just above.
@@ -8731,13 +8748,13 @@ function drawArena(){
     // identical: avg diff 1/255) at ~0.6ms instead of ~17ms — shadowBlur on a 3000px ring was THE FPS
     // bottleneck (a full-bounding-box Gaussian blur every frame). Appearance is unchanged.
     for(let i=4;i>=0;i--){
-      ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
+      ctx.beginPath();ctx.arc(_arenaCX,_arenaCY,bR,0,Math.PI*2);
       ctx.strokeStyle=`rgba(255,40,40,${0.06+i*0.03})`;
       ctx.lineWidth=20+i*14;ctx.stroke();
     }
-    ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
+    ctx.beginPath();ctx.arc(_arenaCX,_arenaCY,bR,0,Math.PI*2);
     ctx.strokeStyle='rgba(255,40,40,0.05)';ctx.lineWidth=90;ctx.stroke(); // soft halo (replaces shadowBlur)
-    ctx.beginPath();ctx.arc(0,0,bR,0,Math.PI*2);
+    ctx.beginPath();ctx.arc(_arenaCX,_arenaCY,bR,0,Math.PI*2);
     ctx.strokeStyle='#FF2A2A';ctx.lineWidth=5;ctx.stroke();               // crisp core
   }
   ctx.restore();
