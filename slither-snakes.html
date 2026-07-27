@@ -7017,7 +7017,7 @@ function launchSnakeGame(){
   const _bb=document.getElementById('bot-bar');if(_bb)_bb.style.display=((_isPractice||_bbFree)&&!isSpectating)?'flex':'none';
   // Owner-only tuning entry point — a button, so it works even if F9 is eaten by the OS/browser.
   const _tob=document.getElementById('tune-open-btn');
-  if(_tob)_tob.style.display=(_tuningUnlocked()&&!isSpectating)?'block':'none';
+  if(_tob)_tob.style.display=(_tuningUnlocked()&&_tuningLobbyOk()&&!isSpectating)?'block':'none';
   if(_firstRemoteSync){const _jo=document.getElementById('join-sync');if(_jo)_jo.style.display='flex';}
   _clipStart(); // begin rolling clip buffer (PC + enabled only; no-op otherwise)
   _voiceAutoStart(); // voice chat is ON by default — no hunting for the 🎙️ button every round
@@ -7032,9 +7032,15 @@ function launchSnakeGame(){
 // value. The localStorage flag below only decides whether the UI is DRAWN; it grants no authority, so
 // a player who flips it just gets sliders whose every emit the server rejects.
 function _tuningUnlocked(){ try{ return localStorage.getItem('ss_owner')==='1'; }catch(_){ return false; } }
+// FREE / test lobbies ONLY (owner 2026-07-27). The knobs still apply GLOBALLY on the server, so tuning
+// from the free lobby retunes every arena — but the panel must never be open while the owner is in a
+// paid room with real money on the line. A mis-drag there would change the collision constants of a
+// live money game mid-run.
+function _tuningLobbyOk(){ return pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby(); }
 function _toggleTuning(){
   const _p=document.getElementById('tuning-panel'); if(!_p)return;
   if(!_tuningUnlocked()){ _showTuning=false; _p.style.display='none'; return; }
+  if(!_tuningLobbyOk()){ _showTuning=false; _p.style.display='none'; addToast('Combat tuning is free-lobby only — not in a paid room','#FFD700',3500); return; }
   _showTuning=!_showTuning;
   _p.style.display=_showTuning?'block':'none';
   if(_showTuning){
@@ -8736,11 +8742,16 @@ function drawArena(){
   // whole ring visibly closes in. When it's closed in, shade the now-lethal band between the live
   // border and the old full edge so it's obvious that area just became instant death.
   const bR=_arenaR;
-  // ── PERF: cull the whole border when it's off-screen (player deep in the interior). The border ring
-  // and its shaded death-band are then invisible, so skipping them is pixel-identical. reach = half the
-  // viewport diagonal in world units; if the farthest visible point is still inside the ring, skip.
-  const _reach=Math.hypot(canvas.width,canvas.height)/(2*_camZoom);
-  if(Math.hypot(_camX-_arenaCX,_camY-_arenaCY)+_reach>=bR-1){
+  // ── BORDER IS ALWAYS DRAWN (cull removed 2026-07-27).
+  // There used to be an off-screen cull here so the ring was skipped when the player was deep in the
+  // interior. It kept producing "the border is black / the red line is gone" reports — it was wrong
+  // once the anti-camp push started MOVING the arena (it measured from the origin), and even after
+  // that was corrected it still misjudged the boundary while the zoom was mid-flight, because reach
+  // is derived from _camZoom and the arena radius is itself changing. A missing border in a
+  // real-money game is far worse than the cost of drawing it: the ring is 7 plain arc strokes,
+  // ~0.6ms, since the shadowBlur that actually was the FPS bottleneck was replaced long ago. Always
+  // draw; correctness beats the micro-optimisation.
+  {
     // Red danger band + shaded death-zone REMOVED in ALL lobbies (owner request) — only the cyan border
     // (below) marks the boundary now, same clean look as the test lobby.
     // Border glow — layered translucent strokes + one soft halo stroke + a crisp core. The halo stroke
