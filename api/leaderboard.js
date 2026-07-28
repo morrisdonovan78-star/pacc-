@@ -451,7 +451,9 @@ module.exports = async function handler(req, res) {
       } catch (_) { /* corrupt entry — fall through and rebuild it */ }
     }
 
-    const raw = await kvZrevrange('lb:' + game + ':earned', 0, 19) || [];
+    // Pull MORE than the board shows. Several zset entries can belong to the same player (see the
+    // merge below), so taking exactly 20 and then merging would hand back a short board.
+    const raw = await kvZrevrange('lb:' + game + ':earned', 0, 59) || [];
 
     const pairs = [];
     for (let i = 0; i < raw.length; i += 2) {
@@ -464,21 +466,37 @@ module.exports = async function handler(req, res) {
       readGlobal(game),
     ]);
 
-    const players = pairs.map(({ address }, idx) => {
+    // ── ONE ROW PER PLAYER ────────────────────────────────────────────────────────────────────────
+    // The zset is keyed by the wallet a game was PLAYED on, and currentAddr() then resolves each key
+    // to that account's wallet today. A player who has been re-keyed (or who ended up with a second
+    // embedded wallet) therefore has several zset entries that all resolve to the SAME address — and
+    // the board listed each one separately. Live: EMINEM appeared at #1 with 858 games and again at
+    // #2 with 174, both on 4B9MgNPU..., because that is one player's history split across two keys.
+    //
+    // Merging on the RESOLVED address is the whole fix: same wallet means same player, so the totals
+    // add up and the board ranks people rather than key fragments. Nothing is lost — the split rows
+    // were never two competitors.
+    const byAddr = new Map();
+    pairs.forEach(({ address }, idx) => {
       const stats = playerResults[idx];
-      return {
-        rank:    idx + 1,
-        address: curAddrs[idx] || address,   // display/send the current wallet, not a stale old one
-        name:    stats.name    || '',
-        earned:  stats.earned  || 0,
-        wagered: stats.wagered || 0,
-        games:   stats.games   || 0,
-        kills:   stats.kills   || 0,
-        deaths:  stats.deaths  || 0,
-        wins:    stats.wins    || 0,
-        losses:  stats.losses  || 0,
-      };
+      const addr = curAddrs[idx] || address;
+      let e = byAddr.get(addr);
+      if (!e) {
+        e = { address: addr, name: '', earned: 0, wagered: 0, games: 0, kills: 0, deaths: 0, wins: 0, losses: 0, _top: -1 };
+        byAddr.set(addr, e);
+      }
+      for (const k of ['earned', 'wagered', 'games', 'kills', 'deaths', 'wins', 'losses']) {
+        e[k] += Number(stats[k]) || 0;
+      }
+      // Keep the name from whichever fragment earned the most — that is the account's live name; an
+      // abandoned old key can still carry a name the player has since changed.
+      const earned = Number(stats.earned) || 0;
+      if (stats.name && earned > e._top) { e.name = stats.name; e._top = earned; }
     });
+    const players = [...byAddr.values()]
+      .sort((a, b) => b.earned - a.earned)
+      .slice(0, 20)
+      .map((p, i) => { delete p._top; return Object.assign({ rank: i + 1 }, p); });
 
     const payload = { game, players, global };
     // Best-effort store — a cache write that fails must never fail the request. Only cache a board
