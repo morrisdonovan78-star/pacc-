@@ -1948,6 +1948,40 @@ module.exports = async function handler(req, res) {
      * checks the signature. A player cannot mint one, and a compromised kart server cannot move money
      * (kart-settle only pays addresses that are in the race it is settling, capped by the pot).
      */
+    /*
+     * kart-refund — give an entry back IN FULL, no fee. For a paid race that never ran: the creator
+     * paid to open the room and nobody else turned up, the lobby was abandoned, the field never
+     * reached two. Money taken for a race that did not happen is not the platform's to keep, and
+     * without this the first person into an empty room is quietly out of pocket for trying.
+     *
+     * 100%, not pot-minus-rake: there was no contest, so there is nothing to rake.
+     */
+    if (action === 'kart-refund') {
+      const refundId = String(body.refundId || '').slice(0, 90);
+      const entries = Array.isArray(body.entries) ? body.entries.slice(0, 8) : [];
+      if (!refundId || !entries.length) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'refundId and entries required' }); }
+      if (!verifyGameProof(req, 'kart-refund:' + refundId + ':' + (req.headers['x-game-ts'] || ''))) {
+        clearTimeout(guard); done = true; return res.status(403).json({ error: 'bad proof' });
+      }
+      const lk = await kvSetNX('kartrefund:' + refundId, String(Date.now()));
+      if (!lk) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+      const escR = getEscrow();
+      const out = [];
+      let returned = 0;
+      for (const e of entries) {
+        const to = String((e && e.address) || '');
+        const lam = Math.floor(Number(e && e.lamports) || 0);
+        if (!to || lam <= 0) continue;
+        const r = await wgPayOne(escR, to, lam, 'kart-refund:' + refundId);
+        if (!r.ok) betAlert('KART refund FAILED ' + refundId + ' -> ' + to.slice(0, 8) + ' : ' + (r.reason || ''));
+        else returned += lam;
+        out.push({ address: to, lamports: lam, ok: !!r.ok, sig: r.sig || null });
+      }
+      if (returned > 0) await kvHincrby(BET_LEDGER, 'betLiability', -returned).catch(() => {});
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, refundId, refunded: out });
+    }
+
     if (action === 'kart-settle') {
       const raceId = String(body.raceId || '').slice(0, 80);
       const winners = Array.isArray(body.winners) ? body.winners.slice(0, 8) : [];
