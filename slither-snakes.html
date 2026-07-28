@@ -538,7 +538,7 @@ body.mctl #voice-speakers{left:150px;}
       elDl.style.color='var(--muted)';
       elDl.innerHTML='<div style="line-height:1.6;">Post this in the SnakePot Discord:<br><b style="color:#fff;font-family:monospace;font-size:13px;">LINK '+_dlCode+'</b><br>(copied) then tap below.</div>'
         +'<button class="copy-btn" onclick="_dlDo()" style="margin-top:8px;border-color:rgba(57,255,20,.5);color:#39FF14;">✓ I POSTED IT</button>';
-      try{ if(navigator.clipboard) navigator.clipboard.writeText('LINK '+_dlCode); }catch(_){}
+      try{ (window._ssCopy?_ssCopy('LINK '+_dlCode):navigator.clipboard.writeText('LINK '+_dlCode)); }catch(_){}
       try{ window.open('https://discord.gg/kd4tNP2vw','_blank','noopener'); }catch(_){} };
     window._dlDo=function(){ var addr=(typeof ST!=='undefined'&&ST&&ST.address)||''; if(!addr||!elDl)return;
       elDl.innerHTML='<span style="color:var(--muted);">Checking Discord…</span>';
@@ -2218,10 +2218,40 @@ async function _lbDoSearch(q){
   }
 }
 
+/*
+ * ONE copy path for the whole client, and it reports whether it actually copied.
+ *
+ * navigator.clipboard.writeText() is a PROMISE, so `try{ writeText(x) }catch{}` cannot see it fail —
+ * the write is refused, the rejection goes unhandled, and the code carries on to say "Copied!". And it
+ * IS refused routinely: a browser can have clipboard-write DENIED for an origin outright (measured on
+ * snakepot.com with a real trusted click: permissions.query -> "denied", writeText -> NotAllowedError
+ * "Write permission denied"), and it also refuses whenever the document is not focused.
+ *
+ * execCommand('copy') is not subject to that permission and SUCCEEDED in the same measurement, so it
+ * is a genuine fallback, not a legacy afterthought. Resolves true only on a real copy, so callers can
+ * stop announcing success they do not have.
+ */
+window._ssCopy=async function(text){
+  const s=String(text==null?'':text);
+  if(!s)return false;
+  try{ if(navigator.clipboard&&navigator.clipboard.writeText){ await navigator.clipboard.writeText(s); return true; } }catch(_){}
+  try{
+    const t=document.createElement('textarea');
+    t.value=s; t.setAttribute('readonly','');
+    // Off-screen but RENDERED — a display:none element cannot hold a selection, so the copy would
+    // silently do nothing.
+    t.style.cssText='position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+    document.body.appendChild(t);
+    t.focus(); t.select(); t.setSelectionRange(0,s.length);
+    const ok=document.execCommand('copy');
+    document.body.removeChild(t);
+    return !!ok;
+  }catch(_){ return false; }
+};
+
 function copyAddress(addr){
   if(!addr)return;
-  navigator.clipboard.writeText(addr).then(()=>addToast('Wallet copied!','#39FF14'))
-    .catch(()=>{try{const t=document.createElement('textarea');t.value=addr;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);addToast('Wallet copied!','#39FF14');}catch(_){}});
+  _ssCopy(addr).then(ok=>addToast(ok?'Wallet copied!':'Your browser blocked the copy — select the address and copy it by hand',ok?'#39FF14':'#FF6600',ok?2500:7000));
 }
 
 // ══ PLAYER PROFILE (stats + earnings-over-time chart, damnbruh-style) ══════════
@@ -2630,7 +2660,7 @@ async function doRefreshBal(){await fetchPrice();await refreshBal();}
 function copyWalletAddr(){
   const addr=ST.address||'';
   if(!addr)return;
-  navigator.clipboard.writeText(addr).then(()=>addToast('Address copied!','#39FF14')).catch(()=>{try{const t=document.createElement('textarea');t.value=addr;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);addToast('Address copied!','#39FF14');}catch(e){}});
+  _ssCopy(addr).then(ok=>addToast(ok?'Address copied!':'Your browser blocked the copy — copy it by hand',ok?'#39FF14':'#FF6600',ok?2500:7000));
 }
 async function pasteWdAddr(){
   try{const t=await navigator.clipboard.readText();const inp=document.getElementById('wd-addr');if(inp)inp.value=t.trim();}
@@ -2830,8 +2860,13 @@ async function createNewWallet(){
 }
 function copyBackupKey(){
   const txt=document.getElementById('backup-key-display').textContent;
-  try{navigator.clipboard.writeText(txt);}catch(e){alert('Copy manually:\n\n'+txt);}
-  addToast('Key copied — store it safely!','#FFD700');
+  // This is a PRIVATE KEY. Saying it is copied when it is not is how a wallet is lost for good —
+  // the dialog gets closed believing it is saved. Only claim it when the copy really happened.
+  _ssCopy(txt).then(ok=>{
+    if(ok){ addToast('Key copied — store it safely!','#FFD700'); return; }
+    addToast('Copy was blocked — copy the key by hand BEFORE closing this','#FF4444',9000);
+    try{ window.prompt('Your browser blocked the copy. Select this key and copy it now:', txt); }catch(_){}
+  });
 }
 async function confirmBackupAndContinue(){
   if(!_pendingBackupKp){addToast('Reload and try again','#FF4444');return;}
@@ -3146,7 +3181,7 @@ function shareMyWin(){
   }
   // …then open the X composer with the prefilled brag + proof (also the whole flow when there's no clip).
   try{ window.open(url,'_blank','noopener,noreferrer'); }
-  catch(_){ try{ navigator.clipboard.writeText(text+' '+play); addToast('Copied — paste it anywhere','#39FF14'); }catch(__){} }
+  catch(_){ _ssCopy(text+' '+play).then(ok=>{ if(ok) addToast('Copied — paste it anywhere','#39FF14'); }); }
 }
 async function doWithdraw(){
   if(_wdBusy){ addToast('Withdrawal already in progress — please wait','#FFD700'); return; }
