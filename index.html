@@ -1456,6 +1456,14 @@ async function finishLogin(kp){
 // to the chosen lobby (or spectate).
 async function finishLoginBridge(info){
   ST.email=info.email||''; ST.address=info.address; _jwt=info.token||'';
+  // The platform knows who this is — keep the name so the arena shows it instead of "YOU", and
+  // persist it under this game's own key so it survives the next load without the bridge.
+  try{
+    _bridgeName=String(info.name||'').trim().slice(0,14).toUpperCase();
+    if(_bridgeName && ST.address && !localStorage.getItem('pa_name_'+ST.address))
+      localStorage.setItem('pa_name_'+ST.address,_bridgeName);
+  }catch(_){}
+  try{ _cachedMyName=getMyName(); }catch(_){}
   // REGISTER THE ACCOUNT'S WALLETS — this path never did, and it is how platform players arrive.
   // A wallet with no `a2c:` key is invisible to the identity system, so the leaderboard, the profile
   // card and Send cannot resolve to it, and the player can be shown an empty wallet as their receive
@@ -2560,12 +2568,32 @@ let _audioCtx=null, _musicStop=false;
 let _lastDrawTs=0; // used by draw() for frame-delta interpolation
 let _lastSbSig='';  // scoreboard change-detection — skip DOM rebuild when nothing changed
 let _cachedMyName='YOU'; // cached once — avoids string ops inside 60fps draw loop
+let _bridgeName=''; // display name handed over by the platform on a bridge login
 
 function _nameKey(){ return 'pa_name_'+ST.address; }
+/*
+ * Your ACCOUNT name, not a PAC-ARENA-only nickname. This read one key — pa_name_<addr> — and returned
+ * the literal string 'YOU' if it was missing, so anyone who had never typed a name into THIS game
+ * specifically appeared as "YOU" to everybody, including players who had a perfectly good name on
+ * their profile and in Snake Pot. The identity is account-level; only the storage key was per-game.
+ *
+ * Falls through the same places the snake client looks, then the name the platform handed us on the
+ * bridge login, before giving up.
+ */
 function getMyName(){
-  if(!ST.address) return 'YOU';
-  const saved=localStorage.getItem(_nameKey());
-  if(saved&&saved.trim()) return saved.trim().slice(0,14).toUpperCase();
+  const clean=(v)=>{ const t=String(v||'').trim(); return t?t.slice(0,14).toUpperCase():''; };
+  if(ST.address){
+    const own=clean(localStorage.getItem(_nameKey()));
+    if(own) return own;
+    const ss=clean(localStorage.getItem('ss_name_'+ST.address));
+    if(ss) return ss;
+  }
+  if(ST.email){
+    const byMail=clean(localStorage.getItem('ss_name_e_'+ST.email));
+    if(byMail) return byMail;
+  }
+  const bridged=clean(_bridgeName);
+  if(bridged) return bridged;
   return 'YOU';
 }
 async function saveDisplayName(){
@@ -5582,25 +5610,31 @@ function draw(){
     }
   }
 
-  // ── Ping + FPS display (bottom-right) ───────────────────────
+  /*
+   * Ping + FPS, TOP-right. They used to sit bottom-right, directly on top of the action buttons — a
+   * diagnostic readout covering controls the player actually presses, which is exactly backwards.
+   * Top-right is clear: the scoreboard is centred and nothing else lives up there. Smaller and dimmer
+   * too, because this is a thing you glance at when something feels wrong, not part of the game.
+   */
   {
     ctx.save();
-    ctx.font='bold 14px monospace'; ctx.textAlign='right'; ctx.textBaseline='bottom';
+    ctx.font='bold 12px monospace'; ctx.textAlign='right'; ctx.textBaseline='top';
+    ctx.globalAlpha=0.82;
     const px2=canvas.width-10;
-    let py2=canvas.height-10;
+    let py2=10;
     if(_sio&&_sio.connected&&_ping>0){
       const pCol=_ping<60?'#39FF14':_ping<120?'#FFD700':'#FF4444';
       const pTxt=_ping+' ms';
       const pw=ctx.measureText(pTxt).width;
-      ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(px2-pw-6,py2-18,pw+12,21);
+      ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(px2-pw-6,py2-3,pw+12,19);
       ctx.fillStyle=pCol; ctx.fillText(pTxt,px2,py2);
-      py2-=24;
+      py2+=22;
     }
     if(_fpsVal>0){
       const fCol=_fpsVal>=55?'#39FF14':_fpsVal>=30?'#FFD700':'#FF4444';
       const fTxt=_fpsVal+' fps';
       const fw=ctx.measureText(fTxt).width;
-      ctx.fillStyle='rgba(0,0,0,0.65)'; ctx.fillRect(px2-fw-6,py2-18,fw+12,21);
+      ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(px2-fw-6,py2-3,fw+12,19);
       ctx.fillStyle=fCol; ctx.fillText(fTxt,px2,py2);
     }
     ctx.restore();
