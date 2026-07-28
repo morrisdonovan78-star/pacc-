@@ -1878,10 +1878,10 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // SINGLE SOURCE OF TRUTH for test-lobby defaults — RESET restores exactly this, so it always
 // reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
 // bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
-const _TEST_DEFAULTS={grazePx:3.35,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:60,grazeScaleK:1.00,rule:'biggest_wins',dbg:false};
+const _TEST_DEFAULTS={grazePx:3.35,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:60,grazeScaleK:1.30,rule:'biggest_wins',dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
-const _LIVE_TUNING_DEFAULTS={grazePx:3.35,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:1.00,rule:'biggest_wins',dbg:false};
+const _LIVE_TUNING_DEFAULTS={grazePx:3.35,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:1.30,rule:'biggest_wins',dbg:false};
 let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
@@ -6218,7 +6218,7 @@ function snakeTick(){
 // a size that never occurs in play - so the 'scaling is a no-op here' anchor was unreachable and
 // every real size measured as a departure from it. MUST match SS_GRAZE_REF_REACH on the server.
 const _GRAZE_REF_REACH=48.34;
-const _PT={ grazePx:3.35, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.00, rule:'biggest_wins' };
+const _PT={ grazePx:3.35, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.30, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
 // per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
 // per-tick @30Hz, so the "not turning" floor is doubled — winding still arms after one full circDeg loop).
