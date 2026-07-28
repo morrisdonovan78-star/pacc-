@@ -1723,7 +1723,7 @@ async function pkConnect(roomId, gameToken, spectate){
 
   try{
     _sio=io(getSioUrl(),{
-      auth: spectate ? { spectate:true, lobbyId:roomId }
+      auth: spectate ? { spectate:true, lobbyId:roomId, name:getMyName() }
                      : { pid:myPid, lobbyId:roomId, gameToken:gameToken||null,
                          name:myName, color:_mySkin.color, wagerSol:ST.wagerSol||0 },
       // CONNECT WEBSOCKET-FIRST (was polling-first) — same fix as slither-snakes.html. Polling-first
@@ -2009,7 +2009,10 @@ async function pkConnect(roomId, gameToken, spectate){
 
     _sio.on('chat',(data)=>{
       if(!data||((!G||G.over)&&!isSpectating)) return;
-      addChatMessage((data.name||'???').slice(0,8),(data.text||'').slice(0,60),colorFromId((data.id||'').toString()));
+      // data.spec = the server could NOT verify this sender. A watcher holds no game token and just
+      // asserts a name in the handshake, so their line must not be mistaken for a paying player's.
+      addChatMessage((data.name||'???').slice(0,8),(data.text||'').slice(0,60),
+                     data.spec?'#8899AA':colorFromId((data.id||'').toString()), !!data.spec);
     });
 
     _sio.on('gameover',()=>{
@@ -2793,7 +2796,9 @@ function sendChat(){
   const myName=getMyName()||'???';
   const cid=myPid||'unk';
   ablyChannel.publish('chat',{id:cid,name:myName,text},()=>{});
-  addChatMessage(myName, text, colorFromId(cid)); // show locally (echoMessages:false)
+  // NO local echo. The comment this replaces was left over from Ably (echoMessages:false); the socket
+  // server broadcasts with io.to(lobbyId), which INCLUDES the sender — so echoing here printed every
+  // message you sent twice. Same trap already fixed on the snake client.
 }
 
 function onChatKey(e){
@@ -2813,8 +2818,8 @@ function onChatKey(e){
   else if(e.key==='Escape'){ e.preventDefault(); closeChat(); }
 }
 
-function addChatMessage(name,text,col){
-  _chatLog.push({name, text, col:col||'#FFD700'});
+function addChatMessage(name,text,col,isSpec){
+  _chatLog.push({name:(isSpec?'◉ ':'')+name, text, col:col||'#FFD700'});
   if(_chatLog.length>8) _chatLog.shift();
   const msgs=document.getElementById('chat-msgs');
   if(!msgs) return;

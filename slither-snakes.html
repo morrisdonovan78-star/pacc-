@@ -3937,7 +3937,7 @@ async function pkConnect(roomId,gameToken,spectate){
   _joinStage='socket-create';
   try{
     _sio=io(getSioUrl(),{
-      auth:spectate?{spectate:true,lobbyId:roomId}
+      auth:spectate?{spectate:true,lobbyId:roomId,name:getMyName()}
                    :{pid:myPid,lobbyId:roomId,gameToken:gameToken||null,name:myName,color:_myCol,wagerSol:ST.wagerSol||0},
       // CONNECT WEBSOCKET-FIRST (was polling-then-upgrade). Root cause of the long-standing "high
       // ping / WebSocket error on join": polling-first makes EVERY client start on slow HTTP
@@ -4454,7 +4454,10 @@ async function pkConnect(roomId,gameToken,spectate){
       const id=(data.id||'').toString();
       const meta=_playerMeta.get(id);
       const col=(meta&&meta.color)||(id?colorFromId(id):'#39FF14');
-      addChatMessage(data.name||'?', data.text||'', col);
+      // data.spec means the server could NOT verify who this is — a watcher holds no game token and
+      // simply asserts a name. Show it apart from a real player's line, or anyone could type in as
+      // someone who actually has money staked in this room.
+      addChatMessage(data.name||'?', data.text||'', data.spec?'#8899AA':col, !!data.spec);
     });
 
     _sio.on('disconnect',(reason)=>{
@@ -4619,8 +4622,14 @@ const _CHAT_COOLDOWN=600;  // ms between sends; stops a stuck ENTER flooding the
 // better to not offer the box than to let someone type into a void. Spectators still SEE messages,
 // because they ARE joined to the lobby room and io.to(lobby) reaches them.
 function _chatCanUse(){
+  // Watching is the SOCIAL half of this game, and chat used to be switched off for precisely the
+  // people with time to talk: spectators and anyone who had just died. Both sat in a live arena
+  // unable to say a word. The only things actually required are a connection and the game screen
+  // being up — neither a snake nor a pulse among them.
   const sc=document.getElementById('scr-game');
-  return !!(SG && !SG.over && !isSpectating && !_localDead && sc && sc.classList.contains('on'));
+  if(!(sc&&sc.classList.contains('on')))return false;
+  if(isSpectating)return !!_sio;                 // watching: a socket is all it takes
+  return !!(SG && !SG.over && sc);               // playing (alive or dead — the dead can talk too)
 }
 function openChat(){
   if(_chatTyping||!_chatCanUse())return;
@@ -4805,8 +4814,8 @@ function onChatKey(e){
   if(e.key==='Enter'){ e.preventDefault(); sendChat(); }
   else if(e.key==='Escape'){ e.preventDefault(); closeChat(); }
 }
-function addChatMessage(name,text,col){
-  _chatLog.push({name:String(name||'?').slice(0,14), text:String(text||'').slice(0,100), col:col||'#39FF14'});
+function addChatMessage(name,text,col,isSpec){
+  _chatLog.push({name:(isSpec?'◉ ':'')+String(name||'?').slice(0,14), text:String(text||'').slice(0,100), col:col||'#39FF14'});
   while(_chatLog.length>_CHAT_MAX)_chatLog.shift();
   const msgs=document.getElementById('ss-chat-msgs');
   if(!msgs)return;
@@ -9599,7 +9608,9 @@ function _voiceUpdateSpeaking(){
 let _voiceAutoTried=false;
 function _voiceAutoOn(){ try{ return localStorage.getItem('ss_voice_auto')!=='0'; }catch(_){ return true; } }
 async function _voiceAutoStart(){
-  if(_voiceAutoTried||_voiceEnabled||isSpectating||!_voiceAutoOn())return;
+  // isSpectating was in this gate, so watchers could never be heard. The server now relays their
+  // audio like any other peer in the room, so there is nothing left to refuse.
+  if(_voiceAutoTried||_voiceEnabled||!_voiceAutoOn())return;
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)return;
   _voiceAutoTried=true;
   try{
