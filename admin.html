@@ -351,6 +351,47 @@ function openTab(t) {
   if (renders[t]) renders[t]();
 }
 
+// OLD WALLETS TAB — which email owns a pre-platform wallet
+// A player's old game wallet can only be re-entered by logging into the standalone game with the
+// email that created it. This answers "which email is that?" — the one thing that makes an otherwise
+// stranded balance recoverable. Addresses and emails only; no key ever reaches this page.
+function renderWallets() {
+  const c = document.getElementById('content');
+  c.innerHTML = `
+    <div class="section-title">🔑 OLD GAME WALLETS</div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="muted" style="font-size:12px;line-height:1.7;margin-bottom:12px;">
+        Wallets from before the platform are held per-EMAIL. To get back into one, log into the
+        standalone game (<b>pac-arena.vercel.app/slither-snakes.html</b>) with the email shown here and
+        use its own Withdraw. Leave the box empty to list every stored wallet.
+      </div>
+      <div style="display:flex;gap:8px;">
+        <input id="wf-addr" placeholder="Solana address (optional)" style="flex:1;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;">
+        <button class="btn btn-g btn-sm" onclick="doWalletFind()">LOOK UP</button>
+      </div>
+    </div>
+    <div id="wf-out"></div>`;
+}
+async function doWalletFind() {
+  const out = document.getElementById('wf-out');
+  const addr = (document.getElementById('wf-addr').value || '').trim();
+  out.innerHTML = '<div class="card muted">Searching every account… this can take a few seconds.</div>';
+  try {
+    const d = await api({ action: 'wallet-find', address: addr });
+    if (!d.wallets || !d.wallets.length) {
+      out.innerHTML = '<div class="card muted">No stored wallet found' + (addr ? ' for that address.' : '.') + '</div>';
+      return;
+    }
+    out.innerHTML = '<div class="card"><div class="card-title">' + d.count + ' WALLET' + (d.count === 1 ? '' : 'S') + '</div>'
+      + d.wallets.map(function (w) {
+          return '<div style="display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid rgba(255,255,255,.07);">'
+            + '<span style="font-family:monospace;font-size:11px;word-break:break-all;">' + esc(w.address) + '</span>'
+            + '<b style="font-size:12px;white-space:nowrap;color:#39FF14;">' + esc(w.email) + '</b></div>';
+        }).join('')
+      + '</div>';
+  } catch (e) { out.innerHTML = '<div class="card" style="color:#FF4444;">' + esc(e.message || 'Lookup failed') + '</div>'; }
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // LIVE TAB
 // ══════════════════════════════════════════════════════════════════════════════

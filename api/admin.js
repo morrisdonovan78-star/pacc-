@@ -180,6 +180,31 @@ module.exports = async function handler(req, res) {
     return res.json({ servers: await callAllServers('status', 'GET') });
   }
 
+  /*
+   * ── wallet-find: which EMAIL owns an old pre-platform wallet ─────────────────────────────────
+   *
+   * Players carry wallets from before the platform, and the ONLY way back into one is to log into the
+   * standalone game with the email that created it. Forget that email and the SOL is stranded behind
+   * a guessing game across every address the person ever had.
+   *
+   * It lives here, behind the panel's own login, because the alternative was handing the operator an
+   * ADMIN_SECRET they cannot read: Vercel marks it Sensitive, which is write-only by design. Asking
+   * someone to rotate a production secret just to answer a question is the wrong trade.
+   *
+   * The implementation is imported, not copied - it decrypts key material, so there is exactly one
+   * copy to audit. It returns { email, address } only; the secret key derives a public key and is
+   * then dropped, never returned and never logged.
+   */
+  if (action === 'wallet-find') {
+    try {
+      const { walletFind } = require('./wallet.js');
+      const wallets = await walletFind(address);   // blank address = list them all
+      return res.json({ ok: true, count: wallets.length, wallets });
+    } catch (e) {
+      return res.status(500).json({ error: (e && e.message) || 'lookup failed' });
+    }
+  }
+
   // ── Referral codes (invite-only) ────────────────────────────────────────────
   // Owner-minted only: a code exists in KV only because the owner created it here, so nobody but
   // the people the owner hands a code to can ever earn a referral reward. See accrueReferral in
