@@ -2,7 +2,7 @@
 // api/leaderboard.js — GET top-20 players; POST to register/update display name
 const crypto = require('crypto');   // private-lobby handshake token (see the lobby-* actions)
 const { kvGet, kvSet, kvSetPerm, kvDel, kvZadd, kvZrem, kvZrevrange,
-        kvHget, kvHset, kvHgetall, kvLrange } = require('../lib/kv');
+        kvHget, kvHset, kvHgetall, kvLrange, kvScan } = require('../lib/kv');
 
 // Seconds the top-20 board is served from a precomputed blob. Building it live costs ~60 KV
 // commands and it is the most-refreshed endpoint on the site; that combination is what exhausted
@@ -355,6 +355,35 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true, settings: cur });
       }
 
+      /*
+       * action:'link' with an `addresses` list — the fix for wallets that are ALREADY wrong.
+       *
+       * `a2all` builds forward from each login, so an account that has not signed in since it was
+       * added reports a single wallet and the funded-wallet resolution has nothing to choose between.
+       * That is exactly the reported symptom: a friend's card showed A5oc…voJC when they had been
+       * playing on BgUucs1Z… for a while, because c2a was stamped once and never revisited.
+       *
+       * The client knows every embedded wallet on the account and which one holds SOL. Sending the
+       * whole list registers them all at once, and `address` is the one it has CONFIRMED is funded —
+       * so c2a is corrected on the spot rather than waiting for the next game login to maybe get it
+       * right. Called from Nav, i.e. on every page load, so this heals accounts as people browse.
+       */
+      if (action === 'link' && Array.isArray(req.body && req.body.addresses)) {
+        if (!sub) return res.status(401).json({ error: 'jwt required' });
+        const list = req.body.addresses
+          .filter((a) => typeof a === 'string' && a.length >= 32 && a.length <= 64)
+          .slice(0, 8);
+        if (!list.length) return res.status(400).json({ error: 'no addresses' });
+        await Promise.all(list.map((a) => Promise.all([
+          kvSetPerm('a2c:' + a, sub).catch(() => {}),
+          kvZadd('a2all:' + sub, Date.now(), a).catch(() => {}),
+        ])));
+        // Only move the account's current wallet when the caller actually named one; a list on its
+        // own must not be able to repoint c2a at whatever happened to sort first.
+        if (address && list.indexOf(address) >= 0) await kvSetPerm('c2a:' + sub, address).catch(() => {});
+        return res.status(200).json({ ok: true, linked: list.length });
+      }
+
       // ── action:'setpfp' — the profile photo, stored on the ACCOUNT instead of the device ────────
       // The photo lived only in localStorage (`pfp_<addr>`), which meant it existed on exactly one
       // browser and literally nobody else could ever see it — so opening another player's profile
@@ -445,6 +474,43 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ name: nm, address: cur });
     } catch (err) {
       console.error('[leaderboard/resolve]', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  /*
+   * GET ?backfill=<GAME_SECRET> — rebuild a2all for accounts that predate it.
+   *
+   * a2all only grows as people sign in, so every wallet linked before it existed is invisible to the
+   * funded-wallet resolution, and a card keeps showing whatever c2a was stamped with years ago. The
+   * data to fix that is already there: a2c:<wallet> -> sub for every wallet ever linked. Scanning
+   * those keys and grouping by sub reconstructs the whole mapping in one pass.
+   *
+   * Read-and-rebuild only: it writes a2all entries and NEVER touches c2a, so it cannot move anyone's
+   * receive address. Guarded by GAME_SECRET because a KV scan is expensive, not because the result is
+   * sensitive. Idempotent — running it twice just refreshes scores.
+   */
+  if (req.query && req.query.backfill) {
+    const secret = (process.env.GAME_SECRET || '').trim();
+    if (!secret || String(req.query.backfill) !== secret) return res.status(403).json({ error: 'forbidden' });
+    try {
+      const keys = await kvScan('a2c:*', 20000);
+      const bySub = new Map();
+      const subs = await Promise.all(keys.map((k) => kvGet(k).catch(() => null)));
+      keys.forEach((k, i) => {
+        const addr = k.slice(4), sub = subs[i];
+        if (!addr || !sub) return;
+        if (!bySub.has(sub)) bySub.set(sub, []);
+        bySub.get(sub).push(addr);
+      });
+      let writes = 0, multi = 0;
+      for (const [sub, addrs] of bySub) {
+        if (addrs.length > 1) multi++;
+        for (const a of addrs) { await kvZadd('a2all:' + sub, Date.now(), a).catch(() => {}); writes++; }
+      }
+      return res.status(200).json({ ok: true, wallets: keys.length, accounts: bySub.size, multiWalletAccounts: multi, writes });
+    } catch (err) {
+      console.error('[leaderboard/backfill]', err);
       return res.status(500).json({ error: 'Internal server error' });
     }
   }
