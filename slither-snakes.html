@@ -1278,6 +1278,11 @@ body.mctl #voice-speakers{left:150px;}
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>near head only</span><span>full body</span></div>
     </div>
     <div style="margin-bottom:11px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#00E5FF;" title="SIZE FAIRNESS: how much the graze margin grows with snake size. 0 = flat pixels, so grazing gets much harder as you grow (21% forgiveness at base vs 8% at size 20). 1 = identical feel at every size. 0.75 keeps a small edge for smaller snakes while closing that gap.">ⓕ Graze size fairness</span><span id="tun-grazescalek-val" style="color:#00E5FF;min-width:44px;text-align:right;">0.75</span></div>
+      <input type="range" id="tun-grazeScaleK" min="0" max="1.5" step="0.05" value="0.75" oninput="_onTuning()" style="width:100%;accent-color:#00E5FF;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>flat px (old)</span><span>same at all sizes</span></div>
+    </div>
+    <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;">◆ Circle completion (°)</span><span id="tun-circ-val" style="color:#FFD700;min-width:44px;text-align:right;">360°</span></div>
       <input type="range" id="tun-circDeg" min="180" max="360" step="1" value="360" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>partial loop</span><span>full loop</span></div>
@@ -1873,10 +1878,10 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // SINGLE SOURCE OF TRUTH for test-lobby defaults — RESET restores exactly this, so it always
 // reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
 // bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
-const _TEST_DEFAULTS={grazePx:1.0,grazeHead:1.0,bodyScale:1.0,grazeReach:1.0,circDeg:360,faceDeg:60,rule:'biggest_wins',dbg:false};
+const _TEST_DEFAULTS={grazePx:1.0,grazeHead:1.0,bodyScale:1.0,grazeReach:1.0,circDeg:360,faceDeg:60,grazeScaleK:0.75,rule:'biggest_wins',dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
-const _LIVE_TUNING_DEFAULTS={grazePx:3.3,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,rule:'biggest_wins',dbg:false};
+const _LIVE_TUNING_DEFAULTS={grazePx:3.3,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:0.75,rule:'biggest_wins',dbg:false};
 let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
@@ -6207,7 +6212,10 @@ function snakeTick(){
 // ── PRACTICE COLLISION = the SAME nose/circle-graze model as the server (ssCheckCollisionsNose), with the
 // SAME locked tuning, so practice feels EXACTLY like the live lobbies. Collision still runs HERE on the
 // client (unchanged) — only the mechanic matches. Uses _getSegsFromPath (the DRAWN body) as the trail.
-const _PT={ grazePx:3.3, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, rule:'biggest_wins' };
+// Two base-radius snakes (sectionRadius(0)=8 each) — the anchor where graze scaling is a no-op, so the
+// smallest-size feel is unchanged and only the fall-off away from it is corrected. Matches the server.
+const _GRAZE_REF_REACH=16;
+const _PT={ grazePx:3.3, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:0.75, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
 // per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
 // per-tick @30Hz, so the "not turning" floor is doubled — winding still arms after one full circDeg loop).
@@ -6233,15 +6241,19 @@ function _practiceCheckCollisions(){
   for(const s of alive)_practiceCircleState(s);
   const died=new Set();
   const R=s=>sectionRadius(s);
-  const M=_PT.grazePx, gHead=_PT.grazeHead, gBody=_PT.bodyScale, gReach=_PT.grazeReach, noseCos=Math.cos(_PNOSE_ARC);
+  const M=_PT.grazePx, gHead=_PT.grazeHead, gBody=_PT.bodyScale, gReach=_PT.grazeReach, gScaleK=(_PT.grazeScaleK!=null?_PT.grazeScaleK:0.75), noseCos=Math.cos(_PNOSE_ARC);
   const segsCache=new Map(); for(const s of alive)segsCache.set(s.id,_getSegsFromPath(s));
   // 1) BODY/TRAIL (swept head vs DRAWN body). NORMAL snake dies on touch; CIRCLING snake gets the skim margin.
   for(const A of alive){ if(died.has(A.id))continue;
     const aCirc=!!A.circleActive, RaBase=R(A), head=A.path[0], ph=A._pch||head;
     const n=Math.max(1,Math.ceil(Math.hypot(head.x-ph.x,head.y-ph.y)/Math.max(3,RaBase*0.5)));
     for(const D of alive){ if(A===D||died.has(A.id))continue;
-      const skimOn=aCirc||!!D.circleActive, margin=skimOn?M:0;
+      const skimOn=aCirc||!!D.circleActive;
       const RaEff=RaBase*(skimOn?gHead:1), Rd=R(D), RdEff=Rd*(skimOn?gBody:1), reach=RaEff+RdEff;
+      // Graze forgiveness scales with the snakes — see the server's collision site for the arithmetic.
+      // This MUST match the server exactly: a client that predicts a different hitbox is how you get
+      // "I died into empty space".
+      const margin=skimOn?M*Math.pow(Math.max(1,RaBase+Rd)/_GRAZE_REF_REACH,gScaleK):0;
       const killDist=reach-margin, killDist2=killDist>0?killDist*killDist:0;
       const segs=segsCache.get(D.id)||[]; if(segs.length<2)continue; const spacing=Rd*SEGMENT_SPACING;
       const neck=Math.max(2,Math.ceil((RaBase+Rd)/spacing));
@@ -7234,12 +7246,12 @@ function _pushTuning(){
     _tuneSendT=null;
     const seq=++_tuneSeq;
     const t={grazePx:_tuningTest.grazePx,grazeHead:_tuningTest.grazeHead,bodyScale:_tuningTest.bodyScale,
-             grazeReach:_tuningTest.grazeReach,circDeg:_tuningTest.circDeg,faceDeg:_tuningTest.faceDeg,
+             grazeReach:_tuningTest.grazeReach,grazeScaleK:_tuningTest.grazeScaleK,circDeg:_tuningTest.circDeg,faceDeg:_tuningTest.faceDeg,
              n2nScale:(_tuningTest.n2nScale!=null?_tuningTest.n2nScale:0.30),rule:_tuningTest.rule};
     try{
       // Canonical form MUST match the server's ssTuneCanon byte for byte — fixed key order, and the
       // sha256 is over that text, so any tampering in flight invalidates the signature.
-      const canon=JSON.stringify(['grazePx','grazeHead','bodyScale','grazeReach','circDeg','faceDeg','n2nScale','rule']
+      const canon=JSON.stringify(['grazePx','grazeHead','bodyScale','grazeReach','circDeg','faceDeg','n2nScale','grazeScaleK','rule']
         .map(k=>(t[k]===undefined||t[k]===null?null:t[k])));
       const hashBuf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canon));
       const hash=[...new Uint8Array(hashBuf)].map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -7259,6 +7271,7 @@ function _onTuning(){
     _tuningTest.grazeHead =+g('tun-grazeHead').value;
     _tuningTest.bodyScale =+g('tun-bodyScale').value;
     _tuningTest.grazeReach=+g('tun-grazeReach').value;
+    _tuningTest.grazeScaleK=+g('tun-grazeScaleK').value;
     _tuningTest.circDeg   =+g('tun-circDeg').value;
     _tuningTest.faceDeg   =+g('tun-faceDegT').value;
     _tuningTest.rule      = g('tun-rule').value;
@@ -7268,6 +7281,7 @@ function _onTuning(){
     g('tun-grazehead-val').textContent=_tuningTest.grazeHead.toFixed(2)+'×';
     g('tun-body-val').textContent     =_tuningTest.bodyScale.toFixed(2)+'×';
     g('tun-grazereach-val').textContent=_tuningTest.grazeReach.toFixed(2)+'×';
+    g('tun-grazescalek-val').textContent=_tuningTest.grazeScaleK.toFixed(2);
     g('tun-circ-val').textContent     =_tuningTest.circDeg+'°';
     g('tun-faceT-val').textContent    =_tuningTest.faceDeg+'°';
     if(_isTestLobby()){try{localStorage.setItem('ss_tuning_test8',JSON.stringify(_tuningTest));}catch(_){}} // don't contaminate saved test-lobby values from live tuning
@@ -7297,6 +7311,7 @@ function _syncTuningUI(){
     gv('tun-grazeHead',_tuningTest.grazeHead??1); if(e('tun-grazehead-val'))e('tun-grazehead-val').textContent=(_tuningTest.grazeHead??1).toFixed(2)+'×';
     gv('tun-bodyScale',_tuningTest.bodyScale); if(e('tun-body-val'))e('tun-body-val').textContent=(_tuningTest.bodyScale??1).toFixed(2)+'×';
     gv('tun-grazeReach',_tuningTest.grazeReach??1); if(e('tun-grazereach-val'))e('tun-grazereach-val').textContent=(_tuningTest.grazeReach??1).toFixed(2)+'×';
+    gv('tun-grazeScaleK',_tuningTest.grazeScaleK??0.75); if(e('tun-grazescalek-val'))e('tun-grazescalek-val').textContent=(_tuningTest.grazeScaleK??0.75).toFixed(2);
     gv('tun-circDeg',_tuningTest.circDeg);   if(e('tun-circ-val'))e('tun-circ-val').textContent=(_tuningTest.circDeg||360)+'°';
     gv('tun-faceDegT',_tuningTest.faceDeg);  if(e('tun-faceT-val'))e('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
     if(e('tun-dbgChk'))e('tun-dbgChk').checked=!!_tuningTest.dbg;
