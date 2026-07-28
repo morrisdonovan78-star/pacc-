@@ -100,17 +100,32 @@ async function accrueReferral(playerWallet, refCodeRaw, wagerLamports) {
 
   if (!bind) {
     const code = normalizeCode(refCodeRaw);
-    if (!code) return;                                   // no code, never referred → nothing to do
+    // LOG THE MISSES. Each of these used to be a silent `return`, so a referral that never bound looked
+    // exactly like one nobody ever tried — there was no way to answer "my friend used my link and it
+    // still says 0". The player wallet is truncated; the code is not secret (it is in the share link).
+    if (!code) {
+      console.log('[ref] no code on join', { wallet: String(playerWallet).slice(0, 8) });
+      return;                                            // never referred, or the link was never clicked
+    }
     const referrer = await kvGet('refcode:' + code);     // owner-minted code → referrer wallet
-    if (!referrer) return;                               // unknown/void code
-    if (referrer === playerWallet) return;               // cannot refer yourself
+    if (!referrer) {
+      console.warn('[ref] UNKNOWN CODE — no bind', { code, wallet: String(playerWallet).slice(0, 8) });
+      return;
+    }
+    if (referrer === playerWallet) {
+      console.warn('[ref] self-referral refused', { code });
+      return;
+    }
     bind = { code, ref: referrer, ts: Date.now() };
     // NX so two concurrent first-joins can't double-bind; if we lost the race, reload the winner.
     // TTL outlives the reward window by a margin, then self-cleans (an expired bind can never
     // over-pay anyway — the window is re-checked against bind.ts below on every accrual).
     const set = await kvSetNX('refby:' + playerWallet, JSON.stringify(bind), REF_BIND_TTL_SEC);
     if (!set) { try { bind = JSON.parse(await kvGet('refby:' + playerWallet)); } catch (_) { return; } }
-    else { await kvHincrby('refstats:' + bind.ref, 'players', 1).catch(() => {}); }
+    else {
+      await kvHincrby('refstats:' + bind.ref, 'players', 1).catch(() => {});
+      console.log('[ref] BOUND', { code, referrer: String(referrer).slice(0, 8), player: String(playerWallet).slice(0, 8) });
+    }
   }
 
   if (!bind || !bind.ref) return;
@@ -129,6 +144,10 @@ async function accrueReferral(playerWallet, refCodeRaw, wagerLamports) {
       const tot = await kvIncrby('refwag:' + playerWallet, Number(wagerLamports) || 0);
       if (tot >= RECRUIT_QUALIFY_LAMPORTS && await kvSetNX('refq:' + playerWallet, String(Date.now()))) {
         await kvHincrby('recruit:' + recruitWeekId(), bind.ref, 1).catch(() => {});
+        console.log('[ref] QUALIFIED RECRUIT', { referrer: String(bind.ref).slice(0, 8), player: String(playerWallet).slice(0, 8), wageredLamports: tot });
+      } else {
+        // The commonest honest answer to "why is it still 0": they are attributed, just short of the bar.
+        console.log('[ref] recruit progress', { referrer: String(bind.ref).slice(0, 8), wageredLamports: tot, needLamports: RECRUIT_QUALIFY_LAMPORTS });
       }
     }
   } catch (_) {}
