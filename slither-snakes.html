@@ -1259,12 +1259,12 @@ body.mctl #voice-speakers{left:150px;}
     <div style="color:#FFD700;font-size:9px;margin:2px 0 6px;letter-spacing:1px;border-top:1px solid #2a1a3a;padding-top:8px;">◆ CIRCLE GRAZE — independent knobs (graze kill ONLY; nothing here touches normal body / H2H / movement)</div>
     <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="MAX BODY OVERLAP: exactly how many visual px a graze may sink INTO the body before it kills. 0 = die on contact. 6 = you can be ~6px inside before dying. This ONLY changes the overlap depth.">① Max body overlap (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.0 px</span></div>
-      <input type="range" id="tun-grazePx" min="0" max="20" step="0.05" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
+      <input type="range" id="tun-grazePx" min="0" max="20" step="0.01" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0 = contact</span><span>20 = exaggerated</span></div>
     </div>
     <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#39FF14;" title="GRAZE HEAD HITBOX: scales the grazing head's radius for the graze check ONLY. Smaller = harder / must be more precise; larger = easier.">② Graze head hitbox (×)</span><span id="tun-grazehead-val" style="color:#39FF14;min-width:44px;text-align:right;">1.00×</span></div>
-      <input type="range" id="tun-grazeHead" min="0.2" max="2.0" step="0.05" value="1" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
+      <input type="range" id="tun-grazeHead" min="0.2" max="2.0" step="0.01" value="1" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0.2 = strict</span><span>2.0 = easy</span></div>
     </div>
     <div style="margin-bottom:11px;">
@@ -1881,7 +1881,7 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 const _TEST_DEFAULTS={grazePx:1.0,grazeHead:1.0,bodyScale:1.0,grazeReach:1.0,circDeg:360,faceDeg:60,grazeScaleK:0.75,rule:'biggest_wins',dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
-const _LIVE_TUNING_DEFAULTS={grazePx:3.3,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:0.75,rule:'biggest_wins',dbg:false};
+const _LIVE_TUNING_DEFAULTS={grazePx:2.9,grazeHead:1.15,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:0.75,rule:'biggest_wins',dbg:false};
 let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
@@ -6215,7 +6215,7 @@ function snakeTick(){
 // Two base-radius snakes (sectionRadius(0)=8 each) — the anchor where graze scaling is a no-op, so the
 // smallest-size feel is unchanged and only the fall-off away from it is corrected. Matches the server.
 const _GRAZE_REF_REACH=16;
-const _PT={ grazePx:3.3, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:0.75, rule:'biggest_wins' };
+const _PT={ grazePx:2.9, grazeHead:1.15, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:0.75, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
 // per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
 // per-tick @30Hz, so the "not turning" floor is doubled — winding still arms after one full circDeg loop).
