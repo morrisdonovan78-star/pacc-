@@ -89,6 +89,19 @@ async function readGlobal(game) {
   };
 }
 
+// ── RECIPIENT ID ─────────────────────────────────────────────────────────────────────────────────
+// The 6-character code shown on a player's profile ("ID QH9TN4"), so a friend can be paid without
+// anyone pasting a 44-character base58 address. MUST stay byte-identical to inviteCode() in
+// pulp-platform/app/profile/page.jsx — the two are the same code seen from opposite ends, and a
+// mismatch here would resolve someone's ID to the wrong account.
+function recipientCode(addr) {
+  if (!addr) return '------';
+  let h = 0; for (let i = 0; i < addr.length; i++) h = (h * 31 + addr.charCodeAt(i)) >>> 0;
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = '';
+  for (let i = 0; i < 6; i++) { s += A[h % A.length]; h = Math.floor(h / A.length) + (i + 1) * 97; }
+  return s;
+}
+
 module.exports = async function handler(req, res) {
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v));
 
@@ -314,6 +327,37 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true, settings: cur });
       }
 
+      // ── action:'setpfp' — the profile photo, stored on the ACCOUNT instead of the device ────────
+      // The photo lived only in localStorage (`pfp_<addr>`), which meant it existed on exactly one
+      // browser and literally nobody else could ever see it — so opening another player's profile
+      // always showed the fallback initial. A profile picture is public by nature; it belongs on the
+      // server. Keyed by wallet, read back by the ?address= profile branch.
+      //
+      // Bounded hard. It is a user-supplied blob going into a shared KV, so: data:image only, one of
+      // three formats, and a ceiling that a 160x160 JPEG sits comfortably under. The client
+      // downscales before sending; this is the backstop, not the plan.
+      if (action === 'setpfp') {
+        if (!sub) return res.status(401).json({ error: 'jwt required' });
+        if (!address) return res.status(400).json({ error: 'address required' });
+        // Only for a wallet that belongs to THIS account, or anyone with a token could overwrite
+        // another player's picture.
+        const owner = await kvGet('a2c:' + address).catch(() => null);
+        if (owner && owner !== sub) return res.status(403).json({ error: 'not your wallet' });
+        await recordLink(sub, address).catch(() => {});
+        const pfp = req.body && req.body.pfp;
+        if (pfp === null || pfp === '') {
+          await kvDel('pfp:' + address).catch(() => {});
+          return res.status(200).json({ ok: true, pfp: null });
+        }
+        const s = String(pfp || '');
+        if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(s)) {
+          return res.status(400).json({ error: 'bad image' });
+        }
+        if (s.length > 60000) return res.status(413).json({ error: 'image too large' });
+        await kvSetPerm('pfp:' + address, s);
+        return res.status(200).json({ ok: true });
+      }
+
       if (action !== 'setname' || !address || !name) {
         return res.status(400).json({ error: 'Bad request' });
       }
@@ -377,6 +421,44 @@ module.exports = async function handler(req, res) {
     }
   }
 
+  // ── GET ?recipient=<name or 6-char ID> — WHO AM I ABOUT TO PAY? ────────────────────────────────
+  // The one lookup the Send flow is allowed to trust. It returns EVERY account that matches, and the
+  // caller must refuse to send unless exactly one comes back.
+  //
+  // That is not defensive padding, it is the whole point: the ID is a 6-character hash of a wallet,
+  // so two accounts colliding is unlikely but not impossible, and a display name typed by hand can be
+  // mistyped into someone else's. Money that goes to the wrong wallet is gone — there is no reversal
+  // on Solana — so an ambiguous lookup has to stop the transfer and make a human choose, never guess.
+  // Names are already unique at registration (nameReg), so in practice a name match is one account;
+  // this branch exists so that when it ISN'T, nothing silently picks.
+  if (req.query && req.query.recipient) {
+    try {
+      const q = String(req.query.recipient).trim().toUpperCase().slice(0, 20);
+      if (!q) return res.status(200).json({ matches: [] });
+      const raw = await kvZrevrange('nameIndex', 0, -1) || [];
+      const names = [];
+      for (let i = 0; i < raw.length; i += 2) names.push(raw[i]);
+      const uniq = [...new Set(names)];
+      const addrs = await Promise.all(uniq.map((n) => kvGet('nameReg:' + n)));
+      const curs = await Promise.all(addrs.map((a) => (a ? currentAddr(a) : null)));
+      const matches = [];
+      uniq.forEach((name, i) => {
+        const payTo = curs[i] || addrs[i];
+        if (!payTo) return;
+        const code = recipientCode(payTo);
+        if (name === q || code === q) matches.push({ name, payTo, code });
+      });
+      // Two registered names can resolve to the SAME wallet (an old name still pointing at the same
+      // account). That is one recipient, not two, so it must not read as ambiguous.
+      const byWallet = new Map();
+      for (const m of matches) if (!byWallet.has(m.payTo)) byWallet.set(m.payTo, m);
+      return res.status(200).json({ matches: [...byWallet.values()] });
+    } catch (err) {
+      console.error('[leaderboard/recipient]', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
   // ── GET ?search= — find any player by (partial) name, not just the top 20 ──────
   // Backed by nameIndex, a flat set of every registered name — there's no native
   // "search" in a KV store, so this is a substring scan over that list. Fine at
@@ -416,9 +498,14 @@ module.exports = async function handler(req, res) {
   if (req.query && req.query.address) {
     try {
       const addr = String(req.query.address).trim();
-      const [stats, histRaw] = await Promise.all([
+      const [stats, histRaw, pfp, cur] = await Promise.all([
         readStats(game, addr),
         kvLrange('ph:' + game + ':hist:' + addr, 0, 199).catch(() => null),
+        // The photo rides along with the profile it belongs to. Anyone opening another player's
+        // profile gets it in the SAME request they were already making — no extra round trip and no
+        // per-row KV reads on a leaderboard, which is what would actually burn the command budget.
+        kvGet('pfp:' + addr).catch(() => null),
+        currentAddr(addr).catch(() => addr),
       ]);
       const hasData = stats.earned > 0 || stats.wagered > 0 || stats.games > 0 || stats.kills > 0 || stats.name;
       if (!hasData) return res.status(200).json({ player: null });
@@ -427,7 +514,11 @@ module.exports = async function handler(req, res) {
         .map(s => { try { return JSON.parse(s); } catch (_) { return null; } })
         .filter(Boolean)
         .reverse();
-      return res.status(200).json({ player: { address: addr, ...stats, history } });
+      // `payTo` is the CURRENT wallet for this account and is the only address a caller should ever
+      // send money to — `address` may be a historical key someone had saved.
+      return res.status(200).json({
+        player: { address: addr, payTo: cur || addr, code: recipientCode(cur || addr), pfp: pfp || null, ...stats, history },
+      });
     } catch (err) {
       console.error('[leaderboard/player]', err);
       return res.status(500).json({ error: 'Internal server error' });
