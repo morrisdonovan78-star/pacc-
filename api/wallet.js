@@ -190,10 +190,11 @@ module.exports = async function handler(req, res) {
 async function walletFind(wantAddress) {
   const want = String(wantAddress || '').trim();
   const out = [];
-  // Counters, because "not found" on its own is unanswerable: it cannot tell you whether nothing was
-  // scanned, nothing has a stored wallet, or the address simply is not one of them. Each of those
-  // needs a different next step, so the caller gets the numbers rather than a shrug.
-  const stats = { scanned: 0, withStore: 0, decoded: 0, failed: 0 };
+  // Two DIFFERENT things are called "a wallet" here and only one was being searched before:
+  //   embedded : a Privy wallet, in linkedAccounts. This is what nearly everyone actually has.
+  //   oldgame  : a standalone-game keypair encrypted into customMetadata.paWallet.
+  // Searching only the second is why "which email owns this address" kept coming back empty.
+  const stats = { scanned: 0, embedded: 0, oldgame: 0, failed: 0 };
   let cursor = null, pages = 0;
   do {
     const q = cursor ? ('/users?limit=100&cursor=' + encodeURIComponent(cursor)) : '/users?limit=100';
@@ -201,23 +202,34 @@ async function walletFind(wantAddress) {
     const users = (page && (page.data || page.users)) || [];
     for (const u of users) {
       stats.scanned++;
-      const meta = u.customMetadata || u.custom_metadata || {};
-      if (!meta.paWallet) continue;
-      stats.withStore++;
       const accts = u.linkedAccounts || u.linked_accounts || [];
-      // The key is derived from the email, so an account with a stored wallet but no email account is
-      // undecryptable by design - count it rather than skipping in silence.
       const email = (accts.find((a) => a.type === 'email') || {}).address
-                 || (accts.find((a) => a.type === 'google_oauth') || {}).email;
-      if (!email) { stats.failed++; continue; }
-      let address = null;
-      try {
-        const skB64 = decryptWallet(meta.paWallet, email);
-        const kp = nacl.sign.keyPair.fromSecretKey(new Uint8Array(Buffer.from(skB64, 'base64')));
-        address = b58Encode(Buffer.from(kp.publicKey));
-        stats.decoded++;
-      } catch (_) { stats.failed++; continue; }
-      if (!want || address === want) out.push({ email, address });
+                 || (accts.find((a) => a.type === 'google_oauth') || {}).email
+                 || (accts.find((a) => a.type === 'google_oauth') || {}).name
+                 || null;
+
+      // Every embedded wallet on the account, whatever chain.
+      for (const a of accts) {
+        if (a.type !== 'wallet' || !a.address) continue;
+        stats.embedded++;
+        if (!want || a.address === want) {
+          out.push({ email: email || '(no email on account)', address: a.address,
+                     kind: 'embedded', chain: a.chainType || a.chain_type || '?',
+                     privyId: u.id || u.userId || null });
+        }
+      }
+
+      // Old standalone-game keypair, if this account has one.
+      const meta = u.customMetadata || u.custom_metadata || {};
+      if (meta.paWallet && email) {
+        try {
+          const skB64 = decryptWallet(meta.paWallet, email);
+          const kp = nacl.sign.keyPair.fromSecretKey(new Uint8Array(Buffer.from(skB64, 'base64')));
+          const address = b58Encode(Buffer.from(kp.publicKey));
+          stats.oldgame++;
+          if (!want || address === want) out.push({ email, address, kind: 'oldgame', chain: 'solana' });
+        } catch (_) { stats.failed++; }
+      }
     }
     cursor = (page && (page.nextCursor || page.next_cursor)) || null;
   } while (cursor && ++pages < 20);

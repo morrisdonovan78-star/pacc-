@@ -410,18 +410,20 @@ async function doWalletFind() {
     // different next step.
     const st = d.stats || {};
     const detail = '<div class="muted" style="font-size:11px;margin-top:8px;">scanned ' + (st.scanned || 0)
-      + ' accounts &middot; ' + (st.withStore || 0) + ' have a stored wallet &middot; '
-      + (st.decoded || 0) + ' decoded' + (st.failed ? ' &middot; ' + st.failed + ' unreadable' : '') + '</div>';
+      + ' accounts &middot; ' + (st.embedded || 0) + ' embedded wallets &middot; '
+      + (st.oldgame || 0) + ' old-game wallets' + (st.failed ? ' &middot; ' + st.failed + ' unreadable' : '') + '</div>';
     if (!d.wallets || !d.wallets.length) {
       out.innerHTML = '<div class="card muted">No stored wallet found' + (addr ? ' for that address.' : '.')
-        + (st.withStore === 0 ? '<br><br>No account has an old-game wallet stored at all — this address is most likely a Privy embedded wallet, which lives on the account you log in with rather than here.' : '')
+        + ((st.embedded || 0) === 0 ? '<br><br>No wallets were returned at all — the Privy lookup itself is failing, not the address.' : '')
         + detail + '</div>';
       return;
     }
     out.innerHTML = '<div class="card"><div class="card-title">' + d.count + ' WALLET' + (d.count === 1 ? '' : 'S') + '</div>'
       + d.wallets.map(function (w) {
+          var tag = w.kind === 'oldgame' ? 'OLD GAME' : ((w.chain || '') + ' embedded');
           return '<div style="display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid rgba(255,255,255,.07);">'
-            + '<span style="font-family:monospace;font-size:11px;word-break:break-all;">' + esc(w.address) + '</span>'
+            + '<span style="font-family:monospace;font-size:11px;word-break:break-all;">' + esc(w.address)
+            + ' <span style="color:#888;font-size:9px;">' + esc(tag) + '</span></span>'
             + '<b style="font-size:12px;white-space:nowrap;color:#39FF14;">' + esc(w.email) + '</b></div>';
         }).join('')
       + detail + '</div>';
