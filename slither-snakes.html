@@ -1878,7 +1878,7 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // SINGLE SOURCE OF TRUTH for test-lobby defaults — RESET restores exactly this, so it always
 // reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
 // bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
-const _TEST_DEFAULTS={grazePx:1.0,grazeHead:1.0,bodyScale:1.0,grazeReach:1.0,circDeg:360,faceDeg:60,grazeScaleK:0.00,rule:'biggest_wins',dbg:false};
+const _TEST_DEFAULTS={grazePx:3.04,grazeHead:1.00,bodyScale:1.00,grazeReach:1.00,circDeg:360,faceDeg:60,grazeScaleK:-1.08,rule:'biggest_wins',dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
 const _LIVE_TUNING_DEFAULTS={grazePx:3.04,grazeHead:1.00,bodyScale:1.00,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:-1.08,rule:'biggest_wins',dbg:false};
