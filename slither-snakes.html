@@ -2692,11 +2692,40 @@ async function recordWager(walletAddress,wagerLamports,txSig,lobbyId,playerName)
   // player's FIRST paid join server-side; harmless to send every time (ignored once bound).
   const refCode=(()=>{ try{ return localStorage.getItem('ss_ref')||''; }catch(_){ return ''; } })();
   // Route through Vercel — has on-chain tx verification, replay guard, ban check, game token
-  const r=await fetch('/api/join',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':sig,'x-settle-ts':String(ts)},
-    body:JSON.stringify({walletAddress,wagerLamports,txSig,lobbyId,playerName:playerName||'',refCode})});
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok)throw new Error(d.error||'join failed');
-  return d;
+  /*
+   * RETRY. The money has ALREADY left the wallet by the time we get here — the deposit was signed and
+   * broadcast above — so a single failed fetch here is not "join failed", it is "charged and not let
+   * in", which is the worst outcome this game can produce.
+   *
+   * The overwhelmingly common cause is timing, not rejection: verifyWagerTx polls the RPC for the
+   * deposit and gives up after ~10s, and a public node a few slots behind simply has not indexed it
+   * yet. Asking again a moment later succeeds.
+   *
+   * Retrying is safe because the server is idempotent on txSig: `tx:{txSig}` is recorded and a repeat
+   * submission is recognised as the same join and returns the same entry rather than creating a second
+   * one or charging again. This is the identical reasoning the cash-out path below already relies on.
+   *
+   * Errors that will NEVER come good on a retry — a ban, a bad signature, a deposit that was genuinely
+   * too small — are surfaced immediately instead of being hidden behind 20 seconds of pointless waiting.
+   */
+  const FINAL = /ban|signature|too small|not found in transaction|failed on-chain|already used|replay/i;
+  let lastErr = 'join failed';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt) await new Promise(r2 => setTimeout(r2, 1200 * attempt));
+    let r, d;
+    try {
+      r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-settle-sig': sig, 'x-settle-ts': String(ts) },
+        body: JSON.stringify({ walletAddress, wagerLamports, txSig, lobbyId, playerName: playerName || '', refCode }) });
+      d = await r.json().catch(() => ({}));
+    } catch (e) { lastErr = 'network'; continue; }   // fetch itself failed — the tx still stands, try again
+    if (r.ok) return d;
+    lastErr = d.error || ('HTTP ' + r.status);
+    if (FINAL.test(lastErr)) break;
+    try { if (attempt === 1) addToast('Confirming your deposit…', '#FFD700', 2500); } catch (_) {}
+  }
+  // Out of retries. Say plainly that the money is accounted for rather than leaving them guessing —
+  // the deposit is on chain and the same txSig will still be honoured.
+  throw new Error(lastErr + ' — your deposit is on-chain and still valid. Press JOIN again and it will be used, not charged twice.');
 }
 
 async function settle(){
