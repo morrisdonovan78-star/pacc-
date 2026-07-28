@@ -2676,10 +2676,10 @@ async function _redeemDeposit(lamps,sig,roomId,playerName,alreadyConfirmed){
       return res;
     }catch(e){
       lastErr=e;
-      // A deposit that was already registered means we're done — the wager is on record.
-      // A deposit already on record means the wager IS registered — surface it plainly rather
-      // than silently retrying a signature the server will keep rejecting.
-      if(/already registered/i.test(e.message||'')) throw e;
+      // Verdicts, not hiccups. The server has looked at this deposit and given a final answer —
+      // it is spent, or it is stale (an attempt that already ended). Retrying only makes the player
+      // wait longer for the same reply.
+      if(/already registered|already been used|different wallet/i.test(e.message||'')) throw e;
     }
   }
   throw new Error((lastErr&&lastErr.message)||'Could not verify deposit');
@@ -2745,9 +2745,13 @@ async function recordWager(walletAddress,wagerLamports,txSig,lobbyId,playerName)
   } finally { if (killer) clearTimeout(killer); }
   if (r.ok) return d;
   const err = d.error || ('HTTP ' + r.status);
-  // A deposit that is on-chain is NOT lost, whatever happens next — say so, because "join failed"
-  // after money has left the wallet is the message that makes people think they were robbed.
-  throw new Error(err + ' — your deposit is on-chain and still valid; joining again will use it, not charge you twice.');
+  /*
+   * Do NOT tell people a failed deposit gets used by the next join. It no longer does, and it should
+   * not: a failed join is REFUNDED, and an entry left behind by one is not a ticket — re-presenting it
+   * used to let someone in on money that had already been handed back, which is the operator paying
+   * twice for one payment. The deposit is safe and it comes back; joining again is a NEW game.
+   */
+  throw new Error(err + ' — your deposit is on-chain and safe. A failed join is refunded; joining again starts a new game, it does not reuse it.');
 }
 
 async function settle(){
@@ -3625,6 +3629,19 @@ async function joinLobby(usd){
   // bug. When the balance is unknown, let the on-chain deposit be the authority: it fails cleanly with
   // a clear "short on SOL" message if they truly can't cover it.
   if(ST.balance>0 && ST.balance<_need){
+    /*
+     * NEVER boot anyone on ONE balance read. The commonest way to reach this line is PLAY AGAIN
+     * straight after a cash-out: the payout is on its way but not yet visible, so the balance we just
+     * read is the pre-payout one and a player who genuinely has the money gets told they are broke and
+     * thrown back to the platform. Read once more before believing it — the second read is only paid
+     * for in the case that was about to fail anyway.
+     */
+    lg('mm-log','Checking balance…','lwarn');
+    await new Promise(r=>setTimeout(r,1800));
+    await refreshBal().catch(()=>{});
+    if(_myGen!==_joinGen)return;
+  }
+  if(ST.balance>0 && ST.balance<_need){
     addToast('❌ Not enough SOL! Need '+_need.toFixed(4)+' (have '+ST.balance.toFixed(4)+')','#FF4444');
     _joiningLobby=false;
     if(_BRIDGE){ _bridgeNotify('EXIT',{reason:'insufficient-funds',need:_need,have:ST.balance,usd:usd}); }  // back to the platform to deposit
@@ -3633,7 +3650,38 @@ async function joinLobby(usd){
   addToast('🐍 Joining $'+usd+' lobby — wagering '+ST.wagerSol.toFixed(4)+' SOL…','#FFD700');
   stopLobbyCountPoll();
   go('scr-mm');
+  // Set the moment the deposit is broadcast. The catch below needs to know whether money actually
+  // left, because "join failed" and "join failed AFTER you paid" are different things to be told.
+  let _paidSig=null;
   try{
+    /*
+     * ── ASK BEFORE CHARGING ─────────────────────────────────────────────────────────────────────
+     * The deposit below is instant and irreversible. The thing that turns it into a seat in the room
+     * is /api/join. Sending the money first and discovering only afterwards that /api/join cannot
+     * answer is precisely "it took my dollar and sent me home" — and it happens for reasons that have
+     * nothing to do with the player: the Vercel project throttled for exceeding its plan's compute
+     * allowance, a failed deploy, a missing GAME_SECRET.
+     *
+     * So ask first. The probe touches no chain and no storage, and any failure — unreachable, non-200,
+     * not ready — aborts here, where the player still has their SOL. NOT CHARGED is said out loud
+     * because a join that dies right after a wallet prompt looks identical to one that took the money.
+     */
+    lg('mm-log','Checking servers…','lhi');
+    let _pf=null;
+    try{
+      const _pfr=await fetch('/api/join',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({preflight:true,lobbyId:lobbyIdFor(usd)}),signal:AbortSignal.timeout(9000)});
+      if(_pfr.ok)_pf=await _pfr.json().catch(()=>null);
+    }catch(_){}
+    if(!_pf||!_pf.ready){
+      _joiningLobby=false;
+      addToast('⚠️ Game servers are not accepting joins right now — you were NOT charged. Try again shortly.','#FFD700',7000);
+      lg('mm-log','Servers unavailable — nothing was charged','lerr');
+      await new Promise(r=>setTimeout(r,2200));
+      if(_myGen!==_joinGen)return;
+      go('scr-lobby');populateLobby();
+      return;
+    }
     lg('mm-log','Creating escrow…','lhi');
     const escPubkey=new solanaWeb3.PublicKey(ESCROW_PUBKEY);
     const from=new solanaWeb3.PublicKey(ST.address);
@@ -3691,35 +3739,34 @@ async function joinLobby(usd){
     const _sndr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:2,method:'sendTransaction',params:[_rawB64,{encoding:'base64',skipPreflight:true,preflightCommitment:'confirmed',maxRetries:3}]})});
     const _sndd=await _sndr.json();if(_sndd.error)throw new Error('Send failed: '+_sndd.error.message);
     const sig=_sndd.result;
+    _paidSig=sig;   // from here on, a failure means the player's SOL is gone
     lg('mm-log','Confirming on-chain…','lwarn');
     let _txConfirmed=false;
-    // Poll FAST at first (Solana usually confirms in 0.4–0.8s) then ease off, instead of a flat
-    // 1.5s × 60 = 90s grind that made a normal join feel broken. Same ~90s worst case, but a healthy
-    // confirmation is now seen in well under a second.
-    // Only ~18 polls (~15s) here, NOT 70 (~90s). This loop is a courtesy: api/join.js re-verifies the
-    // deposit on-chain itself (verifyWagerTx, its own retries) and is the AUTHORITY on whether the
-    // money landed. Blocking the player for 90s on a client-side lookup that public RPCs often answer
-    // "not found" to — while the tx was actually fine — is what made joining take forever and
-    // sometimes never complete. If we can't see it in 15s we hand off to the server instead of failing.
-    for(let _ci=0;_ci<18&&!_txConfirmed;_ci++){
-      await new Promise(r=>setTimeout(r, _ci<6?400:(_ci<14?800:1500)));
-      // After the first ~12 polls the tx may have aged out of the nodes' recent-signature cache, so
-      // a plain lookup keeps answering "not found" forever. Escalate to a history search — this is
-      // the other half of the "stuck on Confirming on-chain" hang.
-      const _deep=_ci>=12;
-      const _sr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:3,method:'getSignatureStatuses',params:[[sig],{searchTransactionHistory:_deep}]})});
+    /*
+     * SHORT. Every iteration of this loop is a serverless invocation, and a paid join that struggles
+     * used to fire ~21 of them (18 status polls + blockhash probes) — the heaviest thing a player can
+     * do, spent asking a question the join endpoint answers anyway. Exceeding the plan's compute
+     * allowance takes /api/join down, and /api/join is the ONLY thing that turns a paid deposit into a
+     * seat; a player who has already paid then cannot get in. So the polling that competes with it for
+     * that allowance is kept to the case it actually serves: a healthy confirmation, seen in well
+     * under a second.
+     *
+     * After ~4s we hand off to api/join.js, which searches the chain for up to 40s with better nodes
+     * and is the AUTHORITY regardless of what we conclude here. Handing off sooner is strictly better
+     * for the player too — it is the same wait, minus fifteen seconds of watching a spinner.
+     */
+    for(let _ci=0;_ci<8&&!_txConfirmed;_ci++){
+      await new Promise(r=>setTimeout(r, _ci<5?350:700));
+      // The last poll escalates to a history search, for the case where the tx has already dropped out
+      // of the nodes' recent-signature cache and a plain lookup would answer "not found" forever.
+      const _sr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:3,method:'getSignatureStatuses',params:[[sig],{searchTransactionHistory:_ci>=7}]})});
       const _sd=await _sr.json().catch(()=>({}));
       const _st=_sd?.result?.value?.[0];
       if(_st){if(_st.err)throw new Error('Transaction rejected by network');if(_st.confirmationStatus==='confirmed'||_st.confirmationStatus==='finalized'){_txConfirmed=true;break;}}
-      if(_ci===12)lg('mm-log','Still confirming — searching history…','lwarn');
-      // Blockhash height passed? STOP POLLING — but never throw. Throwing here kicked the player out
-      // to the home screen with "Transaction expired" EVEN WHEN THE DEPOSIT HAD LANDED (a laggard
-      // getBlockHeight, or a tx that confirmed just as the height ticked over) — so they were charged
-      // and locked out, which is the reported "it takes my money and boots me". It is the exact same
-      // mistake the comment below this loop warns about. api/join.js re-verifies the deposit on-chain
-      // and is the AUTHORITY: if the tx really expired it refuses cleanly and no money moved; if it
-      // landed, the player gets in. So break and let the server decide.
-      if(_ci>0&&_ci%8===0){const _bhr=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:4,method:'getBlockHeight',params:[]})});const _bhd=await _bhr.json().catch(()=>({}));if(typeof _bhd.result==='number'&&_bhd.result>lb.lastValidBlockHeight){lg('mm-log','Blockhash aged out — verifying with server…','lwarn');break;}}
+      // NOTE: no getBlockHeight "has the blockhash expired?" probe. It cost an invocation per join to
+      // decide something we act on identically either way — stop polling and let the server rule — and
+      // when it was wrong (a laggard node, or a tx confirming as the height ticked over) it threw
+      // "Transaction expired" at players whose deposit had in fact landed, charging and booting them.
     }
     // NOT confirmed client-side? Carry on anyway. Throwing here was the single biggest cause of
     // "paid but never got in": the deposit had usually landed and we abandoned it.
@@ -3756,7 +3803,25 @@ async function joinLobby(usd){
     if(_myGen!==_joinGen){ console.warn('[join] superseded attempt aborted:',e&&e.message); return; }
     _joiningLobby=false;
     lg('mm-log','Error: '+e.message,'lerr');
-    await new Promise(r=>setTimeout(r,3000));
+    /*
+     * A join that dies AFTER the deposit broadcast has taken real money, and the player is owed a
+     * straight answer plus something they can quote when they ask for it back. Silently dropping them
+     * on the wager screen is what makes this read as theft. Keep the receipt locally too — the
+     * operator can match it against the escrow's on-chain history without guesswork.
+     */
+    if(_paidSig){
+      try{ localStorage.setItem('ss_unclaimedDeposit',JSON.stringify({
+        ts:new Date().toISOString(), sig:_paidSig, lamports:ST.cashoutLamports||0,
+        usd, lobby:lobbyIdFor(usd), wallet:ST.address||null, err:String(e&&e.message||e),
+      })); }catch(_){}
+      addToast('⚠️ Your deposit went through but the join failed. You have NOT lost it — contact support with this ID: '+String(_paidSig).slice(0,16)+'…','#FF6600',15000);
+      lg('mm-log','Deposit ref: '+_paidSig,'lwarn');
+      lg('mm-log','Do NOT re-join to "use it up" — that deposit is refunded, not reused.','lwarn');
+      await new Promise(r=>setTimeout(r,6000));
+    } else {
+      addToast('Join failed — you were NOT charged.','#FFD700',6000);
+      await new Promise(r=>setTimeout(r,3000));
+    }
     // Re-check AFTER the grace: the player very likely retried during it (that is exactly what the
     // 3s is for). Also never yank anyone out of a live game.
     if(_myGen!==_joinGen)return;

@@ -49,6 +49,18 @@ function mintTokensFor(walletAddress, lobbyId) {
 
 const ESCROW_PUBKEY = '2SYFfCsSmKr8qwK1AfWd36JtAc1BCaRaSSxyECKUJjBb';
 
+// ── HOW LONG A DEPOSIT MAY BE RE-PRESENTED ──────────────────────────────────────────────────────
+// A resume lets somebody into a paid room WITHOUT a fresh payment, so the only case it may ever
+// cover is the one it was written for: THIS join attempt asking again because its own HTTP reply
+// was lost. The client's retry budget is two calls of ~50s plus backoff (~105s worst case), so a
+// genuine same-attempt retry always lands inside three minutes.
+//
+// Anything older is a different situation entirely: the join FAILED, the player was refunded by
+// hand, and the pw: entry outlived the refund because a wallet-to-wallet transfer cannot know to
+// remove it. Letting that back in is the operator paying twice for one deposit. So the window is
+// short and the deposit must also be the very one that opened the entry — see the guard below.
+const RESUME_WINDOW_MS = 180_000;
+
 // ── Referral program ────────────────────────────────────────────────────────────────────────────
 // Invite-only: a referrer earns a tiny reward EACH time a player they referred completes a real
 // (paid) join, for REF_WINDOW_MS after that player was first referred. Only owner-minted codes
@@ -289,6 +301,33 @@ module.exports = async function handler(req, res) {
     body = body || {};
 
     const { walletAddress, wagerLamports, txSig, lobbyId, playerName, refCode } = body;
+
+    /*
+     * ── PREFLIGHT: "can this endpoint let anyone in right now?" ────────────────────────────────────
+     * Asked by the client BEFORE it signs and broadcasts the deposit, and answered without touching
+     * the chain, KV, or any signature — so it costs almost nothing and cannot itself be the thing
+     * that fails.
+     *
+     * The point is ORDERING. The deposit is irreversible and instant; the part that lets the player
+     * into the room is this function. Doing them in that order means every outage here — the project
+     * over its plan's compute allowance and being throttled, a bad deploy, a missing GAME_SECRET —
+     * lands as "charged and not let in", which is the worst outcome this game can produce and the one
+     * people report. If the endpoint is unreachable the fetch below simply fails and the client stops
+     * before spending anything, so a broken join costs the player nothing but a retry.
+     *
+     * `ready` is false rather than absent when the secret is missing, because a token minted without
+     * GAME_SECRET is null and the game server rejects it — paying first and finding that out after is
+     * the same trap by another route.
+     */
+    if (body.preflight) {
+      const secret = (process.env.GAME_SECRET || '').trim();
+      return res.status(200).json({
+        ok: true,
+        ready: !!secret,
+        reason: secret ? null : 'server-misconfigured',
+        lobbyId: lobbyId || null,
+      });
+    }
     const sig = req.headers['x-settle-sig'] || '';
     const ts  = req.headers['x-settle-ts']  || '';
     const lamps = Number(wagerLamports) || 0;
@@ -341,37 +380,74 @@ module.exports = async function handler(req, res) {
       //     spent deposit has no active wager to re-enter. Keep rejecting.
       //
       // pw: present ⇔ an active, unconsumed paid wager ⇔ case 1. pw: absent ⇔ case 2.
+      // What we recorded when this deposit was first accepted. Older records were the string '1' and
+      // carry no wallet or timestamp — they are, by definition, from a previous session, so they fall
+      // through to the refusal below exactly as an expired record would.
+      let rec = null;
+      try { const p = JSON.parse(alreadyUsed); if (p && typeof p === 'object') rec = p; } catch (_) {}
+
+      // Somebody else's deposit. Never mint credentials off it, whatever state their entry is in.
+      if (rec && rec.w && rec.w !== walletAddress) {
+        return res.status(400).json({ error: 'That deposit belongs to a different wallet' });
+      }
+
       const existingWager = await kvGet('pw:' + walletAddress);
-      if (existingWager !== null) {
-        /*
-         * A RESUME LETS SOMEBODY IN WITHOUT A FRESH PAYMENT, so it must never be silent. It is correct
-         * when the first join genuinely paid and only its HTTP reply was lost — but it is also exactly
-         * what a refunded-by-hand player would hit: the operator returns their SOL directly, the pw:
-         * entry survives (a manual transfer cannot know to remove it), and the next JOIN walks in free
-         * on a deposit that has already been given back.
-         *
-         * The fix for that case is clearing the entry (settle: action 'clear-entry'), and the point of
-         * logging here is that you can SEE it happened. A resume for a wallet you refunded is money
-         * leaving twice, and it should be findable in the log rather than invisible.
-         */
-        console.warn('[join] RESUMED unconsumed wager', {
-          wallet: String(walletAddress).slice(0, 8), lobbyId,
+      const openedBy      = await kvGet('pwtx:' + walletAddress);
+      const ageMs         = rec && rec.t ? Date.now() - Number(rec.t) : Infinity;
+
+      /*
+       * RESUME ONLY THE ATTEMPT THAT IS STILL HAPPENING.
+       *
+       * All three conditions describe one situation and nothing else: this exact deposit opened the
+       * entry, the entry is still unconsumed, and it happened seconds ago — i.e. the first /api/join
+       * succeeded and only its reply was lost, and the client in front of us is the same one retrying.
+       * Letting that through is what stops "it charged me and said transaction already registered".
+       *
+       * Every other path lands on the refusal. In particular a join that FAILED and was refunded by
+       * hand: its pw: entry survives the refund (nothing on-chain can clear it), and re-presenting the
+       * old deposit used to walk straight back in — the operator's money out twice for one payment.
+       * A stale entry is never a ticket. The player makes a new deposit; they already have their SOL back.
+       */
+      const sameAttempt = existingWager !== null && openedBy === txSig && ageMs <= RESUME_WINDOW_MS;
+
+      if (sameAttempt) {
+        console.warn('[join] RESUMED in-flight join (lost response)', {
+          wallet: String(walletAddress).slice(0, 8), lobbyId, ageMs,
           lamports: Number(existingWager) || lamps, txSig: String(txSig).slice(0, 12),
-          note: 'no new charge; if this wallet was refunded by hand its pw: entry should have been cleared',
         });
         const { gameToken, entryToken } = mintTokensFor(walletAddress, lobbyId);
         return res.status(200).json({ ok: true, recorded: Number(existingWager) || lamps, gameToken, entryToken, resumed: true });
       }
-      return res.status(400).json({ error: 'Transaction already registered — make a new deposit to play again' });
+
+      // Refused. Log LOUDLY when an unconsumed entry was still sitting there — that entry is money the
+      // player paid and did not get to play, so it wants refunding and clearing (settle:'wager-orphans'
+      // lists them, settle:'clear-entry' clears them once the SOL is back).
+      if (existingWager !== null) {
+        console.warn('[join] REFUSED stale entry — deposit re-presented after the attempt ended', {
+          wallet: String(walletAddress).slice(0, 8), lobbyId, ageMs,
+          lamports: Number(existingWager), txSig: String(txSig).slice(0, 12),
+          openedBy: openedBy ? String(openedBy).slice(0, 12) : null,
+          note: 'refund this wallet if it never played, then clear-entry',
+        });
+      }
+      return res.status(400).json({
+        error: 'That deposit has already been used. If a join failed you were refunded — start a new game.',
+        stale: true,
+      });
     }
 
     // On-chain tx proves they actually paid
     await verifyWagerTx(txSig, walletAddress, lamps);
 
     // Store replay guard (24h) before the wager entry so even a partial failure blocks replay.
-    await kvSet(txKey, '1', 86400);
+    // It records WHO paid and WHEN, because the re-presentation branch above has to tell an
+    // in-flight retry apart from an old deposit being offered again — it cannot do that from a bare '1'.
+    await kvSet(txKey, JSON.stringify({ w: walletAddress, l: lamps, t: Date.now() }), 86400);
     // Store for 4 hours — more than enough for any game session
     await kvSet('pw:' + walletAddress, lamps, 14400);
+    // Which deposit opened this entry. Same TTL as the entry, so the two can never disagree, and it is
+    // what lets a resume require the SAME payment rather than any payment this wallet ever made.
+    await kvSet('pwtx:' + walletAddress, txSig, 14400);
     // Clear any stale cashout lock and dead flag from a previous session.
     // Safe because the player just proved they paid a new wager.
     kvDel('lock:co:' + walletAddress).catch(() => {});
