@@ -1,0 +1,3477 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><title>SNAKE POT — Kart Arena</title>
+<!-- Same socket.io build the snake server runs (4.8.3). If this fails to load — offline, blocked, or a
+     strict CSP — `io` is simply undefined and the game falls back to single-player practice rather than
+     showing a dead screen. -->
+<script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
+<!-- Embedded on the platform the game IS the page, so the explanatory chrome around the stage is just
+     a letterboxed frame inside another frame. Set the class before first paint so there is no flash of
+     the boxed layout; the JS reads the same ?embed=1 for its own purposes. -->
+<script>try{if(new URLSearchParams(location.search).get('embed')==='1')document.documentElement.className='embed';}catch(e){}</script>
+<style>
+  :root{
+    --ink:#f2eefc; --dim:#8a82a6; --green:#39d353; --purple:#9945ff; --gold:#f8e6ad; --red:#ff4d5e;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#07060f;color:var(--ink);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:18px 16px 40px;display:flex;flex-direction:column;gap:14px}
+  .head{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;flex-wrap:wrap}
+  h1{margin:0;font:700 22px/1.1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:-.01em}
+  .head p{margin:4px 0 0;color:var(--dim);font-size:13px;max-width:62ch}
+
+  .stage{position:relative;width:100%;aspect-ratio:16/9;border-radius:14px;overflow:hidden;background:#000;
+    border:1px solid #241c3d;box-shadow:0 24px 70px -30px #000;}
+  /* Embedded (platform iframe): the stage IS the page. Drop the aspect-ratio box, the frame and the
+     surrounding copy so the track fills the window instead of sitting in a letterbox inside one. */
+  .embed body{overflow:hidden}
+  .embed .wrap{max-width:none;height:100vh;padding:0;gap:0}
+  .embed .head,.embed .note{display:none}
+  .embed .stage{aspect-ratio:auto;height:100vh;border:0;border-radius:0;box-shadow:none}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .stage:focus-visible{outline:2px solid var(--green);outline-offset:3px}
+
+  .hud{position:absolute;inset:0;pointer-events:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
+  .tl{position:absolute;left:2.2%;top:3.5%;display:flex;flex-direction:column;gap:5px}
+  .chip{background:rgba(8,6,20,.62);border:1px solid rgba(153,69,255,.35);border-radius:9px;padding:5px 10px;
+    font-size:12px;letter-spacing:.1em;color:#cfc6e8;backdrop-filter:blur(5px);display:inline-flex;gap:9px;align-items:baseline}
+  .chip b{color:var(--gold);font-size:15px}
+  .chip.wal b{color:#7fe6a0}
+  .chip.wal.dn b{color:#ff8a8a}
+  .chip.wal.up b{color:#7fe6a0}
+
+  .chip.lap b{color:#fff}
+  .br{position:absolute;right:2.4%;bottom:5%;text-align:right;line-height:1}
+  .spd{font-size:clamp(34px,6.4vw,62px);font-weight:700;color:#fff;text-shadow:0 3px 18px rgba(0,0,0,.75)}
+  .spd small{font-size:.3em;color:var(--dim);letter-spacing:.28em;margin-left:6px}
+  .driftRow{position:absolute;left:50%;bottom:4.5%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;pointer-events:none;opacity:0;transition:opacity .15s}
+  .driftRow.on{opacity:1}
+  .driftLbl{font-family:ui-monospace,monospace;font-size:9px;letter-spacing:.18em;color:#6f6790;white-space:nowrap;min-width:96px;text-align:right}
+  .drift{width:150px;height:7px;border-radius:4px;flex:none;
+    background:rgba(6,4,16,.6);border:1px solid rgba(255,255,255,.14);overflow:hidden;opacity:0;transition:opacity .15s}
+  .drift.on{opacity:1}
+  .drift i{display:block;height:100%;width:0%;transition:width .06s linear}
+  /* flex so the committed reserve and the drift-in-progress segment sit side by side in one bar,
+     instead of the pending charge being invisible until you release. */
+  .fuel{position:absolute;left:50%;bottom:13.5%;transform:translateX(-50%);width:186px;height:10px;border-radius:5px;
+    background:rgba(6,4,16,.66);border:1px solid rgba(255,255,255,.16);overflow:hidden;display:flex}
+  .fuel i{flex:0 0 auto;height:100%;width:0%;background:linear-gradient(90deg,#7a35d6,#c9a2ff);transition:width .05s linear}
+  /* The live segment is tinted by the tier you are currently holding, so the bar answers "is this
+     corner worth staying committed to?" while you are still in it. */
+  .fuel #fuelPend{background:currentColor;opacity:.75;transition:width .05s linear}
+  .fuel.full i{background:linear-gradient(90deg,#9945ff,#f8e6ad)}
+  .fuel.burn i{background:linear-gradient(90deg,#ff9b3d,#fff2c4)}
+  /* GRIP — the tyre budget, read at a glance. Sits with the boost bar because the two together are
+     "what have I got left"; colour shifts green -> amber -> red as it wears so a spectator can see an
+     overtaking window opening without reading a number. */
+  /* The bottom-centre stack is crowded: drift bar at 7%, boost bar at 12.5%, its label at 16.5% and
+     the slipstream flag at 18%. Slotting grip in at 9.2% with a label above it put that label straight
+     through the boost bar. Grip now sits ABOVE the whole stack as one row, with its label inline to the
+     left instead of stacked, so it cannot collide with anything however the other bars change. */
+  .tyreRow{position:absolute;left:50%;bottom:8.5%;transform:translateX(-50%);display:flex;align-items:center;
+    gap:8px;pointer-events:none}
+  .tyre{width:150px;height:6px;border-radius:4px;background:rgba(6,4,16,.66);
+    border:1px solid rgba(255,255,255,.14);overflow:hidden;flex:none}
+  .tyre i{display:block;height:100%;width:100%;background:#39d353;transition:width .12s linear,background .3s}
+  .tyre.warn i{background:#ffb03a}
+  .tyre.worn i{background:#ff5f5f}
+  .tyreLbl{font-family:ui-monospace,monospace;font-size:9px;letter-spacing:.18em;color:#6f6790;
+    white-space:nowrap;min-width:96px;text-align:right}
+  .fuelLbl{position:absolute;left:50%;bottom:17.2%;transform:translateX(-50%);font-family:ui-monospace,monospace;
+    font-size:10px;letter-spacing:.2em;color:#6f6790;transition:color .15s}
+  .fuelLbl.on{color:var(--gold)}
+  .slip{position:absolute;left:50%;bottom:20.6%;transform:translateX(-50%);font-family:ui-monospace,monospace;
+    font-size:12px;letter-spacing:.12em;color:#b98cff;opacity:0;transition:opacity .2s}
+  .slip.on{opacity:1}
+  /* Amber when the same wake is COSTING you grip — the colour is the tell that you should be pulling
+     out, not the text, because nobody reads text at 200mph. */
+  .slip.dirty{color:#ff9a3c}
+  /* The standings ride in the SAME flow column as the chips rather than being pinned at their own
+     percentage. Pinning meant a fixed-height pixel stack (5 chips) sat above a %-positioned panel, so
+     adding the TRACK chip pushed the stack straight through it — and it collided harder the shorter the
+     stage got. In-flow, the gap is whatever margin-top says at every viewport size. */
+  .pos{align-self:flex-start;margin-top:14px;background:rgba(8,6,20,.62);border:1px solid rgba(153,69,255,.35);
+    border-radius:9px;padding:7px 10px;backdrop-filter:blur(5px);min-width:132px}
+  .posh{font-size:10px;letter-spacing:.16em;color:#8a82a6;margin-bottom:5px}
+  .pos .r{display:flex;align-items:baseline;gap:7px;font-size:12px;color:#cfc6e8;padding:1.5px 0}
+  .pos .r .n{color:#f8e6ad;font-weight:700;width:12px}
+  .pos .r .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pos .r .gap{color:#ffd9a0;font-size:10.5px;font-variant-numeric:tabular-nums;min-width:38px;text-align:right}
+  .pos .r .lp{color:#8a82a6;font-size:10px}
+  .pos .r.you .nm{color:#39d353;font-weight:700}
+
+  .msg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;pointer-events:none}
+  .big{font:700 clamp(40px,10vw,110px)/1 ui-monospace,monospace;color:#fff;text-shadow:0 6px 40px rgba(0,0,0,.8);letter-spacing:-.02em}
+  .big.go{color:var(--green)}
+  .panel{background:rgba(9,6,22,.9);border:1px solid rgba(153,69,255,.4);border-radius:14px;padding:22px 30px;
+    backdrop-filter:blur(8px);pointer-events:auto;min-width:260px}
+  .panel h2{margin:0 0 4px;font:700 20px/1.2 ui-monospace,monospace}
+  .panel .sub{color:var(--dim);font-size:13px;margin-bottom:14px}
+  .rows{display:flex;flex-direction:column;gap:7px;font-family:ui-monospace,monospace;font-size:14px}
+  .rows div{display:flex;justify-content:space-between;gap:26px}
+  .rows span{color:var(--dim)} .rows b{color:var(--gold)}
+  button{font:600 14px/1 ui-sans-serif,system-ui,sans-serif;cursor:pointer;border-radius:10px;border:none;
+    background:var(--green);color:#04140a;padding:12px 22px;margin-top:16px;transition:filter .15s,transform .1s}
+  button:hover{filter:brightness(1.1)} button:active{transform:translateY(1px)}
+  button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+
+  .keys{display:flex;gap:8px;flex-wrap:wrap;color:var(--dim);font-size:12.5px;font-family:ui-monospace,monospace}
+  .keys kbd{background:#150f2b;border:1px solid #2e2450;border-bottom-width:2px;border-radius:6px;padding:3px 8px;color:#d6cdf0;font:inherit}
+  .note{color:var(--dim);font-size:13px;border-left:2px solid #2e2450;padding-left:12px}
+  /* ── LOBBY ────────────────────────────────────────────────────────────────────────────────────
+     Deliberately NOT a full-screen takeover: the circuit keeps moving behind the glass so the game
+     never looks frozen while you pick a race. */
+  .ctrls{position:absolute;left:2.2%;bottom:6%;width:250px;background:rgba(8,6,20,.82);
+    border:1px solid rgba(153,69,255,.35);border-radius:12px;padding:11px 12px;backdrop-filter:blur(6px);
+    font-family:ui-monospace,monospace;pointer-events:none;opacity:0;transition:opacity .2s;z-index:3}
+  .ctrls.on{opacity:1}
+  .ctrlsHead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:7px}
+  .ctrlsHead b{font-size:10px;letter-spacing:.18em;color:#cfc6e8}
+  .ctrlsHead span{font-size:9px;letter-spacing:.12em;color:#7fe6a0}
+  .ctrls .cr{display:flex;align-items:center;gap:8px;padding:2.5px 0;font-size:11px;color:#b9aee0}
+  .ctrls .cr i{font-style:normal;flex:none;min-width:74px;text-align:right;color:#f8e6ad;font-weight:700}
+  .ctrlsFoot{margin-top:7px;font-size:9px;letter-spacing:.12em;color:#6f6790}
+  .netnote{position:absolute;left:50%;top:6%;transform:translateX(-50%);font-family:ui-monospace,monospace;
+    font-size:12px;letter-spacing:.08em;color:#ffd9a0;background:rgba(8,6,20,.72);border:1px solid rgba(255,190,120,.3);
+    border-radius:8px;padding:5px 12px;opacity:0;transition:opacity .25s;pointer-events:none;max-width:70%}
+  .netnote.on{opacity:1}
+  .lobby{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    background:rgba(6,4,16,.62);backdrop-filter:blur(7px);z-index:5;padding:3%}
+  .lobby.on{display:flex}
+  .lobbyCard{width:min(560px,100%);max-height:100%;overflow:auto;background:linear-gradient(180deg,#140f2b,#0c0918);
+    border:1px solid rgba(153,69,255,.4);border-radius:16px;padding:20px 22px;
+    box-shadow:0 30px 70px rgba(0,0,0,.6);display:flex;flex-direction:column;gap:14px}
+  .lobbyHead{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}
+  .lobbyTitle{font:700 19px/1.1 ui-sans-serif,system-ui,sans-serif;color:#fff;letter-spacing:.04em}
+  .lobbySub{font-family:ui-monospace,monospace;font-size:11.5px;color:var(--dim);margin-top:4px}
+  .lobbySub b{color:var(--gold)}
+  .lobbyRegion{display:flex;gap:6px}
+  .rgn{font:600 11px/1 ui-monospace,monospace;background:#1a1233;color:#b9aee0;border:1px solid #2e2450;
+    border-radius:8px;padding:7px 10px;margin:0;letter-spacing:.04em}
+  .rgn.sel{background:var(--green);color:#04140a;border-color:transparent}
+  .lobbyName{display:flex;align-items:center;gap:10px}
+  .lobbyName label{font-family:ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#8a82a6}
+  .lobbyName input{flex:1;background:#0d0a1c;border:1px solid #2e2450;border-radius:8px;color:#e8e2ff;
+    padding:9px 11px;font:600 13px/1 ui-monospace,monospace}
+  .lobbyName input:focus{outline:2px solid var(--green);outline-offset:1px}
+  .lobbyList{display:flex;flex-direction:column;gap:7px;max-height:240px;overflow:auto;
+    border-top:1px solid #241c42;border-bottom:1px solid #241c42;padding:10px 0;min-height:96px}
+  .lbEmpty{color:#6f6790;font-family:ui-monospace,monospace;font-size:12px;text-align:center;padding:22px 0}
+  .lbRow{display:flex;align-items:center;gap:10px;background:#120d26;border:1px solid #251d46;
+    border-radius:10px;padding:9px 11px}
+  .lbRow .nm{flex:1;min-width:0;color:#e8e2ff;font:600 13px/1.2 ui-sans-serif,system-ui,sans-serif;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lbRow .meta{font-family:ui-monospace,monospace;font-size:10.5px;color:#8a82a6;letter-spacing:.06em}
+  .lbRow button{margin:0;padding:7px 12px;font-size:11.5px;border-radius:8px}
+  .lbRow .watch{background:#241c46;color:#c9bdf0}
+  .pill{font:600 9.5px/1 ui-monospace,monospace;letter-spacing:.12em;padding:4px 7px;border-radius:5px}
+  .pill.waiting{background:#1d3a24;color:#7fe6a0}
+  .pill.racing{background:#4a1d2a;color:#ff9db0}
+  .pill.done{background:#2a2440;color:#a99ed0}
+  .lbRow .stake{font:700 11px/1 ui-monospace,monospace;color:#f8e6ad;background:#2a2410;
+    border:1px solid #4a3f18;border-radius:6px;padding:4px 7px;letter-spacing:.04em;flex:none}
+  .lbRow .stake.free{color:#7fe6a0;background:#12301c;border-color:#1f5c31}
+  .stakeRow{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .stk{margin:0;padding:8px 11px;font:600 12px/1 ui-monospace,monospace;border-radius:8px;
+    background:#1a1233;color:#b9aee0;border:1px solid #2e2450;letter-spacing:.03em}
+  .stk.sel{background:var(--green);color:#04140a;border-color:transparent}
+  .stkCustom{flex:1;min-width:96px;background:#0d0a1c;border:1px solid #2e2450;border-radius:8px;
+    color:#e8e2ff;padding:8px 10px;font:600 12px/1 ui-monospace,monospace}
+  .stkCustom:focus{outline:2px solid var(--green);outline-offset:1px}
+  .lobbyBtns{display:flex;gap:8px;flex-wrap:wrap}
+  .lobbyBtns button{margin:0;flex:1;min-width:130px}
+  /* Controller highlight. The lobby's own buttons have no useful default focus ring against this
+     background, and a pad is unusable if you cannot see what you are about to press. */
+  .gpsel{outline:3px solid var(--green) !important;outline-offset:2px;
+    box-shadow:0 0 0 6px rgba(57,211,83,.18) !important}
+  .lobbyBtns .alt{background:#9945ff;color:#fff}
+  .lobbyBtns .ghost,.grid .ghost{background:#1c1636;color:#b9aee0}
+  /* Grid / ready panel */
+  /* Clears the MINIMAP, which lives in this same corner and is sized in script as
+     R = min(92, 19% of height) with a 16px pad — so its lower edge is min(184px, 38%) + 32px.
+     Matching that expression here keeps the panel below it at every viewport size, instead of a fixed
+     top that only happens to work at one height. */
+  .grid{position:absolute;right:2.4%;top:calc(min(184px, 38%) + 44px);width:216px;background:rgba(8,6,20,.8);
+    border:1px solid rgba(153,69,255,.35);border-radius:12px;padding:12px;display:none;
+    flex-direction:column;gap:6px;backdrop-filter:blur(6px);z-index:4;pointer-events:auto}
+  .grid.on{display:flex}
+  .gridHead{font-family:ui-monospace,monospace;font-size:10px;letter-spacing:.16em;color:#8a82a6}
+  .grid .r{display:flex;gap:8px;align-items:center;font-family:ui-monospace,monospace;font-size:12px;color:#cfc6e8}
+  .grid .r .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .grid .r .no{color:#f8e6ad;font-weight:700;min-width:11px;text-align:right}
+  .grid .r .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .grid .r .rd{font-size:9.5px;letter-spacing:.1em;color:#7fe6a0}
+  .grid button{margin-top:8px;padding:9px}
+  .grid button.armed{background:#9945ff;color:#fff}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <div class="head">
+    <div>
+      <h1>KART ARENA — Mode 7</h1>
+      <p><b>Drift</b> (SHIFT) charges your reserve. <b>SPACE</b> burns it for speed. <b>Q</b> dives at the car ahead and <b>E</b> shuts the door on the car behind — both spend the SAME reserve, and both do nothing at all unless someone is actually there, so you cannot use either as a free boost. <b>GRIP</b> wears as you lean on the car and comes back when you drive smoothly.</p>
+      <p>PvP wager racing on today’s circuit, live on the Chicago and Frankfurt servers. 2–8 players, everyone on the same track in the same kart — no rubber-banding, no items. Winner takes the pot minus 10%; ties split.</p>
+    </div>
+    <div class="keys">
+      <kbd>↑</kbd>/<kbd>W</kbd> throttle <kbd>↓</kbd>/<kbd>S</kbd> brake / reverse <kbd>←</kbd><kbd>→</kbd> steer <kbd>SHIFT</kbd> drift <kbd>SPACE</kbd> use boost <kbd>R</kbd> reset <kbd>M</kbd> sound<br>
+      <kbd>Q</kbd> attack <kbd>E</kbd> defend · MIRROR <kbd>,</kbd><kbd>.</kbd> angle <kbd>;</kbd> position <kbd>'</kbd> size <kbd>K</kbd> on/off<br>
+      <kbd>PAD</kbd> RT throttle · LT brake · stick steer · LB drift · RB boost · Y attack · A defend · Start lobby · hold B to leave
+    </div>
+  </div>
+
+  <div class="stage" id="stage" tabindex="0" aria-label="Kart racing prototype">
+    <canvas id="cv"></canvas>
+    <div class="hud">
+      <div class="tl">
+        <div class="chip lap">LAP <b id="lap">1/3</b></div>
+        <div class="chip">TIME <b id="time">0.00</b></div>
+        <div class="chip">BEST <b id="best">—</b></div>
+        <div class="chip">FPS <b id="fps">—</b></div>
+        <div class="chip">TRACK <b id="trk">—</b></div>
+        <div class="chip wal" id="walChip" style="display:none">WALLET <b id="walAmt">—</b></div>
+        <div class="pos" id="pos">
+          <div class="posh">POSITION</div>
+          <div id="posrows"></div>
+        </div>
+      </div>
+      <div class="br"><div class="spd"><span id="spd">0</span><small>MPH</small></div></div>
+      <div class="driftRow"><div class="driftLbl">DRIFT CHARGE</div><div class="drift" id="driftBar"><i id="driftFill"></i></div></div>
+      <div class="fuelLbl" id="fuelLbl">BOOST · HOLD SPACE</div>
+      <div class="fuel" id="fuel"><i id="fuelFill"></i><i id="fuelPend"></i></div>
+      <div class="tyreRow"><div class="tyreLbl" id="tyreLbl">GRIP</div><div class="tyre" id="tyreBar"><i id="tyreFill"></i></div></div>
+      <div class="slip" id="slip">SLIPSTREAM</div>
+      <div class="msg" id="msg"></div>
+      <div class="netnote" id="netnote"></div>
+      <!-- CONTROLS. Shown on the grid and on demand, and it shows the controls you are ACTUALLY
+           holding: a pad player being told to press SHIFT has to translate every line. -->
+      <div class="ctrls" id="ctrls">
+        <div class="ctrlsHead"><b>CONTROLS</b><span id="ctrlsMode">KEYBOARD</span></div>
+        <div id="ctrlsRows"></div>
+        <div class="ctrlsFoot">H to hide</div>
+      </div>
+    </div>
+
+    <!-- LOBBY. Sits over the stage rather than on a separate screen, so the track is still moving
+         behind it and joining a race never feels like leaving the game. -->
+    <div class="lobby" id="lobby">
+      <div class="lobbyCard">
+        <div class="lobbyHead">
+          <div>
+            <div class="lobbyTitle" id="lbTitle">RACES</div>
+            <div class="lobbySub">Everyone races today’s circuit <b id="lbTrack">—</b> · 3 laps · <span id="lbStakeNote">pick a stake below</span></div>
+          </div>
+          <div class="lobbyRegion">
+            <button class="rgn" data-rgn="NA">🇺🇸 Chicago</button>
+            <button class="rgn" data-rgn="EU">🇩🇪 Frankfurt</button>
+          </div>
+        </div>
+        <div class="lobbyName">
+          <label for="lbName">NAME</label>
+          <input id="lbName" maxlength="16" placeholder="Racer" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="lobbyList" id="lbList"><div class="lbEmpty">Connecting…</div></div>
+        <!-- STAKE. The tiers are shortcuts, not the legal set — Custom takes any amount, including
+             under a dollar, which is what makes a $0.25 race as real as a $50 one. -->
+        <div class="stakeRow" id="stakeRow">
+          <button class="stk sel" data-stake="0">FREE</button>
+          <button class="stk" data-stake="0.5">$0.50</button>
+          <button class="stk" data-stake="1">$1</button>
+          <button class="stk" data-stake="2">$2</button>
+          <button class="stk" data-stake="5">$5</button>
+          <button class="stk" data-stake="10">$10</button>
+          <button class="stk" data-stake="25">$25</button>
+          <input class="stkCustom" id="stkCustom" placeholder="Custom $" inputmode="decimal" autocomplete="off">
+        </div>
+        <div class="lobbyBtns">
+          <button id="lbCreate">CREATE RACE</button>
+          <button id="lbQuick" class="alt">QUICK RACE</button>
+          <button id="lbSolo" class="ghost">PRACTICE ALONE</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- In-race roster + ready control, shown while a lobby is waiting to go. -->
+    <div class="grid" id="gridPanel">
+      <div class="gridHead">GRID <span id="gridCount"></span></div>
+      <!-- The ready-window clock. The 30 seconds was always running on the server; k-state just never
+           carried it, so there was nothing to show and the race appeared to start out of nowhere. -->
+      <div id="readyClock" style="display:none;font-size:11px;letter-spacing:.5px;text-align:center;margin:2px 0 6px;color:#8fe388;"></div>
+      <div id="gridRows"></div>
+      <button id="btnReady">READY</button>
+      <!-- Shown only while spectating a race that is already running. This is the ONE control that
+           enters you into a race, which is also the one place a paid lobby takes an entry fee. -->
+      <button id="btnJoinNext" style="display:none">JOIN NEXT RACE</button>
+      <button id="btnLeave" class="ghost">LEAVE</button>
+    </div>
+  </div>
+
+  <p class="note">Drift is the skill core: hold <b>SHIFT</b> through a corner while steering to charge — blue, then orange, then purple — and release to pour that charge into your <b>boost reserve</b>. Hold <b>SPACE</b> to burn the reserve a bit at a time; what you don't spend, you keep. Steer the other way mid-drift to flick the drift across without letting go. Identical karts, no rubber-banding, no random items.</p>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// MODE 7 KART PROTOTYPE
+// The whole world is ONE painted top-down image (generated below, no external assets). Each screen
+// scanline below the horizon samples that image along a line in world space whose distance from the
+// camera grows as the scanline approaches the horizon — that perspective warp is all "Mode 7" is,
+// and it is exactly how Super Mario Kart worked. Karts are 2D sprites scaled by distance.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── FIELD SIZE DRIVES THE WHOLE TRACK ───────────────────────────────────────────────────────────
+// 3 lanes as a base, plus one more per car, so there is always room to race side by side. Changing
+// PLAYERS alone re-proportions everything below it — base radius, camera distance, speeds — so a 1v1
+// duel and an eight-car grid both get a correctly sized circuit with no hand tuning.
+const PLAYERS = 2;                       // you + rivals
+const LANE_W  = 82;                      // a kart is ~46 units wide: one kart plus overtaking margin
+const LANES   = 3 + PLAYERS;
+const ROAD_W  = LANES * LANE_W;
+
+// The texture grows with the field too. Without this, a wider road eats into the available radius, so
+// adding cars made the circuit SHORTER — lap times collapsed from ~12s at 2 players to under 6s at 8,
+// which is exactly backwards. Capped at 4096 because the sampled ImageData is TEX*TEX*4 bytes.
+const TEX = Math.min(4096, 3328 + PLAYERS * 128);
+const MASKN = 640;                // surface mask resolution (grass/road/kerb/boost lookup)
+const CX = TEX / 2, CY = TEX / 2; // the circuit is radial about this point
+const R_MAX = TEX / 2 - ROAD_W / 2 - 48;   // widest the ribbon can reach and still fit the texture
+// Amplitudes ALWAYS sum to TOTAL_AMP, whatever circuit is generated, so the widest point still lands
+// on R_MAX and RB never moves. That is what keeps SPD_SC — and therefore lap times — comparable from
+// one day's track to the next, which a shared leaderboard depends on.
+const TOTAL_AMP = 0.47;
+const RB = R_MAX / (1 + TOTAL_AMP);        // base radius
+const SC = ROAD_W / 116;                   // road width vs the original tuning — drives the CAMERA
+// Speed is tied to the CIRCUIT size, not the road width. Tying it to width meant an 11-lane track
+// also went nearly twice as fast, which is what crushed lap times as the grid grew. Keying off the
+// base radius instead holds a lap at roughly 13-15s whatever the field size.
+const SPD_SC = 1 + (RB / 630 - 1) * 0.55;
+
+// ── Circuit shape ────────────────────────────────────────────────────────────────────────────────
+// A radial function guarantees a closed loop that can NEVER self-intersect, which is what keeps the
+// checkpoint logic trivially correct (sector == angle about the centre) and, more importantly, is why
+// there are no enclosed pockets for anyone to get stuck in.
+//
+// The circuit is generated from a SEED rather than hardcoded. Same seed, same track, for everyone,
+// forever — so the server can regenerate any day's circuit and verify a submitted lap against it.
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ── Acceptance thresholds ────────────────────────────────────────────────────────────────────────
+// The road is painted as a STROKE, and a stroke's inner edge folds into a cusp exactly where the
+// centreline's radius of curvature falls below the stroke half-width. The kerb is the widest stroke
+// (ROAD_W + 30), so 220 is the number that matters. At exactly 220 the inner edge collapses to a
+// point, so a margin on top is what keeps every corner a genuine arc.
+const KERB_HALF = (ROAD_W + 30) / 2;
+const MIN_CORNER_R = KERB_HALF + 30;         // no fold anywhere, with room to spare
+const MIN_CENTRE_CLR = 430;                  // the ribbon must clear the middle of the map
+const MAX_EXTENT = TEX / 2 - 48;             // hard texture bound
+const MIN_SEPARATION = ROAD_W + 30;          // distant parts of the circuit must never touch
+const SEP_MIN_DTHETA = 0.6;                  // closer than this is the same corner, not a collision
+const MIN_LENGTH = 6200, MAX_LENGTH = 8800;
+
+let TRK = { a: [0.238, 0.146, 0.086], h: [2, 3, 5], p: [0, 1.2, -0.6 + Math.PI / 2], rot: 0 };
+
+function radiusAt(t) {            // t = angle in radians
+  const s = t + TRK.rot, a = TRK.a, h = TRK.h, p = TRK.p;
+  return RB * (1 + a[0] * Math.sin(h[0] * s + p[0])
+                 + a[1] * Math.sin(h[1] * s + p[1])
+                 + a[2] * Math.sin(h[2] * s + p[2]));
+}
+function pointAt(t) {
+  const r = radiusAt(t);
+  return { x: CX + Math.cos(t) * r, y: CY + Math.sin(t) * r };
+}
+// dr/dt. Needed to turn a RADIAL offset into a PERPENDICULAR one — see offsetFromLine below.
+function radiusSlope(t) {
+  const s = t + TRK.rot, a = TRK.a, h = TRK.h, p = TRK.p;
+  return RB * (a[0] * h[0] * Math.cos(h[0] * s + p[0])
+             + a[1] * h[1] * Math.cos(h[1] * s + p[1])
+             + a[2] * h[2] * Math.cos(h[2] * s + p[2]));
+}
+// d2r/dt2 — the last term needed for a Newton solve against the centreline.
+function radiusCurv(t) {
+  const s = t + TRK.rot, a = TRK.a, h = TRK.h, p = TRK.p;
+  return -RB * (a[0] * h[0] * h[0] * Math.sin(h[0] * s + p[0])
+              + a[1] * h[1] * h[1] * Math.sin(h[1] * s + p[1])
+              + a[2] * h[2] * h[2] * Math.sin(h[2] * s + p[2]));
+}
+/*
+ * The parameter t of the NEAREST point on the centreline to (x,y) — i.e. the foot of the perpendicular.
+ *
+ * Two cheaper approximations were tried and measured against the painted artwork before settling here,
+ * because "close enough" is exactly what caused the render-vs-collision bug this is meant to remove:
+ *   - raw radial distance   `hypot(x-CX,y-CY) - radiusAt(atan2(...))`  -> 98 units of error at worst
+ *   - first-order correction by 1/sqrt(1+(r'/r)^2)                     -> 34 units at worst
+ * Both are fine for a point sitting ON the line and fall apart 205 units out at the road edge, which is
+ * precisely where the answer has to be right. The mask being replaced was only ~5.6 units coarse, so
+ * either would have been a downgrade sold as a fix.
+ *
+ * Solving it properly is a Newton iteration on (P - C(t)) · C'(t) = 0, seeded from the polar angle,
+ * which is already within a few degrees. It converges in three steps and costs a handful of trig calls
+ * a few times a frame — nothing next to being wrong.
+ */
+function nearestT(x, y, seedT) {
+  // A bracketing scan before Newton. On the inside of a tight corner several points of the centreline
+  // can be locally nearest, and Newton seeded from the polar angle alone could settle on the wrong one.
+  // Honest note: on the circuits measured so far this changed nothing — the polar seed was already in
+  // the right basin every time. It is kept because the daily seed will eventually produce a tighter
+  // corner than any tested, and 13 extra distance evaluations a few times a frame is nothing next to
+  // silently mis-classifying the road.
+  // SEED. A kart moves a few units per step, so the answer from last step is a far better starting
+  // point than anything a scan can find — Newton then lands in one or two iterations instead of four.
+  // The 13-sample bracketing scan that used to run here was measured as changing the result on ZERO
+  // of the circuits tested while costing 13 trig pairs on every single call, which at 120Hz across a
+  // full grid is pure waste. The polar angle remains the fallback for the first call.
+  let t = (typeof seedT === 'number' && isFinite(seedT)) ? seedT : Math.atan2(y - CY, x - CX);
+  for (let i = 0; i < 4; i++) {
+    const r = radiusAt(t), rp = radiusSlope(t), rpp = radiusCurv(t);
+    const co = Math.cos(t), si = Math.sin(t);
+    const ex = x - (CX + r * co), ey = y - (CY + r * si);
+    const dx = rp * co - r * si,            dy = rp * si + r * co;            // C'(t)
+    const ddx = rpp * co - 2 * rp * si - r * co, ddy = rpp * si + 2 * rp * co - r * si;  // C''(t)
+    const f = ex * dx + ey * dy;
+    const fp = ex * ddx + ey * ddy - (dx * dx + dy * dy);
+    if (!isFinite(fp) || Math.abs(fp) < 1e-9) break;
+    t -= f / fp;
+  }
+  return t;
+}
+/*
+ * Signed perpendicular distance from the racing line — the quantity the road is actually painted by,
+ * since the asphalt is a stroke of the centreline path. Positive is outside the circuit.
+ * The server runs this identical function: one definition of "on the road" shared by what you SEE,
+ * what you GRIP, and what the server VALIDATES.
+ */
+function offsetFromLine(x, y, seedT) {
+  const t = nearestT(x, y, seedT);
+  const r = radiusAt(t);
+  const d = Math.hypot(x - (CX + Math.cos(t) * r), y - (CY + Math.sin(t) * r));
+  return Math.hypot(x - CX, y - CY) >= r ? d : -d;
+}
+// Tangent heading of the centreline at angle t (used by the rival and for respawns).
+function headingAt(t) {
+  const a = pointAt(t - 0.01), b = pointAt(t + 0.01);
+  return Math.atan2(b.y - a.y, b.x - a.x);
+}
+
+// Radius of curvature of the polar curve r(t) — the quantity the fold test turns on.
+function curveRadius(tr, t) {
+  const s = t + tr.rot, a = tr.a, h = tr.h, p = tr.p;
+  let r = 1, r1 = 0, r2 = 0;
+  for (let i = 0; i < 3; i++) {
+    r  += a[i] * Math.sin(h[i] * s + p[i]);
+    r1 += a[i] * h[i] * Math.cos(h[i] * s + p[i]);
+    r2 -= a[i] * h[i] * h[i] * Math.sin(h[i] * s + p[i]);
+  }
+  r *= RB; r1 *= RB; r2 *= RB;
+  const den = Math.abs(r * r + 2 * r1 * r1 - r * r2);
+  return den < 1e-9 ? Infinity : Math.pow(r * r + r1 * r1, 1.5) / den;
+}
+
+function trackMetrics(tr) {
+  const N = 720;
+  let minR = Infinity, maxR = -Infinity, minC = Infinity, len = 0, px = 0, py = 0;
+  const pts = [];
+  for (let i = 0; i < N; i++) {
+    const t = i / N * Math.PI * 2;
+    const s = t + tr.rot;
+    let rr = 1;
+    for (let k = 0; k < 3; k++) rr += tr.a[k] * Math.sin(tr.h[k] * s + tr.p[k]);
+    const r = RB * rr;
+    if (r < minR) minR = r;
+    if (r > maxR) maxR = r;
+    const c = curveRadius(tr, t);
+    if (c < minC) minC = c;
+    const x = Math.cos(t) * r, y = Math.sin(t) * r;
+    pts.push(x, y);
+    if (i) len += Math.hypot(x - px, y - py);
+    px = x; py = y;
+  }
+  return { minR, maxR, minC, len, pts, N,
+           clearance: minR - ROAD_W / 2, extent: maxR + ROAD_W / 2 };
+}
+
+// Closest approach between two points of the circuit that are far apart ALONG it. Curvature alone
+// cannot rule this out, and it is what would otherwise let two lobes of the track merge.
+function minSeparation(m) {
+  const N = m.N, pts = m.pts;
+  const gap = Math.ceil(SEP_MIN_DTHETA / (Math.PI * 2) * N);
+  let best = Infinity;
+  for (let i = 0; i < N; i++) {
+    for (let j = i + gap; j < N; j++) {
+      // Circular index distance — comparing raw (j - i) would treat samples either side of the wrap
+      // as opposite ends of the circuit and fail every track, including a known-good one.
+      if (Math.min(j - i, N - (j - i)) < gap) continue;
+      const dx = pts[i * 2] - pts[j * 2], dy = pts[i * 2 + 1] - pts[j * 2 + 1];
+      const d = dx * dx + dy * dy;
+      if (d < best) best = d;
+    }
+  }
+  return Math.sqrt(best);
+}
+
+function trackOk(m) {
+  if (m.minC < MIN_CORNER_R) return false;
+  if (m.clearance < MIN_CENTRE_CLR) return false;
+  if (m.extent > MAX_EXTENT) return false;
+  if (m.len < MIN_LENGTH || m.len > MAX_LENGTH) return false;
+  return minSeparation(m) >= MIN_SEPARATION;      // expensive, so it goes last
+}
+
+function shapeFrom(rnd) {
+  // Harmonics stay low-order and amplitude is DAMPED by harmonic number: a high harmonic carrying
+  // real amplitude is precisely what produces undrivable wiggle.
+  const pool = [2, 3, 4, 5, 6];
+  const h = [2 + (rnd() < 0.5 ? 0 : 1)];
+  while (h.length < 3) {
+    const c = pool[(rnd() * pool.length) | 0];
+    if (h.indexOf(c) < 0) h.push(c);
+  }
+  h.sort((x, y) => x - y);
+  const w = h.map((hi) => (1 / Math.pow(hi, 1.15)) * (0.6 + rnd() * 0.8));
+  const sum = w[0] + w[1] + w[2];
+  return { a: w.map((x) => x / sum * TOTAL_AMP), h,
+           p: h.map(() => rnd() * Math.PI * 2), rot: 0 };
+}
+
+// Put the start/finish on the STRAIGHTEST part of the circuit, so the grid never forms mid-hairpin.
+function straightestT(tr) {
+  let best = 0, bestC = -Infinity;
+  for (let i = 0; i < 360; i++) {
+    const t = i / 360 * Math.PI * 2, c = curveRadius(tr, t);
+    if (c > bestC) { bestC = c; best = t; }
+  }
+  return best;
+}
+
+// Deterministic and bounded: 240 attempts, then a circuit verified offline as a last resort. It has
+// never been needed across a 3000-seed sweep (worst case was 85 tries), but an unbounded search on a
+// page that has to render a frame is not something to leave to chance.
+const FALLBACK_TRK = { a: [0.2456, 0.1416, 0.0828], h: [2, 4, 5], p: [1.05, 4.12, 2.33], rot: 0 };
+function buildCircuit(seed) {
+  for (let k = 0; k < 240; k++) {
+    const tr = shapeFrom(mulberry32((seed ^ (k * 0x9E3779B1)) >>> 0));
+    const m = trackMetrics(tr);
+    if (trackOk(m)) { tr.rot = straightestT(tr); return tr; }
+  }
+  const fb = Object.assign({}, FALLBACK_TRK);
+  fb.rot = straightestT(fb);
+  return fb;
+}
+
+// One circuit per UTC day: everybody races the same track, and it rolls over at midnight UTC.
+function dailySeed(d) {
+  d = d || new Date();
+  return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+}
+const TRACK_SEED = dailySeed();
+TRK = buildCircuit(TRACK_SEED);
+const TRACK_ID = TRACK_SEED.toString(36).toUpperCase().slice(-5);
+
+// Boost pads go on the three straightest stretches, spread around the lap, rather than at fixed
+// angles that a generated circuit might drop into the middle of a corner.
+// A function, not a one-shot, because the SERVER runs this too and rebuilds the circuit at the
+// midnight-UTC rollover — pads baked at module load would still be sitting on yesterday's corners.
+function computeBoostAt(TRKx) {
+  const cand = [];
+  for (let i = 0; i < 180; i++) {
+    const t = i / 180 * Math.PI * 2;
+    cand.push({ t, c: curveRadius(TRKx, t) });
+  }
+  cand.sort((a, b) => b.c - a.c);
+  const out = [];
+  for (const c of cand) {
+    if (out.length >= 3) break;
+    let far = true;
+    for (const o of out) {
+      const d = Math.abs(((c.t - o) + Math.PI * 3) % (Math.PI * 2) - Math.PI);
+      if (d < 1.4) { far = false; break; }
+    }
+    if (far) out.push(c.t);
+  }
+  while (out.length < 3) out.push(out.length * 2.1);
+  return out.sort((a, b) => a - b);
+}
+let BOOST_AT = computeBoostAt(TRK);
+
+// Cosmetic randomness (grass mottling, asphalt grain, scenery placement) is seeded too, so the same
+// day's circuit looks pixel-identical for every player — the track is fully reproducible from its id.
+const vrnd = mulberry32((TRACK_SEED ^ 0x5f3759df) >>> 0);
+
+// ── Paint the track ──────────────────────────────────────────────────────────────────────────────
+const tex = document.createElement('canvas'); tex.width = tex.height = TEX;
+const tg = tex.getContext('2d');
+const mask = document.createElement('canvas'); mask.width = mask.height = MASKN;
+const mg = mask.getContext('2d');
+
+const SURF = { GRASS: 0, ROAD: 1, KERB: 2, BOOST: 3 };
+
+function paintTrack() {
+  // Grass base with a little organic variation so the ground is not a flat colour.
+  tg.fillStyle = '#16311f'; tg.fillRect(0, 0, TEX, TEX);
+  for (let i = 0; i < 14000; i++) {
+    const x = vrnd() * TEX, y = vrnd() * TEX, r = 8 + vrnd() * 46;
+    tg.fillStyle = vrnd() < 0.5 ? 'rgba(30,74,44,0.5)' : 'rgba(12,38,24,0.5)';
+    tg.beginPath(); tg.arc(x, y, r, 0, 7); tg.fill();
+  }
+  // Faint mown stripes — gives the eye something to read speed against off-track.
+  tg.globalAlpha = 0.06; tg.fillStyle = '#7fe6a0';
+  for (let x = 0; x < TEX; x += 132) tg.fillRect(x, 0, 66, TEX);
+  tg.globalAlpha = 1;
+
+  mg.fillStyle = '#000'; mg.fillRect(0, 0, MASKN, MASKN);   // mask: red channel 0 == grass
+
+  const N = 1400;
+  const path = [];
+  for (let i = 0; i <= N; i++) path.push(pointAt(i / N * Math.PI * 2));
+
+  const stroke = (ctx, w, style, scale) => {
+    ctx.beginPath();
+    for (let i = 0; i < path.length; i++) {
+      const p = path[i];
+      if (i === 0) ctx.moveTo(p.x * scale, p.y * scale); else ctx.lineTo(p.x * scale, p.y * scale);
+    }
+    ctx.closePath();
+    ctx.lineWidth = w * scale; ctx.strokeStyle = style; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.stroke();
+  };
+
+  // Kerb band sits just outside the asphalt, so paint it first and let the road cover the middle.
+  stroke(tg, ROAD_W + 30, '#c9c9d4', 1);
+  stroke(mg, ROAD_W + 30, 'rgb(160,0,0)', MASKN / TEX);      // 160 == kerb
+  // Red/white kerb dashes, drawn as short quads along the outer band.
+  for (let i = 0; i < N; i += 14) {
+    const p = path[i], q = path[(i + 7) % N];
+    tg.strokeStyle = ((i / 14) | 0) % 2 ? '#f4f4f8' : '#e23b4e';
+    tg.lineWidth = ROAD_W + 30; tg.lineCap = 'butt';
+    tg.beginPath(); tg.moveTo(p.x, p.y); tg.lineTo(q.x, q.y); tg.stroke();
+  }
+  // Asphalt.
+  stroke(tg, ROAD_W, '#31313f', 1);
+  stroke(mg, ROAD_W, 'rgb(100,0,0)', MASKN / TEX);           // 100 == road
+  // Asphalt grain + a darker racing line, so the road is not flat and the ideal line is hinted.
+  tg.save();
+  tg.globalAlpha = 0.35;
+  for (let i = 0; i < 26000; i++) {
+    const t = vrnd() * Math.PI * 2, p = pointAt(t);
+    const off = (vrnd() - 0.5) * ROAD_W * 0.92;
+    const h = headingAt(t) + Math.PI / 2;
+    tg.fillStyle = vrnd() < 0.5 ? '#3a3a4a' : '#282833';
+    tg.fillRect(p.x + Math.cos(h) * off, p.y + Math.sin(h) * off, 3, 3);
+  }
+  tg.restore();
+
+  // Centre dashes.
+  tg.setLineDash([26, 30]); tg.lineCap = 'butt';
+  stroke(tg, 5, 'rgba(240,240,255,0.28)', 1);
+  tg.setLineDash([]);
+
+  // Boost chevrons — deterministic pickups. Everyone who takes that line gets the same thing,
+  // which is the whole point: a reward for a good line, never a lottery ticket.
+  for (const t of BOOST_AT) {
+    const p = pointAt(t), h = headingAt(t);
+    for (let k = 0; k < 3; k++) {
+      tg.save();
+      tg.translate(p.x + Math.cos(h) * (k * 42 - 42), p.y + Math.sin(h) * (k * 42 - 42));
+      tg.rotate(h);
+      tg.fillStyle = k === 2 ? '#9945ff' : '#39d353';
+      tg.globalAlpha = 0.85;
+      tg.beginPath(); tg.moveTo(20, 0); tg.lineTo(-14, -30); tg.lineTo(-4, -30);
+      tg.lineTo(30, 0); tg.lineTo(-4, 30); tg.lineTo(-14, 30); tg.closePath(); tg.fill();
+      tg.restore();
+    }
+    mg.save();
+    mg.translate(p.x * MASKN / TEX, p.y * MASKN / TEX); mg.rotate(h);
+    mg.fillStyle = 'rgb(220,0,0)';                              // 220 == boost
+    mg.fillRect(-32 * MASKN / TEX, -34 * MASKN / TEX, 96 * MASKN / TEX, 68 * MASKN / TEX);
+    mg.restore();
+  }
+
+  // Start / finish chequer.
+  {
+    const p = pointAt(0), h = headingAt(0) + Math.PI / 2;
+    const cols = 12, cw = (ROAD_W + 24) / cols;
+    for (let r = 0; r < 3; r++) for (let c = 0; c < cols; c++) {
+      tg.save();
+      tg.translate(p.x, p.y); tg.rotate(h);
+      tg.fillStyle = (r + c) % 2 ? '#0d0d14' : '#f2f2f8';
+      tg.fillRect(-(ROAD_W + 24) / 2 + c * cw, -22 + r * 15, cw, 15);
+      tg.restore();
+    }
+  }
+}
+paintTrack();
+
+const texData = tg.getImageData(0, 0, TEX, TEX).data;
+
+// ── ROADSIDE SCENERY ────────────────────────────────────────────────────────────────────────────
+// The single biggest upgrade to SENSE OF SPEED. With only kerbs and grass to judge against, motion is
+// hard to read; objects streaming past the edge of vision fix that instantly. They ride the exact
+// billboard path the karts already use, so the cost is a handful of extra sprite draws — nothing
+// touches the per-pixel ground loop, which is where the frame time actually goes.
+const SCENERY = [];
+(function buildScenery() {
+  const N = 168;
+  for (let i = 0; i < N; i++) {
+    const t = i / N * Math.PI * 2;
+    for (const sgn of [-1, 1]) {
+      const r = radiusAt(t) + sgn * (ROAD_W / 2 + 46 + vrnd() * 190);
+      const kind = i % 9 === 0 ? 'board' : (i % 3 === 0 ? 'post' : 'tree');
+      SCENERY.push({
+        x: CX + Math.cos(t) * r, y: CY + Math.sin(t) * r, kind,
+        h: 0.8 + vrnd() * 0.5, seed: vrnd(),
+      });
+    }
+  }
+})();
+
+function drawScenery(g, cx, cy, sc, o) {
+  g.save();
+  g.translate(cx, cy);
+  g.scale(sc, sc);
+  if (o.kind === 'tree') {
+    g.fillStyle = 'rgba(0,0,0,0.3)';
+    g.beginPath(); g.ellipse(0, 2, 15, 5, 0, 0, 7); g.fill();
+    g.fillStyle = '#2a2018'; g.fillRect(-4, -26, 8, 28);
+    const cGreen = o.seed > 0.5 ? '#1f6b39' : '#17512c';
+    g.fillStyle = cGreen;
+    g.beginPath(); g.arc(0, -40, 20, 0, 7); g.fill();
+    g.beginPath(); g.arc(-13, -30, 14, 0, 7); g.fill();
+    g.beginPath(); g.arc(13, -31, 13, 0, 7); g.fill();
+    g.fillStyle = 'rgba(120,220,150,0.16)';
+    g.beginPath(); g.arc(-6, -46, 11, 0, 7); g.fill();
+  } else if (o.kind === 'post') {
+    g.fillStyle = 'rgba(0,0,0,0.3)';
+    g.beginPath(); g.ellipse(0, 2, 9, 3, 0, 0, 7); g.fill();
+    g.fillStyle = '#e8e8f0'; g.fillRect(-3, -30, 6, 32);
+    g.fillStyle = '#e23b4e'; g.fillRect(-3, -30, 6, 9);
+  } else {
+    g.fillStyle = 'rgba(0,0,0,0.3)';
+    g.beginPath(); g.ellipse(0, 2, 22, 5, 0, 0, 7); g.fill();
+    g.fillStyle = '#241c3d'; g.fillRect(-4, -22, 4, 24); g.fillRect(24, -22, 4, 24);
+    g.fillStyle = o.seed > 0.5 ? '#9945ff' : '#39d353';
+    g.fillRect(-8, -52, 40, 32);
+    g.fillStyle = 'rgba(255,255,255,0.85)';
+    g.fillRect(-3, -46, 30, 5); g.fillRect(-3, -37, 22, 5); g.fillRect(-3, -28, 26, 4);
+  }
+  g.restore();
+}
+const maskData = mg.getImageData(0, 0, MASKN, MASKN).data;
+// Skid marks are stamped DIRECTLY into the sampled track pixels. Drawing them as a separate decal
+// layer would mean a second texture read for every ground pixel every frame — doubling the most
+// expensive loop in the renderer. Written into texData instead, they cost one small stamp when laid
+// down and then nothing at all, forever. They also leave a visible record of the line people took.
+function skidStamp(x, y, strength) {
+  const ix = x | 0, iy = y | 0;
+  if (ix < 2 || iy < 2 || ix >= TEX - 2 || iy >= TEX - 2) return;
+  for (let dy = -2; dy <= 2; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      if (dx * dx + dy * dy > 5) continue;
+      const o = ((iy + dy) * TEX + (ix + dx)) * 4;
+      texData[o]     = texData[o]     * (1 - strength) | 0;
+      texData[o + 1] = texData[o + 1] * (1 - strength) | 0;
+      texData[o + 2] = texData[o + 2] * (1 - strength) | 0;
+    }
+  }
+}
+
+/*
+ * Which surface a point is on — COMPUTED, not sampled.
+ *
+ * This used to read the red channel of a 640px mask painted over a ~3.8k texture, and the resolution was
+ * the LESSER of its two problems. The classifier was `v>130 ? kerb : v>60 ? road`, and the kerb is
+ * painted at 160 — so any kerb pixel the canvas ANTI-ALIASED to between 37% and 81% coverage landed in
+ * the 60..130 window and was read back as ROAD. The result was a road that gripped up to 19 units wider
+ * than it was drawn along the outer kerb, and (where road pixels faded under 60) up to 19 units narrower
+ * elsewhere. Measured against this function: the geometry gives exactly ROAD_W/2 = 205.0 at every angle
+ * on the lap, while the mask wandered between 186 and 224.
+ *
+ * That is the render-vs-collision split that cost so much time in snake, and it also made the surface
+ * impossible for the server to reproduce, because the answer lived in a canvas. Now it comes straight
+ * from the geometry: one definition of "on the road" shared by the renderer, the physics, and the
+ * server's lap validation. The mask is still painted — the kerbs and pads are drawn from it — but
+ * nothing reads it for collision any more.
+ */
+function surfaceAt(x, y, seedT) {
+  const off = Math.abs(offsetFromLine(x, y, seedT));
+  if (off > ROAD_W / 2 + 15) return SURF.GRASS;       // kerb band is 15 either side, as painted
+  // Boost pads are rectangles laid along the track at BOOST_AT, so they are tested in the pad's own
+  // frame rather than by radius — same extents the mask fills.
+  for (let i = 0; i < BOOST_AT.length; i++) {
+    const bt = BOOST_AT[i], p = pointAt(bt), h = headingAt(bt);
+    const dx = x - p.x, dy = y - p.y;
+    const co = Math.cos(h), si = Math.sin(h);
+    const fwd = dx * co + dy * si, lat = -dx * si + dy * co;
+    if (fwd >= -32 && fwd <= 64 && lat >= -34 && lat <= 34) return SURF.BOOST;
+  }
+  return off <= ROAD_W / 2 ? SURF.ROAD : SURF.KERB;
+}
+
+// ── Canvas + low-res ground buffer ───────────────────────────────────────────────────────────────
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d', { alpha: false });
+const stage = document.getElementById('stage');
+let W = 0, H = 0, DPR = 1;
+
+const GW = 640, GH = 360;                       // ground buffer — upscaled, which also softens it
+const gbuf = document.createElement('canvas'); gbuf.width = GW; gbuf.height = GH;
+const gctx = gbuf.getContext('2d');
+const gimg = gctx.createImageData(GW, GH);
+const gpx = gimg.data;
+// A 32-bit view over the SAME buffer. The inner loop writes one word per pixel instead of four bytes,
+// which is the single cheapest speed-up available here because it is byte-for-byte the same output.
+// Guarded on endianness rather than assumed: on a big-endian host the packed words would come out with
+// the channels reversed, so we check once and keep the byte path if the layout is not what we expect.
+const gpx32 = new Uint32Array(gpx.buffer);
+
+/*
+ * REAR-VIEW MIRROR. A second, much smaller ground buffer rendered with the camera turned around, so
+ * what you see behind you is the real track and the real cars rather than a radar blip.
+ *
+ * Deliberately small and deliberately HALF RATE. It is the same per-pixel software loop as the main
+ * view, so it is not free — at 288x80 it is about a tenth of the main render, and refreshing it every
+ * other frame halves that again. A mirror updating at 120fps is indistinguishable from one updating at
+ * 240, and the frame budget is better spent on the road you are actually driving on.
+ */
+const _gpx32Main = gpx32, _gimgMain = gimg, _gctxMain = gctx;
+// 288x80 was a 3.6:1 letterbox — an 80px-tall render of a 3D ground view is so squashed there is
+// almost no DEPTH in it, which is why the mirror 'did not show correct': you could see that
+// something was behind you but not how far back. 2.4:1 gives the road real length without the
+// glass eating the screen. Cost is one buffer ~45% larger, drawn every other frame.
+const MW = 288, MH = 120;
+const mbuf = document.createElement('canvas'); mbuf.width = MW; mbuf.height = MH;
+const mctx = mbuf.getContext('2d');
+const mimg = mctx.createImageData(MW, MH);
+const mpx = mimg.data;
+const mpx32 = new Uint32Array(mpx.buffer);
+let _mirrorTick = 0;
+/*
+ * LAZY, not an IIFE at module scope. This ran immediately when it was first written, which put it
+ * ABOVE the `const HORIZON` it reads — a temporal-dead-zone ReferenceError that threw during script
+ * evaluation and took the entire game down with it: black canvas, every HUD field showing a dash, and
+ * nothing in the way of a clue. Deferring it to the first mirror draw means it cannot run before the
+ * constants it depends on exist, whatever order things end up in later.
+ */
+/*
+ * MIRROR ADJUSTMENT. A fixed mirror pointing dead astern is the wrong tool for a racing line: what you
+ * actually need to see is the car diving up your INSIDE, which is off to one side. So the glass can be
+ * angled, moved and resized, and it is remembered between sessions like any other mirror you set once.
+ *
+ * `angle` is degrees off straight-back. Positive splays it to look over your right shoulder, negative
+ * over your left. Clamped so it can never swing round far enough to become a second forward view.
+ */
+const MIR = {
+  angle: +(localStorage.getItem('kart.mir.a') || 0),
+  pos:   localStorage.getItem('kart.mir.p') || 'center',
+  size:  +(localStorage.getItem('kart.mir.s') || 1),
+  on:    localStorage.getItem('kart.mir.on') !== '0',
+};
+function mirSave() {
+  localStorage.setItem('kart.mir.a', String(MIR.angle));
+  localStorage.setItem('kart.mir.p', MIR.pos);
+  localStorage.setItem('kart.mir.s', String(MIR.size));
+  localStorage.setItem('kart.mir.on', MIR.on ? '1' : '0');
+}
+function mirAdjust(what, dir) {
+  if (what === 'angle') MIR.angle = Math.max(-55, Math.min(55, MIR.angle + dir * 5));
+  if (what === 'pos')   MIR.pos = MIR.pos === 'center' ? 'left' : MIR.pos === 'left' ? 'right' : 'center';
+  if (what === 'size')  MIR.size = MIR.size >= 1.3 ? 0.75 : +(MIR.size + 0.25).toFixed(2);
+  if (what === 'on')    MIR.on = !MIR.on;
+  mirSave();
+  netNote('MIRROR  ' + (MIR.on ? (MIR.pos + ' · ' + (MIR.angle > 0 ? '+' : '') + MIR.angle + '° · ' + Math.round(MIR.size * 100) + '%') : 'off'));
+}
+
+/*
+ * CONTROLS PANEL. Two labellings of the SAME actions, and it shows the one you are actually holding —
+ * telling a pad player to "hold SHIFT" makes them translate every line, and the two schemes genuinely
+ * differ (drift is SHIFT on a keyboard but LB on a pad, and defend is E vs A).
+ *
+ * Switching is driven by GP.on, which flips the moment a pad reports input, so picking up a controller
+ * mid-session re-labels the panel without anything being configured.
+ */
+const CTRL_ROWS = [
+  ['Throttle',   'W / ↑',   'RT'],
+  ['Brake',      'S / ↓',   'LT'],
+  ['Steer',      '← → / A D', 'Stick / D-pad'],
+  ['Drift',      'SHIFT',      'LB'],
+  ['Boost',      'SPACE',      'RB'],
+  ['Attack',     'Q',          'Y'],
+  ['Defend',     'E',          'A'],
+  ['Mirror',     ', . ; ’',  '—'],
+  ['Lobby',      'L',          'Start'],
+  ['Leave',      '—',        'hold B'],
+];
+let _ctrlsMode = null, _ctrlsPinned = false;
+function renderCtrls() {
+  const box = document.getElementById('ctrlsRows'), mode = document.getElementById('ctrlsMode');
+  if (!box) return;
+  const pad = !!GP.on;
+  if (_ctrlsMode === pad) return;             // only rebuild when the input scheme actually changes
+  _ctrlsMode = pad;
+  if (mode) mode.textContent = pad ? 'CONTROLLER' : 'KEYBOARD';
+  box.innerHTML = CTRL_ROWS.map((r) =>
+    '<div class="cr"><i>' + (pad ? r[2] : r[1]) + '</i><span>' + r[0] + '</span></div>').join('');
+}
+function showCtrls(on) {
+  const el = document.getElementById('ctrls');
+  if (el) el.classList.toggle('on', !!on);
+}
+
+let _mirrorSkyDone = false;
+function paintMirrorSky() {
+  if (_mirrorSkyDone) return;
+  _mirrorSkyDone = true;
+  const hy = (MH * HORIZON) | 0;
+  for (let y = 0; y < hy; y++) {
+    const f = y / hy;
+    const r = (0x14 + (0xff - 0x14) * Math.pow(f, 3.2)) | 0;
+    const g = (0x0b + (0x7a - 0x0b) * Math.pow(f, 3.0)) | 0;
+    const b = (0x2e + (0x4d - 0x2e) * Math.pow(f, 2.2)) | 0;
+    let o2 = y * MW * 4;
+    for (let x = 0; x < MW; x++) { mpx[o2] = r; mpx[o2 + 1] = g; mpx[o2 + 2] = b; mpx[o2 + 3] = 255; o2 += 4; }
+  }
+}
+
+/*
+ * Draw the mirror. Camera sits at the kart looking BACKWARDS, so the image is what is actually behind
+ * you — same track, same cars, same physics positions. It is then flipped horizontally when blitted,
+ * because a mirror shows left and right reversed and a rear view that does not feels wrong to read:
+ * a car appearing on the right of the glass has to be the car on your right.
+ */
+function drawMirror(g, W, H, refresh) {
+  if (!MIR.on) return;
+  paintMirrorSky();
+  if (refresh) {
+    const back = me.ang + Math.PI + MIR.angle * Math.PI / 180;
+    renderGround(me.x, me.y, back, MW, MH, mpx32, mimg, mctx);
+
+    // Cars behind, projected with the same maths the main view uses so they sit on the road correctly.
+    const cars = NET.on ? [...NET.remotes.values()] : [rival];
+  const shots = [];
+  for (const o2 of cars) {
+    if (!o2) continue;
+    const q = projectIn(o2.x, o2.y, me.x, me.y, back, MW, MH);
+    if (!q || q.fd > 1400 || q.x < -0.2 || q.x > 1.2) continue;
+    shots.push({ q, k: o2 });
+  }
+  shots.sort((a, b) => b.q.fd - a.q.fd);
+    for (const sp of shots) {
+      const sc = sp.q.s * KART_SPR * (MW / 640) * 0.9;
+      drawKart(mctx, sp.q.x * MW, sp.q.y * MH, sc, 0, 0, sp.k.livery || LIVERY.rival, sp.k, false);
+    }
+  }
+
+  // Blit, mirrored left-to-right, into a framed panel at the top.
+  const bw = Math.min(300, W * 0.30) * MIR.size, bh = bw * (MH / MW);
+  const bx = MIR.pos === 'left' ? W * 0.03 : MIR.pos === 'right' ? W * 0.97 - bw : (W - bw) / 2;
+  const by = Math.max(6, H * 0.012);
+  g.save();
+  g.globalAlpha = 0.96;
+  g.translate(bx + bw, by); g.scale(-1, 1);
+  g.drawImage(mbuf, 0, 0, bw, bh);
+  g.restore();
+  g.strokeStyle = 'rgba(200,190,240,0.55)'; g.lineWidth = 2;
+  g.strokeRect(bx, by, bw, bh);
+  g.fillStyle = 'rgba(0,0,0,0.35)';
+  g.fillRect(bx, by + bh, bw, 2);
+}
+
+// project() hardcodes the main buffer's dimensions; the mirror needs the same maths at its own size.
+function projectIn(wx, wy, camX, camY, camAng, W_, H_) {
+  const dx = wx - camX, dy = wy - camY;
+  const fwdX = Math.cos(camAng), fwdY = Math.sin(camAng);
+  const rgtX = -Math.sin(camAng), rgtY = Math.cos(camAng);
+  const fd = dx * fwdX + dy * fwdY;
+  if (fd < 12) return null;
+  const side = dx * rgtX + dy * rgtY;
+  const hy = (H_ * HORIZON) | 0;
+  const dyPix = (CAM_H * FOCAL) / fd;
+  const hw = fd * (W_ / 2) / FOCAL;
+  return { x: 0.5 + side / (2 * hw), y: (hy + dyPix) / H_, s: dyPix / H_ * 2.6, fd };
+}
+const LITTLE_ENDIAN = (() => {
+  const u32 = new Uint32Array(1), u8 = new Uint8Array(u32.buffer);
+  u32[0] = 0x11223344;
+  return u8[0] === 0x44;
+})();
+
+function resize() {
+  const r = stage.getBoundingClientRect();
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = Math.max(320, Math.round(r.width)); H = Math.max(180, Math.round(r.height));
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+}
+new ResizeObserver(resize).observe(stage);
+resize();
+
+// ── Camera / projection constants ────────────────────────────────────────────────────────────────
+const HORIZON = 0.40;             // fraction of buffer height where the horizon sits
+// Scaled at 0.68 so a wider track genuinely LOOKS wider (you can read the lanes) without the road
+// swallowing the viewport.
+const CAM_H = 58 * SC * 0.68;
+const CAM_BACK = 132 * SC * 0.68;
+const FOCAL = 300;                // focal length in buffer pixels — controls FOV / sense of speed
+const FOG_START = 900 * SC * 0.55, FOG_END = 2400 * SC * 0.55;
+
+// ── ONE PROJECTION FOR EVERY KART ───────────────────────────────────────────────────────────────
+// Karts are billboards, so BOTH their size and their screen position must come from the same
+// projection as the ground: scale = FOCAL / distance, y = horizon + CAM_H*FOCAL/distance.
+//
+// Two bugs came out of not doing that. First the player used a hardcoded scale (hand-tuned for the
+// original camera distance) while rivals used a different constant, so pulling the camera back for
+// the wider track made rivals render ~4x too small. Then, with sizes matched, the player was still
+// DRAWN at a fixed screen height (0.82) that corresponds to a nearer distance than it actually sits
+// at — so a rival that looked level with you was really 40 units closer and came out ~15% bigger,
+// and everything appeared to shrink too fast as it pulled away.
+//
+// The player is now projected from its own world position like anything else, so nothing can drift
+// out of agreement again. KART_SPR is a mild hero scale: a kart reads at roughly 70% of a lane.
+const KART_SPR = 0.95;
+const FOG = [0x2a, 0x1c, 0x4e];
+
+// ── Kart physics ─────────────────────────────────────────────────────────────────────────────────
+// The speedo readout is two named factors rather than one magic number, so the unit is obvious at the
+// call site: internal sim units scale to a km/h-shaped figure, which then converts to miles. (The old
+// single 0.62 was ambiguous precisely BECAUSE it happens to equal the km-to-mile ratio.)
+const KMH_PER_UNIT = 0.62, MPH_PER_KMH = 0.621371;
+// Cruise raised 10% (360 -> 396) and acceleration with it, so the higher ceiling is actually
+// reachable rather than just a number the kart creeps toward.
+const MAX_SPD = 396 * SPD_SC, ACCEL = 286 * SPD_SC, BRAKE = 460 * SPD_SC, DRAG = 120 * SPD_SC;
+// Boosted ceiling is 5% above the old best: previously 360 + 460 = 820, now 396 + 465 = 861.
+const BOOST_POW = 465 * SPD_SC, BOOST_ACC = 520 * SPD_SC;
+const BOOST_MAX = 3.2;                                // seconds of fuel the bar holds
+const TIER_FUEL = [0.8, 1.5, 2.2];                    // fuel a drift is worth AT each tier boundary
+const PAD_TIME  = 1.28;                               // boost-pad kick, unchanged
+const TURN = 2.05;                                    // rad/s at speed
+// Off-road SLOWS you, it must never trap you. The first pass had drag (520/s) higher than ACCEL
+// (260/s), so holding the throttle on grass still netted -260/s and you ground to a permanent halt
+// with no way out. Drag now sits well under ACCEL: you bleed speed hard on contact, crawl at the
+// off-road cap, and can always drive yourself back onto the road.
+// Grass should cost you the race, not the ability to drive. Cap is ~60% of top speed and the drag
+// sits far under ACCEL, so you always accelerate back up to that cap and steer out.
+const OFFROAD_MAX = 215 * SPD_SC, OFFROAD_DRAG = 105 * SPD_SC;
+const REV_MAX = 130 * SPD_SC;     // reverse tops out well under forward speed — for recovery, not racing
+const DRIFT_BASE = 0.95, DRIFT_STEER = 1.25, DRIFT_SLIDE = 0.34;
+
+// ── SLIPSTREAM / DIRTY AIR ────────────────────────────────────────────────────────────────────────
+// One wake. Behind someone you get a tow (straight-line speed) AND dirty air (less grip). Pairing the
+// two is what stops the tow from being a free gift to the car behind: the gain is only worth keeping
+// while the road is straight, so the pass is a decision about WHEN to pull out, not a reward for
+// sitting there. Every number below is deliberately modest — this exists to keep the pack together
+// and make the last corner matter, not to decide races on its own.
+const SLIP_MIN = 34;                 // inside this you are touching, not drafting (KART_R*2 = 52)
+const SLIP_MAX = 340 * SC * 0.5;     // ~600 units, about eleven kart lengths
+const SLIP_COS = 0.86;               // cone half-angle behind them, cos(~31 deg)
+const SLIP_ACC = 150 * SPD_SC;       // extra accel at FULL exposure
+const SLIP_CAP = 78 * SPD_SC;        // ...and how far it may push you past the normal top speed
+// The cornering half, set against the tow rather than by feel. MEASURED with an identical autopilot
+// driving a 12-second stint of this circuit, once alone and once glued 150 units behind a car:
+//     alone   382.9 deg of track swept, avg speed 673, 9 units off the line,  0% on grass
+//     in tow  379.6 deg (-0.86%),       avg speed 690, 53 units off the line, 9.2% on grass
+// So the wake is worth ~2.5% more speed while you sit in it, and refusing to leave it costs you
+// track position anyway. That is the property that matters: the tow is worth taking on a straight and
+// must be given up before turn-in. Lower these and the correct play becomes never pulling out, which
+// collapses the mechanic into "whoever is behind is simply faster" — i.e. rubber-banding.
+const DIRTY_TURN  = 0.26;            // fraction of steering authority lost at full exposure
+const DIRTY_SLIDE = 0.30;            // ...and extra outward slide while drifting in someone's air
+
+/* ── ATTACK & DEFEND — the paired tools ────────────────────────────────────────────────────────────
+ * One move for the car behind, one for the car in front, and they are balanced by STRUCTURE rather
+ * than by picking numbers until it feels fair:
+ *
+ *  1. BOTH SPEND THE SAME DRIFT RESERVE. Every point spent attacking is a point you do not have to
+ *     defend with, and vice versa. Spam is self-punishing, so neither needs a cooldown policing it.
+ *  2. EACH IS INERT OUTSIDE ITS SITUATION. Attack does nothing unless a rival is genuinely ahead and
+ *     in range; defend does nothing unless someone is genuinely closing on you from behind. This is
+ *     the rule that stops either becoming a free straight-line boost, which is how a mechanic like
+ *     this normally gets exploited — and it is why the cost is only taken when it actually fires.
+ *  3. BOTH ARE VISIBLE. The kart lights up, so it is a read rather than a coin flip: the defender can
+ *     see the dive coming and answer it.
+ *
+ * The exchange: attacker spends alone -> the pass sticks. Both spend -> the attack is blunted and the
+ * defender holds position, but is now empty for the next corner. Defender spends on a bluff -> they
+ * have wasted reserve and the attacker still has theirs. Every branch costs somebody something.
+ *
+ * The defender's edge is slightly the better one, which is correct: that is how real racing works and
+ * it is what stops attacking being spammable. The attacker is compensated by arriving with the tow.
+ */
+const ATK_COST  = 0.55;   // seconds of drift reserve
+// Tuned UP after play: at 1.25s and +96 the surge was real on paper but did not read as an event —
+// in the tow you are already near the raised cap, so most of the extra acceleration had nowhere to go
+// and it expired before it had moved you alongside. An attack has to be long enough to complete a pass
+// or it is just a noise. 1.8s is about one corner-exit-to-braking-zone, which is the window a pass
+// actually happens in, and the bigger ceiling is what makes the closing speed visible.
+const ATK_TIME  = 1.8;
+const ATK_ACC   = 340 * SPD_SC;
+const ATK_CAP   = 140 * SPD_SC;  // ~+35% over the normal ceiling, on top of whatever the tow gives
+const ATK_MIN   = 0.10;   // minimum wake exposure — i.e. you must actually be behind someone
+const DEF_COST  = 0.45;   // slightly cheaper: defending is the reactive move
+const DEF_TIME  = 1.45;   // ...and lasts slightly longer, which is the defender's structural edge
+const DEF_GRIP  = 0.34;   // extra cornering grip while holding the door shut
+const DEF_HOLD  = 62 * SPD_SC;   // a little drive off the corner so the defence is not purely passive
+const DEF_MIN   = 0.10;   // minimum threat from behind before it will fire at all
+const THREAT_COS = 0.80;  // cone in front of a pursuer for them to count as attacking you
+
+/* ── TYRE / GRIP BUDGET ────────────────────────────────────────────────────────────────────────────
+ * A resource you SPEND by driving hard and get back by driving smoothly. Leaning on the car — big
+ * steering angles at speed, long drifts, scrabbling across the grass — wears the tyre and you lose
+ * cornering grip for it; a tidy lap keeps it.
+ *
+ * This is emphatically NOT rubber-banding, and the difference is worth being precise about because
+ * they look similar from the outside. Rubber-banding reads the RACE (who is ahead) and hands out
+ * advantage to close a gap, so the better driver stops being reliably faster and a bet on them stops
+ * being priceable. This reads only YOUR OWN inputs. Two identical drivers get identical wear, the
+ * leader is never punished for leading, and nobody is given anything back — the only way to have grip
+ * late is to have spent less of it early.
+ *
+ * What it buys the racing: an overtaking WINDOW that is earned rather than granted. Someone who
+ * attacked every corner for two laps genuinely has less car left than someone who managed it, so a
+ * pass becomes available near the end without anyone's lap time being fudged. It also makes a race
+ * legible to a spectator — the bar is on screen, so you can see the pass coming before it happens.
+ *
+ * The floor is deliberately high: worn tyres cost you time, they never take the car away from you.
+ */
+// Calibrated against the race, not by feel. A race is 3 laps of ~13-15s, so ~45s of driving. At full
+// load the effective rate is (1 - TYRE_CALM) * TYRE_WEAR, which puts the floor ~31s away: a driver who
+// attacks EVERY corner arrives at the last lap with nothing left, while a measured one still has grip
+// in hand. That is the whole point — the budget has to span the race. The first pass used 0.052 and
+// burned the entire budget in about six seconds of drifting, which is not a strategy, just a stall.
+const TYRE_WEAR    = 0.011;
+const TYRE_DRIFT   = 0.85;    // a drift counts as this much load on top of the steering itself
+const TYRE_OFFROAD = 0.55;    // grass and kerbs chew it too
+const TYRE_RECOVER = 0.008;   // per second of genuinely smooth driving — deliberately slower than wear
+const TYRE_CALM    = 0.18;    // load below this counts as "smooth" and lets the tyre come back
+const TYRE_MIN     = 0.72;    // worst case keeps 72% of cornering grip: a handicap, never a spin
+
+// Who can throw a wake: online, every other car in the lobby; offline, the scripted pace car. Reuses
+// one array because this is read every frame at up to 240fps and a fresh allocation per frame is a
+// pointless thing to hand the GC in a game loop.
+const _wake = [];
+function wakeSources() {
+  _wake.length = 0;
+  if (NET.on) { for (const r of NET.remotes.values()) if (!r.finished) _wake.push(r); }
+  else _wake.push(rival);
+  return _wake;
+}
+const FLIP_HOLD = 0.14;                               // opposite lock held before a mid-drift flip takes
+const DRIFT_MAX_HOLD = 8;                             // watchdog ceiling; longest real charge tier is 3.1s
+const TIERS = [1.0, 2.0, 3.1];                        // seconds held for blue / orange / purple
+
+// What a drift of `dT` seconds is worth, as a CONTINUOUS curve rather than three steps. The payout was
+// a lookup on the tier you had reached, which meant the reserve could only ever jump: nothing at all
+// happened while you were charging, then a lump landed the instant you let go. You could not watch the
+// bar fill, so the one number that tells you whether a corner was worth committing to was invisible at
+// exactly the moment you were deciding.
+//
+// This is a straight line between the same milestones, so the balance is UNCHANGED where it was
+// defined — hold to blue and you still get 0.8, to orange 1.5, to purple 2.2 — and everything between
+// them is now interpolated instead of rounded down to the tier you last cleared. Partial commitment
+// gets partial credit, which also removes the dead zone where the last 0.9s of a drift earned nothing.
+function driftFuel(dT) {
+  if (dT <= 0) return 0;
+  if (dT >= TIERS[2]) return TIER_FUEL[2];
+  const lo = dT < TIERS[0] ? 0 : dT < TIERS[1] ? 1 : 2;
+  const t0 = lo === 0 ? 0 : TIERS[lo - 1], f0 = lo === 0 ? 0 : TIER_FUEL[lo - 1];
+  const t1 = TIERS[lo], f1 = TIER_FUEL[lo];
+  return f0 + (f1 - f0) * ((dT - t0) / (t1 - t0));
+}
+// Owner tuning: +15% power, 1.5x duration. A mini-turbo now genuinely changes the outcome of a
+// corner exit rather than just feeling like one, which is what makes banking it a real decision.
+const TIER_COL = ['#48b7ff', '#ff9a3c', '#c77dff'];
+
+// STARTING GRID — everyone lines up SIDE BY SIDE across the road, which is the whole reason the track
+// widens with the field (3 lanes + 1 per car). Slots are spaced ROAD_W/(PLAYERS+1) apart and centred,
+// so there is always a clear margin to the kerbs no matter how big the grid is, and the spacing stays
+// wider than a kart at every field size.
+function gridOffset(idx) { return (idx - (PLAYERS - 1) / 2) * (ROAD_W / (PLAYERS + 1)); }
+function mkKart(t, idx) {
+  const p = pointAt(t), h = headingAt(t);
+  const off = gridOffset(idx || 0), perp = h + Math.PI / 2;
+  return {
+    x: p.x + Math.cos(perp) * off, y: p.y + Math.sin(perp) * off, ang: h, spd: 0,
+    lane: off,
+    drifting: false, driftDir: 0, driftT: 0, driftYaw: 0,
+    lap: 1, sectors: new Set(), lapStart: 0, best: 0, prevSec: -1,
+    fuel: 0, burning: false, wasBurning: false, padT: 0, slip: 0,   // boost reserve + slipstream
+    tyre: 1,                           // grip budget: 1 = fresh, TYRE_MIN = worn out
+    atkT: 0, defT: 0, threat: 0,       // attack/defend timers + how hard someone is closing on you
+    brakeT: 0, chainT: 0, chainDir: 0, chainCharge: 0,   // trail braking + drift chaining
+    flipT: 0,                          // how long opposite lock has been held, for the mid-drift flip
+    driftHold: 0, driftLockout: false, // stuck-drift watchdog
+    steerVis: 0, braking: false, wheelPhase: 0,          // smoothed state the sprite animates from
+  };
+}
+
+// ── LIVERIES ──────────────────────────────────────────────────────────────────────────────────────
+// Every driver is one of these rather than a bare colour string. Kart, suit, helmet and number all
+// come from the same entry, so a racer is recognisable at a glance from behind — which is what you
+// need the moment there are more than two on track and money is riding on which one you are watching.
+const LIVERY = {
+  me:    { body: '#39d353', dark: '#1b7a33', trim: '#0d5a24', suit: '#1f7d3c', glove: '#123c1e',
+           helmet: '#f4f7f5', helmet2: '#39d353', visor: '#101a2e', num: '7',  numInk: '#0b2415' },
+  rival: { body: '#ff5f7a', dark: '#a32e46', trim: '#6f1f30', suit: '#8e2a3e', glove: '#3a1119',
+           helmet: '#2b2436', helmet2: '#ffd166', visor: '#0d0714', num: '4',  numInk: '#ffe3e9' },
+};
+// Liveries for online opponents, derived from one hue each so a full grid of eight is still readable
+// at a glance — the number on the car is what you actually track in a mirror, so every car gets one.
+const NET_LIVERIES = ['#ff5f7a', '#4aa3ff', '#ffb03a', '#c77dff', '#2fd4c4', '#ff7ad9', '#9be24a', '#ff5a3c']
+  .map((c, i) => {
+    const dim = (h, f) => '#' + [1, 3, 5].map((o) => Math.round(parseInt(h.substr(o, 2), 16) * f)
+      .toString(16).padStart(2, '0')).join('');
+    return { body: c, dark: dim(c, 0.62), trim: dim(c, 0.42), suit: dim(c, 0.55), glove: dim(c, 0.28),
+             helmet: '#2b2436', helmet2: c, visor: '#0d0714', num: String(i + 1), numInk: '#0b0a14' };
+  });
+// ── SECTOR SPLITS ───────────────────────────────────────────────────────────────────────────────
+// Three sectors, each compared against your best, so you learn WHICH corner is costing you rather
+// than just that the lap was slow. Pure skill feedback, and it gives a player something to grind
+// against — which is what a wagered racer needs.
+
+let me = mkKart(0, 0);
+let rival = mkKart(0, 1); rival.t = 0;                 // rival advances along the centreline
+let sparks = [];
+
+// ── Input ────────────────────────────────────────────────────────────────────────────────────────
+const keys = Object.create(null);
+const DOWN = { ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1, ' ': 1 };
+// Shift used to be a LATCH with many setters and one clearer: any keydown while Shift was physically
+// held set it true (`|| e.shiftKey`), but only a Shift keyup ever set it false. Miss that one keyup —
+// alt-tab, a click off the canvas, the OS swallowing it — and drift stayed on forever. Because a held
+// drift rotates the kart every frame, that read as "the drift gets stuck" and you span on the spot.
+//
+// Every KeyboardEvent already carries the live modifier state, so shift is now DERIVED from
+// `e.shiftKey` on both edges rather than latched. On the Shift keyup itself `e.shiftKey` is already
+// false, so release is exact, and no sequence of other keys can re-latch it.
+function clearKeys() { for (const k in keys) keys[k] = false; }
+addEventListener('keydown', (e) => {
+  keys[e.key.toLowerCase()] = true;
+  keys.shift = e.shiftKey || e.key === 'Shift';
+  if (DOWN[e.key]) e.preventDefault();
+  if (e.key === ',') mirAdjust('angle', -1);      // swing the glass toward your left shoulder
+  if (e.key === '.') mirAdjust('angle', 1);       // ...and toward your right
+  if (e.key === ';') mirAdjust('pos');            // centre / left / right
+  if (e.key === "'") mirAdjust('size');           // cycle the size
+  if (e.key.toLowerCase() === 'k') mirAdjust('on');
+  if (e.key.toLowerCase() === 'h') { _ctrlsPinned = !_ctrlsPinned; }
+  if (e.key.toLowerCase() === 'l') { lobbyEl.classList.contains('on') ? closeLobby() : openLobby(); }
+  if (e.key.toLowerCase() === 'r') reset();
+  if (e.key.toLowerCase() === 'm') {          // M toggles engine audio
+    audioOn = !audioOn;
+    if (!audioOn && engGain) { engGain.gain.value = 0; skidGain.gain.value = 0; }
+    else startAudio();
+  }
+  startAudio();
+});
+addEventListener('keyup', (e) => {
+  keys[e.key.toLowerCase()] = false;
+  keys.shift = e.shiftKey && e.key !== 'Shift';
+});
+// ── GAMEPAD ───────────────────────────────────────────────────────────────────────────────────────
+// Everything the keyboard does, a controller does — driving AND the lobby, because a pad that can
+// race but can't join a race is not controller support.
+//
+//   Left stick / D-pad   steer                RT or A     throttle
+//   LT or B (held)       brake / reverse      LB or X     drift
+//   RB or Y              boost                Start       lobby
+//   Back/Select          reset                Hold B 0.7s leave the game (embedded on the site)
+//
+// In the LOBBY the same stick moves a highlight through the panel's own buttons and A presses one,
+// so create / quick race / join a specific row / pick a region / READY are all reachable. That is
+// deliberately handled HERE rather than by the site's GamepadNav: the browser gives pad input to the
+// focused document, and while you are in the game that document is this iframe.
+const GP = { on: false, steer: 0, gas: false, brake: false, drift: false, boost: false, attack: false, defend: false, bHeld: 0, prev: {}, rep: {}, idx: -1 };
+const GP_DZ = 0.28;
+function gpPoll(dt) {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let p = null;
+  for (const q of pads) if (q && q.connected) { p = q; break; }
+  GP.on = !!p;
+  if (!p) { GP.steer = 0; GP.gas = GP.brake = GP.drift = GP.boost = GP.attack = GP.defend = false; GP.bHeld = 0; return; }
+  const btn = (i) => !!(p.buttons[i] && p.buttons[i].pressed);
+  const val = (i) => (p.buttons[i] ? p.buttons[i].value : 0);
+  const edge = (i) => { const d = btn(i), w = GP.prev[i]; GP.prev[i] = d; return d && !w; };
+
+  // Analogue triggers where the pad has them, face buttons where it doesn't — one binding set that
+  // works on an Xbox pad, a DualSense and a cheap USB gamepad without a settings screen.
+  const rt = Math.max(val(7), btn(0) ? 1 : 0);
+  const lt = Math.max(val(6), btn(1) && GP.bHeld < 0.25 ? 1 : 0);
+  const ax = p.axes[0] || 0;
+  GP.steer = Math.abs(ax) > GP_DZ ? ax : 0;
+  if (btn(14)) GP.steer = -1;
+  if (btn(15)) GP.steer = 1;
+  GP.gas = rt > 0.35;
+  GP.brake = lt > 0.35;
+  GP.drift = btn(4) || btn(2);
+  GP.attack = btn(3);          // Y — dive at the car ahead
+  // A, not B. B is already 'hold to leave', so defending — which you hold through a corner — was
+  // tripping the leave timer and throwing the lobby up over a live race.
+  GP.defend = btn(0);          // A — shut the door
+  GP.boost = btn(5) || btn(3);
+
+  // Hold B to leave. A tap is "brake"; only a deliberate hold backs out, so nobody exits a race by
+  // braking. Embedded on the platform this hands you back to the site; standalone it opens the lobby.
+  GP.bHeld = btn(1) ? GP.bHeld + dt : 0;
+  if (GP.bHeld > 0.7) {
+    GP.bHeld = -99;                                   // fire once per hold
+    if (EMBEDDED) { try { location.assign('/games/kart'); } catch (_) {} }
+    else if (!lobbyEl.classList.contains('on')) openLobby();
+  }
+  if (edge(9)) { lobbyEl.classList.contains('on') ? closeLobby() : openLobby(); startAudio(); }
+  if (edge(8)) reset();
+
+  // Lobby / grid panel navigation. Only while something is actually on screen to navigate.
+  const inMenu = lobbyEl.classList.contains('on') || gridPanelOpen();
+  if (inMenu) {
+    const now = performance.now();
+    const step = (dir, key) => {
+      const down = dir();
+      if (!down) { GP.rep[key] = 0; return false; }
+      if (!GP.rep[key]) { GP.rep[key] = now + 380; return true; }
+      if (now >= GP.rep[key]) { GP.rep[key] = now + 120; return true; }
+      return false;
+    };
+    const ay = p.axes[1] || 0;
+    if (step(() => btn(13) || ay > 0.55, 'd')) gpMenuMove(1);
+    if (step(() => btn(12) || ay < -0.55, 'u')) gpMenuMove(-1);
+    if (step(() => btn(15) || ax > 0.55, 'r')) gpMenuMove(1);
+    if (step(() => btn(14) || ax < -0.55, 'l')) gpMenuMove(-1);
+    if (edge(0)) { const e = gpMenuCurrent(); if (e) { e.click(); startAudio(); } }
+    // A pad must never be able to drive while a menu is up over the track.
+    GP.gas = GP.brake = GP.drift = GP.boost = GP.attack = GP.defend = false; GP.steer = 0;
+  } else if (document.querySelector('.gpsel')) {
+    document.querySelectorAll('.gpsel').forEach((e) => e.classList.remove('gpsel'));
+  }
+}
+function gridPanelOpen() {
+  const g = document.getElementById('gridPanel');
+  return !!g && getComputedStyle(g).display !== 'none' && g.offsetParent !== null;
+}
+function gpMenuItems() {
+  const root = lobbyEl.classList.contains('on') ? lobbyEl : document.getElementById('gridPanel');
+  if (!root) return [];
+  // Every control the panel actually offers, in DOM order: region buttons, the name field, each
+  // lobby row's JOIN/WATCH, then CREATE / QUICK RACE / PRACTICE ALONE — and on the grid panel,
+  // READY and LEAVE. Nothing is reachable by mouse that is not reachable here.
+  return Array.from(root.querySelectorAll('button,input,.rgn'))
+    .filter((e) => e.offsetParent !== null && getComputedStyle(e).display !== 'none');
+}
+function gpMenuCurrent() { return document.querySelector('.gpsel'); }
+function gpMenuMove(d) {
+  const items = gpMenuItems();
+  if (!items.length) return;
+  const cur = gpMenuCurrent();
+  let i = items.indexOf(cur);
+  i = i < 0 ? 0 : (i + d + items.length) % items.length;
+  document.querySelectorAll('.gpsel').forEach((e) => e.classList.remove('gpsel'));
+  items[i].classList.add('gpsel');
+  try { items[i].focus({ preventScroll: true }); } catch (_) {}
+  items[i].scrollIntoView({ block: 'nearest' });
+}
+
+// Losing focus mid-corner used to leave EVERY key held down, because keyup never arrives for a window
+// that is no longer focused. Releasing them all on blur is what stops a stuck throttle or drift.
+addEventListener('blur', clearKeys);
+document.addEventListener('visibilitychange', () => { if (document.hidden) clearKeys(); });
+stage.addEventListener('pointerdown', () => { stage.focus(); startAudio(); });
+
+// ── Engine + skid audio (WebAudio, no assets) ────────────────────────────────────────────────────
+// OFF BY DEFAULT (owner). The synthesised engine and the band-passed skid noise read as static
+// rather than as a car, which is worse than silence — a bad engine loop actively makes a game feel
+// cheap. Left in behind a toggle (M) rather than deleted, because proper engine audio is worth
+// revisiting later with real samples instead of oscillators.
+let audioOn = false;
+let actx = null, eng = null, engGain = null, skid = null, skidGain = null;
+function startAudio() {
+  if (!audioOn) return;
+  if (actx) { if (actx.state === 'suspended') actx.resume(); return; }
+  try {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    eng = actx.createOscillator(); eng.type = 'sawtooth'; eng.frequency.value = 60;
+    const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+    engGain = actx.createGain(); engGain.gain.value = 0.0;
+    eng.connect(lp); lp.connect(engGain); engGain.connect(actx.destination); eng.start();
+    // Skid = filtered white noise, opened up while drifting.
+    const len = actx.sampleRate * 2, nb = actx.createBuffer(1, len, actx.sampleRate), d = nb.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    skid = actx.createBufferSource(); skid.buffer = nb; skid.loop = true;
+    const bp = actx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2100; bp.Q.value = 0.8;
+    skidGain = actx.createGain(); skidGain.gain.value = 0;
+    skid.connect(bp); bp.connect(skidGain); skidGain.connect(actx.destination); skid.start();
+  } catch (_) { actx = null; }
+}
+
+// ── Race state ───────────────────────────────────────────────────────────────────────────────────
+const LAPS = 3;
+let state = 'countdown', tRace = 0, countdown = 3.999, finished = 0, shake = 0;
+const msg = document.getElementById('msg');
+
+function reset() {
+  // `const b = me.best; me.best = b;` used to sit here and looked like it carried your best lap over.
+  // It could not: `me` was reassigned on the line ABOVE, so it read the FRESH kart's best (0) and put
+  // the 0 straight back. Capturing before the reassignment is what actually preserves it, which keeps
+  // the BEST readout consistent with the sector bests — those already survive a restart.
+  const prevBest = me ? me.best : 0;
+  me = mkKart(0, 0); rival = mkKart(0, 1); rival.t = 0;
+  me.best = prevBest;
+  state = 'countdown'; countdown = 3.999; tRace = 0; sparks = [];
+  msg.innerHTML = '';
+}
+function fmt(s) { return s.toFixed(2); }
+
+// ── Simulation ───────────────────────────────────────────────────────────────────────────────────
+function stepKart(k, dt, ctrl) {
+  // Carry the kart's own last centreline solve forward as the seed — successive positions are a few
+  // units apart, so it is already almost the answer.
+  const surf = surfaceAt(k.x, k.y, k._nt);
+  k._nt = nearestT(k.x, k.y, k._nt);
+  const onRoad = surf !== SURF.GRASS;
+
+  if (surf === SURF.BOOST && k.padT <= 0.05) { k.padT = PAD_TIME; shake = Math.max(shake, 5); }
+
+  let steer = 0;
+  if (ctrl.left) steer -= 1;
+  if (ctrl.right) steer += 1;
+
+  // ── TRAIL BRAKING ─────────────────────────────────────────────────────────────────────────────
+  // Braking used to be a button that only removed speed. Now a STAB of brake as you turn in rotates
+  // the kart — the front bites — and that bonus decays the longer you stay on the pedal, until
+  // holding it just understeers you wide. Late braking becomes a real, learnable technique instead of
+  // something you either do or do not press, and it is the biggest skill ceiling in the whole model.
+  if (ctrl.brake && k.spd > 0) k.brakeT = (k.brakeT || 0) + dt; else k.brakeT = Math.max(0, (k.brakeT || 0) - dt * 2.5);
+  const trail = (ctrl.brake && k.spd > 0) ? Math.max(0, 1 - k.brakeT / 0.8) : 0;
+  const overBraked = (ctrl.brake && k.brakeT > 0.95 && Math.abs(steer) > 0.5) ? 0.34 : 0;
+  const turnMul = 1 + 0.5 * trail - overBraked;
+
+  // ── STUCK-DRIFT WATCHDOG ──────────────────────────────────────────────────────────────────────
+  // The input layer can now no longer latch Shift on, but this makes a stuck drift structurally
+  // impossible rather than merely unlikely — a browser can always swallow a keyup (alt-tab mid-corner,
+  // an OS shortcut stealing the release, a remapped key). Because a held drift rotates the kart every
+  // frame, a swallowed release is not a small glitch: it spins you indefinitely.
+  //
+  // So drift is capped at a duration no real one reaches — the longest charge tier is 3.1s — and once
+  // it trips, re-entry is LOCKED OUT until the drift input is genuinely seen low again. Without that
+  // lockout a stuck key would simply re-enter on the very next frame and spin you anyway.
+  if (ctrl.drift) k.driftHold += dt;
+  else { k.driftHold = 0; k.driftLockout = false; }
+  if (k.drifting && k.driftHold > DRIFT_MAX_HOLD) {
+    k.drifting = false; k.driftT = 0; k.driftLockout = true;
+  }
+
+  // Drift: enter only while turning and moving. Charge builds the whole time it is held.
+  if (ctrl.drift && !k.driftLockout && !k.drifting && k.spd > 120 * SPD_SC && steer !== 0) {
+    k.drifting = true; k.driftDir = steer;
+    // DRIFT CHAINING — flick straight into an OPPOSITE drift within the window and half your previous
+    // charge carries over. Rewards reading a whole sequence of bends as one flowing line instead of
+    // treating every corner as a fresh start.
+    const chain = (k.chainT > 0 && k.chainDir !== 0 && k.chainDir !== steer) ? k.chainCharge * 0.5 : 0;
+    k.driftT = chain;
+    k.chainT = 0;
+  }
+  if (!ctrl.drift && k.drifting) {
+    // Releasing the drift COMMITS the charge you have been watching accumulate on the bar; you decide
+    // when, and how much, to spend. That turns a reflex into a decision — burn it now on the straight,
+    // or hold it to carry speed through the next corner — which is where the gap between good and
+    // great players opens up. It ADDS to what you already have rather than replacing it, so a string
+    // of small drifts is worth as much as one heroic one. Capped, so you cannot hoard.
+    // Nothing visibly changes at this instant: the HUD has already been showing this exact figure as
+    // the live segment, so release just makes it permanent instead of making it appear.
+    k.fuel = Math.min(BOOST_MAX, k.fuel + driftFuel(k.driftT));
+    // Open the chain window: a quick flick the OTHER way keeps half of what you had.
+    k.chainCharge = k.driftT; k.chainDir = k.driftDir; k.chainT = 0.4;
+    k.drifting = false; k.driftT = 0;
+  }
+  if (k.drifting && k.spd < 70 * SPD_SC) { k.drifting = false; k.driftT = 0; }
+
+  // ── MID-DRIFT DIRECTION CHANGE ────────────────────────────────────────────────────────────────
+  // `driftDir` used to be locked at entry, so switching sides meant RELEASING the drift and starting
+  // again — which threw away the corner and felt like the kart was stuck leaning the wrong way. Now
+  // holding the opposite lock for a beat flips the drift with the button still down.
+  //
+  // The hold is what keeps it a skill: an instant flip would let you mash left-right and wobble
+  // through everything, so it takes FLIP_HOLD of committed opposite steering before it takes. The
+  // flip keeps HALF the charge — deliberately the same rule as the release-chain, so a switchback
+  // costs the same either way and the mechanic stays one idea rather than two.
+  if (k.drifting && steer !== 0 && steer !== k.driftDir) {
+    k.flipT = (k.flipT || 0) + dt;
+    if (k.flipT >= FLIP_HOLD) {
+      k.driftDir = steer;
+      k.driftT *= 0.5;
+      k.flipT = 0;
+    }
+  } else k.flipT = 0;
+
+  // Dirty air, read from the wake computed at the end of last frame (the value is a smoothed chase,
+  // so one frame of it is well under half a percent — not worth restructuring the step order for).
+  // This is the COST half of the slipstream: the tow gives speed, the same air takes away grip.
+  const airGrip = 1 - DIRTY_TURN * (k.slip || 0);
+
+  // ── TYRE WEAR ───────────────────────────────────────────────────────────────────────────────────
+  // Load is what the tyre is being asked to do RIGHT NOW: how hard you are turning, scaled by how fast
+  // you are going (a big steering angle in the pits costs nothing), plus a surcharge for drifting and
+  // for being off the road. Purely a function of this kart's own inputs — nothing here can see the
+  // race, which is what keeps it a skill budget and not a catch-up mechanic.
+  // Defensive init. A kart that did not come from mkKart — one rebuilt from a server roster, or a
+  // session that started before this field existed — has no `tyre`, and `undefined - x` is NaN. NaN
+  // then flows into the bar as `width:NaN%`, which CSS discards, so the bar sits at whatever it last
+  // was: permanently full, wearing never, silently. Exactly the reported symptom.
+  if (typeof k.tyre !== 'number' || !isFinite(k.tyre)) k.tyre = 1;
+  const spdFrac = Math.min(1, Math.abs(k.spd) / MAX_SPD);
+  const load = Math.min(1, Math.abs(steer) * spdFrac
+                         + (k.drifting ? TYRE_DRIFT * spdFrac : 0)
+                         + (onRoad ? 0 : TYRE_OFFROAD * spdFrac));
+  if (load > TYRE_CALM) k.tyre = Math.max(TYRE_MIN, k.tyre - (load - TYRE_CALM) * TYRE_WEAR * dt);
+  else                  k.tyre = Math.min(1, k.tyre + TYRE_RECOVER * dt);
+  // ── ATTACK / DEFEND ─────────────────────────────────────────────────────────────────────────────
+  // Both are gated on the SITUATION first and the reserve second, and the reserve is only spent if the
+  // move actually fires. Pressing attack on an empty straight costs nothing and does nothing — it is
+  // not a boost you can hoard and dump, it is a move you make on somebody.
+  k.atkT = Math.max(0, k.atkT - dt);
+  k.defT = Math.max(0, k.defT - dt);
+  if (ctrl.attack && !k.atkWas && k.atkT <= 0 && k.slip >= ATK_MIN && k.fuel >= ATK_COST) {
+    k.fuel -= ATK_COST; k.atkT = ATK_TIME;
+  }
+  if (ctrl.defend && !k.defWas && k.defT <= 0 && k.threat >= DEF_MIN && k.fuel >= DEF_COST) {
+    k.fuel -= DEF_COST; k.defT = DEF_TIME;
+  }
+  k.atkWas = !!ctrl.attack; k.defWas = !!ctrl.defend;
+
+  // One grip figure from here on: the air you are in, the rubber you have left, and the door you are
+  // holding shut. Defending buys GRIP rather than speed — it lets you hold a tight line through the
+  // corner instead of outrunning anyone, which is what defending actually is.
+  const tyreGrip = airGrip * k.tyre * (k.defT > 0 ? 1 + DEF_GRIP : 1);
+
+  if (k.drifting) {
+    k.driftT += dt;
+    // ── STEERING AUTHORITY INSIDE A DRIFT ───────────────────────────────────────────────────────
+    // The base rotation used to be applied at FULL strength no matter what the wheel was doing, so a
+    // drift rotated you at ~54 deg/s with the stick centred and even full opposite lock only slowed
+    // it to ~19 deg/s — it could never actually stop the rotation. That is why a drift could feel
+    // like the kart spinning out on its own with the steering disconnected: the player genuinely had
+    // no authority to hold an angle, only to choose how fast they rotated.
+    //
+    // Weighting the base by what the wheel is doing gives that authority back. Committing into the
+    // drift is unchanged, so nothing is lost at the top end; centring now holds a line, and counter-
+    // steer can genuinely straighten you out — which is also what makes the flip below readable,
+    // since you SEE the kart come level before it takes the other side.
+    const into = steer === k.driftDir ? 1 : (steer === 0 ? 0.55 : 0.12);
+    k.ang += (DRIFT_BASE * k.driftDir * into + steer * DRIFT_STEER * 0.5 * tyreGrip) * dt;
+    k.driftYaw += ((-k.driftDir * 0.62) - k.driftYaw) * Math.min(1, dt * 9);
+    // Slide outward — the kart carries momentum wide, which is what makes a drift feel like one.
+    // In dirty air it carries WIDER: the drift is the one place a corner is already on a knife edge,
+    // so this is where following too closely has to be felt rather than read off a bar.
+    const sa = k.ang - k.driftDir * Math.PI / 2;
+    const slide = DRIFT_SLIDE * (1 + DIRTY_SLIDE * (k.slip || 0));
+    k.x += Math.cos(sa) * k.spd * slide * dt;
+    k.y += Math.sin(sa) * k.spd * slide * dt;
+  } else {
+    const grip = (onRoad ? 1 : 0.62) * tyreGrip;
+    // Math.sign(k.spd) inverts the steering in reverse — turn the wheel right while backing up and
+    // the nose swings left, which is what anyone reversing a vehicle expects.
+    k.ang += steer * TURN * grip * turnMul * Math.min(1, Math.abs(k.spd) / (170 * SPD_SC)) * Math.sign(k.spd || 1) * dt;
+    k.driftYaw += (steer * 0.16 - k.driftYaw) * Math.min(1, dt * 8);
+  }
+
+  // ── BOOST AS A FUEL METER ─────────────────────────────────────────────────────────────────────
+  // Boost used to be a single stored mini-turbo that a tap dumped in one go — you had it or you did
+  // not, and the whole charge went at once whether you wanted it or not. It is now a RESERVE: drifts
+  // pour fuel into the bar up to BOOST_MAX, and holding the button burns it a little at a time.
+  //
+  // That turns one binary decision into a continuous one. A short squirt to defend a corner exit and
+  // a long pull down the straight now cost different amounts, so managing the meter across a lap is
+  // itself a skill rather than a reflex.
+  k.burning = !!(ctrl.fire && k.fuel > 0.001);
+  if (k.burning) {
+    if (k.fuel >= BOOST_MAX - 0.001 && !k.wasBurning) shake = Math.max(shake, 7);
+    k.fuel = Math.max(0, k.fuel - dt);
+  }
+  k.wasBurning = k.burning;
+  if (k.padT > 0) k.padT -= dt;                    // pads still give their own instant kick
+  const boostOn = k.burning || k.padT > 0;
+
+  // ── SLIPSTREAM + DIRTY AIR ───────────────────────────────────────────────────────────────────
+  // ONE wake, TWO consequences, and the pairing is the whole mechanic:
+  //   * straight-line SPEED goes up  (the tow)
+  //   * cornering GRIP goes down     (dirty air)
+  //
+  // A pure tow is a free gift to whoever is behind, and a race where the trailing car is simply
+  // faster is not a race. Because both effects scale with the SAME exposure, sitting on someone's
+  // gearbox is only correct on a straight: carry that tuck into the corner and you understeer wide
+  // and hand the place back. So the tow does not make the pass — it gets you close enough to attempt
+  // one, and the pass itself is a timing decision about when to pull out of the wake.
+  //
+  // It is symmetric, deterministic and derived purely from positions both sides already have, so
+  // there is nothing here to desync and nothing to exploit: the only way to gain is to be behind
+  // someone, which is the position you are trying to get out of.
+  k.slipDon = null;
+  {
+    // Exposure is CONTINUOUS in both distance and alignment, not an in/out box. Being right on the
+    // gearbox has to be worth more than trailing ten lengths back, or there is no reason to keep
+    // closing once you are nominally "in the tow" — and a hard edge also flickers on and off with
+    // 40ms-interpolated opponents, which reads as the mechanic being broken.
+    const donors = ctrl.slipFrom || [];
+    let best = 0;
+    for (let i = 0; i < donors.length; i++) {
+      const o = donors[i];
+      if (!o || o === k) continue;
+      const dx = o.x - k.x, dy = o.y - k.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < SLIP_MIN || dist > SLIP_MAX) continue;
+      const ahead = (dx * Math.cos(k.ang) + dy * Math.sin(k.ang)) / (dist || 1);
+      if (ahead <= SLIP_COS) continue;                       // outside the cone behind them
+      const near = 1 - (dist - SLIP_MIN) / (SLIP_MAX - SLIP_MIN);
+      const cone = (ahead - SLIP_COS) / (1 - SLIP_COS);
+      const e = near * cone;
+      if (e > best) { best = e; k.slipDon = o; }
+    }
+    // Chase the target rather than snapping to it: the wake should build and die over a few tenths
+    // so it feels like air, and so a momentary interpolation wobble can't strobe the HUD.
+    k.slip += (best - k.slip) * Math.min(1, dt * 4.5);
+    if (k.slip < 0.002) k.slip = 0;
+
+    // THREAT — the mirror of the wake: someone BEHIND you, in range, pointed at you. Defend reads this
+    // so the move cannot be used as a free grip boost on an empty piece of track; it only exists while
+    // there is genuinely something to defend against.
+    let worst = 0;
+    for (let i = 0; i < donors.length; i++) {
+      const o2 = donors[i];
+      if (!o2 || o2 === k) continue;
+      const dx = k.x - o2.x, dy = k.y - o2.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < SLIP_MIN || dist > SLIP_MAX) continue;
+      // Are THEY pointed at ME? Using their heading, not mine, so a car merely sitting behind on a
+      // different line is not treated as an attack.
+      const at = (dx * Math.cos(o2.ang) + dy * Math.sin(o2.ang)) / (dist || 1);
+      if (at <= THREAT_COS) continue;
+      const near = 1 - (dist - SLIP_MIN) / (SLIP_MAX - SLIP_MIN);
+      const cone = (at - THREAT_COS) / (1 - THREAT_COS);
+      const e = near * cone;
+      if (e > worst) worst = e;
+    }
+    k.threat += (worst - k.threat) * Math.min(1, dt * 4.5);
+    if (k.threat < 0.002) k.threat = 0;
+  }
+
+  // ── Longitudinal (forward AND reverse) ─────────────────────────────────────────────────────────
+  // Brake decelerates while you are rolling forward; once you have actually stopped, holding it backs
+  // you up. So a spin into the grass or a wall is recoverable instead of run-ending, which matters far
+  // more in a race you have money on.
+  if (ctrl.gas) k.spd += ACCEL * dt;
+  else if (ctrl.brake) {
+    if (k.spd > 1) k.spd -= BRAKE * dt;                    // still moving forward: this is braking
+    else k.spd -= ACCEL * 0.62 * dt;                       // stopped: pull away in reverse
+  }
+  // Coasting drag always pulls toward zero, from whichever side you are on — never past it, or the
+  // kart would creep the wrong way on its own.
+  if (!ctrl.gas && !ctrl.brake && k.spd !== 0) {
+    const d = DRAG * dt;
+    k.spd = Math.abs(k.spd) <= d ? 0 : k.spd - Math.sign(k.spd) * d;
+  }
+  if (k.slip > 0) k.spd += SLIP_ACC * k.slip * dt;
+  if (boostOn) k.spd += BOOST_ACC * dt;
+  // The attack surge, and the small drive a defender gets off the corner so holding the door is not a
+  // purely passive act. Both are additive with the tow, which is what makes a dive out of the wake the
+  // strongest move in the game — and correctly so, since it costs reserve AND has to be set up.
+  if (k.atkT > 0) k.spd += ATK_ACC * dt;
+  if (k.defT > 0) k.spd += DEF_HOLD * dt;
+  let cap = MAX_SPD + (boostOn ? BOOST_POW : 0) + k.slip * SLIP_CAP + (k.atkT > 0 ? ATK_CAP : 0);
+  let revCap = REV_MAX;
+  if (!onRoad) {
+    // Sign-aware, or off-road drag would ACCELERATE you while reversing.
+    const d = OFFROAD_DRAG * dt;
+    if (k.spd !== 0) k.spd = Math.abs(k.spd) <= d ? 0 : k.spd - Math.sign(k.spd) * d;
+    cap = Math.min(cap, OFFROAD_MAX);
+    revCap = Math.min(revCap, REV_MAX * 0.7);
+    // Bleed hard only while still fast — the penalty is losing your speed, not being stranded.
+    if (k.spd > OFFROAD_MAX) k.spd -= 190 * SPD_SC * dt;   // scrub the excess, do not slam to a stop
+  }
+  k.spd = Math.max(-revCap, Math.min(cap, k.spd));
+
+  k.x += Math.cos(k.ang) * k.spd * dt;
+  k.y += Math.sin(k.ang) * k.spd * dt;
+
+  // Soft barrier: too far outside the ribbon and you are pushed back, scrubbing speed. Keeps the
+  // prototype honest without needing real collision geometry.
+  const dx = k.x - CX, dy = k.y - CY, dr = Math.hypot(dx, dy);
+  const want = radiusAt(Math.atan2(dy, dx));
+  const over = Math.abs(dr - want) - (ROAD_W / 2 + 74 * SC * 0.5);
+  if (over > 0) {
+    const push = Math.min(over, 14) * (dr > want ? -1 : 1);
+    k.x += (dx / dr) * push; k.y += (dy / dr) * push;
+    // THIS was the real "grinds to a halt": the scrub used to be applied PER FRAME, so at 60fps it
+    // compounded to 0.965^60 == an 88% speed loss every second (and it got worse the higher your
+    // frame rate, which is nonsense). Frame-rate independent now, and a much gentler graze — running
+    // wide should cost you time, not park you.
+    k.spd *= Math.pow(0.72, dt);
+    // Only floor the speed when you are going FORWARD — otherwise this would fight you every time you
+    // tried to reverse off a wall, which is precisely when reverse is most needed.
+    if (k.spd > 0 && k.spd < 90 * SPD_SC) k.spd = 90 * SPD_SC;
+  }
+
+  // ── Animation state the sprite reads ──────────────────────────────────────────────────────────
+  // Smoothed rather than raw so the front wheels and the driver ease across instead of snapping the
+  // instant a key goes down — a hard cut looks like a glitch at 240fps.
+  k.steerVis += (steer - k.steerVis) * Math.min(1, dt * 12);
+  k.braking = !!(ctrl.brake && k.spd > 0);
+  // Wheel spin is derived from actual speed, so the wheels genuinely read how fast you are going.
+  k.wheelPhase = (k.wheelPhase + Math.abs(k.spd) * dt * 0.055) % (Math.PI * 2);
+  return { surf, onRoad };
+}
+
+// ── CONTACT ──────────────────────────────────────────────────────────────────────────────────────
+// Karts are solid. Without this the optimal move is to drive straight THROUGH someone, so defending a
+// line means nothing and a race is just two parallel time trials sharing a screen. Solid bodies make
+// owning the inside of a corner a real decision with a real payoff, which is the single biggest
+// increase in skill depth available here.
+//
+// The whole design rests on one rule: contact rewards POSITIONING and never rewards RAMMING.
+//   * Momentum along the contact normal, so driving into someone costs the aggressor speed while the
+//     kart being shoved from behind is nudged along — ramming is a net loss for the rammer.
+//   * NO angular impulse whatsoever. A hit can never spin anyone, because a spin-out is an
+//     execution-free way to end someone's race, and that is exactly the failure mode to avoid.
+//   * Separation is symmetric, so nobody can bulldoze through another kart by holding the throttle.
+const KART_R = 26;                 // body radius; contact begins at 52 units apart
+// EXTRA share of CLOSING speed charged to whoever drove into the contact. The value is not a taste
+// knob: the momentum split below already takes 0.5 of the closing speed off the faster kart, so a tax
+// ABOVE 0.5 is exactly the condition for a rear-ender to end up SLOWER than the kart they hit. Below
+// that threshold the aggressor stays faster after the hit and can simply keep shoving — a push pass,
+// which is the precise thing contact must never reward. Measured at 0.35 the rammer came out 3 units
+// up on their victim; at 0.55 they come out behind and have to set the move up again.
+const CONTACT_TAX = 0.55;
+// Every kart I can touch. Online this is the real field; offline it is the pace car. Contact used to
+// be written against `rival` ALONE, so in an actual multiplayer race — the only place it matters —
+// karts drove straight through each other and defending a line meant nothing.
+function resolveContact(dt) {
+  if (NET.on) {
+    for (const r of NET.remotes.values()) {
+      // A kart that has taken the flag is a GHOST: it is not racing, it must not be able to block or
+      // be blocked. See the slow-down lap in the sim loop for the other half of this.
+      if (r.finished) continue;
+      contactPair(me, r, false);
+    }
+  } else {
+    contactPair(me, rival, true);
+  }
+}
+
+// Resolve MY kart against ONE other. Online I can only move my own car — the other client is running
+// this exact rule against me at the same time, so each side pays its own half and the pair separates
+// symmetrically without either client being able to shove the other around. That is also why the
+// blame test below is per-kart: charging on the NET closing speed would bill the victim of a rear-end
+// too, because the gap shrinks for both of them.
+// `self` is explicit rather than the module-level `me` so the SERVER can run this for every pair on
+// track — which is the only place contact is truly symmetric, because one machine moves both cars.
+function contactPair(self, other, scripted) {
+  if (!other || !self) return;
+  const me = self;
+  const dx = other.x - me.x, dy = other.y - me.y;
+  const d = Math.hypot(dx, dy);
+  if (d >= KART_R * 2 || d < 1e-4) return;
+  const nx = dx / d, ny = dy / d;
+  const overlap = KART_R * 2 - d;
+
+  /*
+   * ATTACK SHOVES, DEFEND HOLDS. Normally a contact separates both cars equally and neither gets to
+   * bully the other — which is right for incidental rubbing, but it means an attack can never actually
+   * force its way past a car sitting on the line.
+   *
+   * While your attack is live you give ground GRUDGINGLY (you are shoving through), and while your
+   * defend is live you give ground barely at all (you are holding the door shut). The two cancel: if
+   * an attacker dives into a defender, both are stiff and the positions barely change — the defender
+   * kept the place, and both of them spent reserve doing it. That is the exchange the whole pair is
+   * built around, now expressed in the physics rather than only in speed numbers.
+   *
+   * Note this only ever changes how far YOU move out of a contact. Nobody gets pushed FURTHER than
+   * the overlap by someone else's button, so a shove can never eject a car off the track — the worst
+   * that happens is you fail to make room. It also stays symmetric: both cars run this same code
+   * about themselves, so an attacker meeting a defender is stiff-vs-stiff either way round.
+   */
+  const stiff = me.atkT > 0 ? 0.45 : (me.defT > 0 ? 0.25 : 1);
+  const mine = (scripted ? 0.5 : 1) * stiff;
+  me.x -= nx * overlap * mine;
+  me.y -= ny * overlap * mine;
+  if (scripted) {
+    // The pace car is on rails along the centreline, so it is pushed along its LANE offset instead
+    // and eases back to the racing line on its own afterwards. Its x/y are recomputed from the
+    // clamped lane HERE rather than next frame, or the pair stays visibly interpenetrated for a frame.
+    const rperp = other.ang + Math.PI / 2;
+    const laneCap = ROAD_W / 2;
+    const wantLane = other.lane + (nx * Math.cos(rperp) + ny * Math.sin(rperp)) * overlap * 0.5;
+    const newLane = Math.max(-laneCap, Math.min(laneCap, wantLane));   // never shove it off the map
+    const applied = newLane - other.lane;
+    other.lane = newLane;
+    other.x += Math.cos(rperp) * applied;
+    other.y += Math.sin(rperp) * applied;
+  }
+  const rival = other;   // the impulse maths below reads the same either way
+
+  // The size of a hit comes from the CLOSING speed, never from absolute speed. That distinction is the
+  // whole feel of the mechanic: two karts nose-to-tail at an identical 180mph are barely touching, and
+  // must exchange nothing, while the same pair with a 60mph delta is a real shunt. Charging anyone by
+  // their own speed along the normal would make a gentle slipstream tuck at high speed the single most
+  // expensive thing in the game.
+  //
+  // Normal velocities: n points me -> rival, so +ve vmN means I close, +ve vrN means they pull away.
+  const mvx = Math.cos(me.ang) * me.spd, mvy = Math.sin(me.ang) * me.spd;
+  const rvx = Math.cos(rival.ang) * rival.spd, rvy = Math.sin(rival.ang) * rival.spd;
+  const vmN = mvx * nx + mvy * ny;
+  const vrN = rvx * nx + rvy * ny;
+  const vRel = vmN - vrN;                       // > 0 == actually closing
+  if (vRel <= 0) return;                        // already separating; the push above is enough
+
+  // Equal masses, fully damped along the normal: both settle to the mean normal velocity. That alone
+  // is momentum-conserving and already costs the faster-approaching kart the most, which is why a
+  // rear-ender loses more than the kart in front by construction rather than by special-casing.
+  let dN = (vmN + vrN) / 2 - vmN;
+  // ...then a flat tax on top, but ONLY for a kart whose own motion was into the contact. This is what
+  // guarantees ramming is a net loss: the aggressor always ends below where clean driving left them,
+  // and a kart that was simply hit is never charged for it.
+  if (vmN > 0) dN -= vRel * CONTACT_TAX;
+
+  // The sim carries a scalar forward speed, so project the normal change back onto the heading. A hit
+  // straight up the back is fwd == 1 (full effect); a glancing rub along the side is fwd ~ 0 and barely
+  // scrubs speed, which is exactly how side-by-side racing should feel.
+  const fwd = Math.cos(me.ang) * nx + Math.sin(me.ang) * ny;
+  me.spd = Math.max(0, Math.min(MAX_SPD, me.spd + dN * fwd));
+  // No angular impulse anywhere in here, deliberately: a spin-out is an execution-free way to end
+  // someone's race, so contact may cost you speed but can never take the car away from you.
+  shake = Math.max(shake, Math.min(6, vRel * 0.02));
+}
+
+function lapLogic(k, dt) {
+  const t = Math.atan2(k.y - CY, k.x - CX);
+  // Sector 0 MUST begin exactly at angle 0, because that is where pointAt(0) paints the chequered
+  // line and where the grid forms. The old expression was ((t + 3*PI) % TAU), which reduces to
+  // (t + PI) — putting sector 0 on the FAR SIDE of the circuit. The lap therefore ticked over half a
+  // lap away from the flag: you crossed the line and stayed on the same lap, then the race ended in
+  // the middle of nowhere. The rival's lap (rival.t / TAU) and the sector splits were both already
+  // measured from 0, so this was the only place that disagreed.
+  const sec = Math.floor((((t % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * 16);
+  if (sec !== k.prevSec) { k.sectors.add(sec); k.prevSec = sec; }
+  // Crossing sector 0 forwards with every sector visited == a clean lap. Cutting the course leaves
+  // sectors unvisited, so it simply does not count.
+  if (sec === 0 && k.sectors.size >= 15 && tRace - k.lapStart > 4) {
+    const lt = tRace - k.lapStart;
+    if (!k.best || lt < k.best) k.best = lt;
+    k.lapStart = tRace; k.sectors.clear(); k.sectors.add(0);
+    k.lap++;
+    if (k.lap > LAPS) return true;
+  }
+  return false;
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────────────────────────
+// The sky is a vertical gradient in BUFFER space: every pixel of it depends only on y. It was being
+// recomputed from three Math.pow calls and 92,160 byte writes on every single frame to produce an
+// identical result each time — 40% of the whole buffer, redrawn for nothing. It is painted once here,
+// and because the ground loop below only ever touches rows at or past the horizon, those rows simply
+// survive from frame to frame. Same picture, none of the work.
+const tex32 = LITTLE_ENDIAN ? new Uint32Array(texData.buffer) : null;
+const OFFTEX32 = (0xff000000 | (0x18 << 16) | (0x22 << 8) | 0x10) >>> 0;   // off-texture ground colour
+(function paintSky() {
+  const hy = (GH * HORIZON) | 0;
+  for (let y = 0; y < hy; y++) {
+    const f = y / hy;
+    const r = (0x14 + (0xff - 0x14) * Math.pow(f, 3.2)) | 0;
+    const g = (0x0b + (0x7a - 0x0b) * Math.pow(f, 3.0)) | 0;
+    const b = (0x2e + (0x4d - 0x2e) * Math.pow(f, 2.2)) | 0;
+    let o = y * GW * 4;
+    for (let x = 0; x < GW; x++) { gpx[o] = r; gpx[o + 1] = g; gpx[o + 2] = b; gpx[o + 3] = 255; o += 4; }
+  }
+})();
+
+function renderGround(camX, camY, camAng, W_, H_, px32_, img_, ctx_) {
+  const GW = W_ || 640, GH = H_ || 360;
+  const gpx32 = px32_ || _gpx32Main, gimg = img_ || _gimgMain, gctx = ctx_ || _gctxMain;
+  const hy = (GH * HORIZON) | 0;
+  const fwdX = Math.cos(camAng), fwdY = Math.sin(camAng);
+  const rgtX = -Math.sin(camAng), rgtY = Math.cos(camAng);
+
+  for (let y = hy; y < GH; y++) {
+    const dy = y - hy + 0.5;
+    const d = (CAM_H * FOCAL) / dy;                     // world distance ahead for this scanline
+    const hw = d * (GW / 2) / FOCAL;                    // half the world width visible at that distance
+    let sx = camX + fwdX * d - rgtX * hw;
+    let sy = camY + fwdY * d - rgtY * hw;
+    const stepX = (2 * hw * rgtX) / GW, stepY = (2 * hw * rgtY) / GW;
+
+    const fog = d <= FOG_START ? 0 : Math.min(1, (d - FOG_START) / (FOG_END - FOG_START));
+
+    if (tex32) {
+      // Fog is a per-SCANLINE constant, so whether a row needs blending at all is known before the row
+      // starts. Every row nearer than FOG_START — which is most of the screen most of the time — is a
+      // straight texel copy: no unpack, no arithmetic, one word per pixel. Only the hazy distance pays
+      // for blending, and it pays in 8-bit fixed point rather than floats.
+      let o = y * GW;
+      if (fog <= 0) {
+        for (let x = 0; x < GW; x++) {
+          const ix = sx | 0, iy = sy | 0;
+          // One unsigned compare per axis replaces the old pair: a negative index wraps to a huge
+          // value and fails `< TEX` on its own.
+          gpx32[o++] = ((ix >>> 0) < TEX && (iy >>> 0) < TEX) ? tex32[iy * TEX + ix] : OFFTEX32;
+          sx += stepX; sy += stepY;
+        }
+      } else {
+        // 16-bit fixed point rather than floats. Keeping the original float blend here was measured at
+        // 4.44ms against 1.65ms for this version — the whole loop runs faster when every value stays an
+        // integer, which is worth far more than the difference it makes to the picture. That difference
+        // is bounded, not assumed: measured against the float renderer it is at most 1/255 on a single
+        // channel, and only on the ~11% of scanlines deep enough into the haze to be fogged at all.
+        const fi = (fog * 65536) | 0, ii = 65536 - fi;
+        const fr = FOG[0] * fi, fg = FOG[1] * fi, fb = FOG[2] * fi;
+        for (let x = 0; x < GW; x++) {
+          const ix = sx | 0, iy = sy | 0;
+          const t = ((ix >>> 0) < TEX && (iy >>> 0) < TEX) ? tex32[iy * TEX + ix] : OFFTEX32;
+          gpx32[o++] = (0xff000000 | ((((t >>> 16) & 255) * ii + fb) >>> 16 << 16)
+                                   | ((((t >>> 8) & 255) * ii + fg) >>> 16 << 8)
+                                   |  (((t & 255) * ii + fr) >>> 16)) >>> 0;
+          sx += stepX; sy += stepY;
+        }
+      }
+    } else {
+      // Big-endian fallback: the original per-byte path, kept so the packed words above never have to
+      // assume a channel order.
+      const inv = 1 - fog;
+      let o = y * GW * 4;
+      for (let x = 0; x < GW; x++) {
+        const ix = sx | 0, iy = sy | 0;
+        let r, g, b;
+        if (ix < 0 || iy < 0 || ix >= TEX || iy >= TEX) { r = 0x10; g = 0x22; b = 0x18; }
+        else { const t = (iy * TEX + ix) * 4; r = texData[t]; g = texData[t + 1]; b = texData[t + 2]; }
+        gpx[o] = (r * inv + FOG[0] * fog) | 0;
+        gpx[o + 1] = (g * inv + FOG[1] * fog) | 0;
+        gpx[o + 2] = (b * inv + FOG[2] * fog) | 0;
+        gpx[o + 3] = 255;
+        sx += stepX; sy += stepY; o += 4;
+      }
+    }
+  }
+  gctx.putImageData(gimg, 0, 0);
+}
+
+// Project a world point to screen (same maths as the ground, so sprites sit correctly on it).
+function project(wx, wy, camX, camY, camAng) {
+  const dx = wx - camX, dy = wy - camY;
+  const fwdX = Math.cos(camAng), fwdY = Math.sin(camAng);
+  const rgtX = -Math.sin(camAng), rgtY = Math.cos(camAng);
+  const fd = dx * fwdX + dy * fwdY;
+  if (fd < 12) return null;
+  const lat = dx * rgtX + dy * rgtY;
+  const hy = GH * HORIZON;
+  return {
+    x: (GW / 2 + (lat / fd) * FOCAL) / GW,             // 0..1 across the screen
+    y: (hy + (CAM_H * FOCAL) / fd) / GH,
+    s: FOCAL / fd, fd,
+  };
+}
+
+// Rear-view kart, drawn procedurally. `yaw` slides the body sideways for the drift pose.
+// Billboard kart sprite drawn procedurally.
+//
+// `rel` is the kart's heading RELATIVE to the camera: 0 means it is pointing directly away (we see
+// its back), +/-PI/2 means broadside, +/-PI means head-on. The first version ignored this entirely
+// and always drew a flat rear view, so rival karts looked frozen straight ahead even mid-corner —
+// they slid round bends without ever appearing to turn.
+//
+// A real Mode 7 game solves this with a sprite sheet of ~16 pre-rendered angles. Drawing in code, we
+// get the same read by deriving the silhouette from the angle: `face` (cos) is how much of the
+// back/front we see, `side` (sin) is how much flank. Apparent width blends between the kart's width
+// and its length, the wheels separate as it turns broadside, and lights swap from tail-red to
+// headlight-white once it is facing us. `lean` adds the drift tilt on top.
+// One wheel: tyre, sidewall, rim and a spoke pattern that rotates with `phase`. The spin is what
+// makes speed legible on the sprite itself — a stationary kart and a flat-out one no longer look
+// identical when the camera is steady behind them.
+function drawWheel(g, x, y, w, h, phase, spokes) {
+  g.fillStyle = '#141019';
+  g.fillRect(x, y, w, h);
+  g.fillStyle = '#2a2338';                       // lit top of the tyre
+  g.fillRect(x, y, w, 3);
+  g.fillStyle = 'rgba(0,0,0,0.45)';              // shaded underside
+  g.fillRect(x, y + h - 3, w, 3);
+  if (!spokes) return;
+  const rx = x + w / 2, ry = y + h * 0.52, rr = Math.min(w, h) * 0.29;
+  g.fillStyle = '#5d5672';
+  g.beginPath(); g.ellipse(rx, ry, rr, rr * 0.62, 0, 0, 7); g.fill();
+  g.strokeStyle = '#15111d';
+  g.lineWidth = 1.5;
+  g.beginPath();
+  for (let i = 0; i < 3; i++) {
+    const a = phase + i * (Math.PI / 3);
+    g.moveTo(rx - Math.cos(a) * rr, ry - Math.sin(a) * rr * 0.62);
+    g.lineTo(rx + Math.cos(a) * rr, ry + Math.sin(a) * rr * 0.62);
+  }
+  g.stroke();
+}
+
+// `rel` is the kart's heading RELATIVE to the camera: 0 means it is pointing directly away (we see
+// its back), +/-PI/2 means broadside, +/-PI means head-on.
+//
+// A real Mode 7 game solves this with a sprite sheet of ~16 pre-rendered angles. Drawing in code, we
+// derive the silhouette from the angle instead: `face` (cos) is how much of the back/front we see,
+// `side` (sin) is how much flank. Apparent width was once |cos|*BW + |sin|*BL — geometrically what a
+// BOX does when you rotate it, but a box that also foreshortens and shows its flank. This sprite does
+// neither, so the only visible result was the kart getting FAT: +23% at just 10 degrees off, +75% at
+// worst, which made a rival mid-corner look wider than you even when it was further away. The turn
+// now reads from wheel separation, shading and the light swap, with only a slight widening.
+//
+// Detail is keyed off `scale` in three tiers. There are only ever a couple of karts on screen, so the
+// close-up tier can afford real bodywork and a driver; at distance the kart is a few pixels across,
+// where those same forty draw calls buy nothing but shimmer.
+function drawKart(g, cx, cy, scale, rel, lean, lv, k, boosting) {
+  const face = Math.cos(rel);            // +1 = we see its back, -1 = head-on
+  const side = Math.sin(rel);            // how much of its flank is showing
+  const BW = 25;                         // half-width in sprite units
+  const halfW = BW * (1 + 0.26 * Math.abs(side));
+  const rear = face >= 0;                // are we looking at the back of it?
+  const st = k ? (k.steerVis || 0) : 0;  // smoothed steering, drives wheels + driver
+  const braking = k ? !!k.braking : false;
+  const spin = k ? (k.wheelPhase || 0) : 0;
+  const lod = scale > 0.5 ? 2 : scale > 0.22 ? 1 : 0;
+
+  g.save();
+  g.translate(cx, cy);
+  g.scale(scale, scale);
+  g.rotate(lean * 0.16);
+
+  g.fillStyle = 'rgba(0,0,0,0.36)';
+  g.beginPath(); g.ellipse(0, 6, halfW * 1.28, 9, 0, 0, 7); g.fill();      // contact shadow
+
+  if (lod === 0) {
+    // Far tier: silhouette and one light. Still reads as a kart at a few pixels wide.
+    g.fillStyle = lv.body;
+    g.fillRect(-halfW * 0.8, -17, halfW * 1.6, 23);
+    g.fillStyle = rear ? (braking ? '#ff2d1a' : '#e8452c') : '#fff6d8';
+    g.fillRect(-halfW * 0.55, -5, halfW * 1.1, 4);
+    g.restore();
+    return;
+  }
+
+  const bw = halfW * 0.86;
+  const detail = lod === 2;
+
+  // ── FRONT WHEELS ────────────────────────────────────────────────────────────────────────────
+  // Drawn first so the bodywork overlaps them. They sit higher because they are further away, and
+  // they STEER: the pair swings across and the wheel turning away from us narrows. This is the part
+  // that shows a direction change instantly, before the kart has actually rotated.
+  if (detail) {
+    const fw = (9 + Math.abs(side) * 3.5), fh = 13;
+    const fx = st * 5 + side * 3;
+    drawWheel(g, -halfW * 0.86 + fx - fw / 2, -15, fw * (1 - Math.max(0, st) * 0.3), fh, spin, false);
+    drawWheel(g,  halfW * 0.86 + fx - fw / 2, -15, fw * (1 + Math.min(0, st) * 0.3), fh, spin, false);
+  }
+
+  // ── REAR WHEELS ─────────────────────────────────────────────────────────────────────────────
+  // These ride at the silhouette edges and shift with the flank, which is what sells the turn — the
+  // near wheel swings wide as the kart rotates away from us.
+  const ww = 12 + Math.abs(side) * 5, wh = 19;
+  const wl = -halfW - 2 + side * 4, wr = halfW - ww + 2 + side * 4;
+  drawWheel(g, wl, -6, ww, wh, spin, detail);
+  drawWheel(g, wr, -6, ww, wh, spin, detail);
+
+  // ── FLOOR TRAY + SIDE PODS ──────────────────────────────────────────────────────────────────
+  if (detail) {
+    g.fillStyle = '#191324';
+    g.fillRect(-bw * 1.02, 1, bw * 2.04, 6);                  // floor tray between the wheels
+    g.fillStyle = lv.dark;                                     // pods, slightly inboard of the wheels
+    g.fillRect(-bw * 1.0, -9, bw * 0.28, 12);
+    g.fillRect(bw * 0.72, -9, bw * 0.28, 12);
+    g.fillStyle = 'rgba(0,0,0,0.3)';
+    g.fillRect(-bw * 1.0, -3, bw * 0.28, 6);
+    g.fillRect(bw * 0.72, -3, bw * 0.28, 6);
+  }
+
+  // ── MAIN BODY ───────────────────────────────────────────────────────────────────────────────
+  g.fillStyle = lv.body;
+  g.beginPath();
+  g.moveTo(-bw, 6); g.lineTo(-bw * 0.82, -16); g.lineTo(bw * 0.82, -16); g.lineTo(bw, 6);
+  g.closePath(); g.fill();
+  // Shade the side we are turning away from, so the form reads as three-dimensional.
+  g.fillStyle = side > 0 ? 'rgba(0,0,0,0.28)' : 'rgba(255,255,255,0.13)';
+  g.beginPath();
+  g.moveTo(-bw, 6); g.lineTo(-bw * 0.82, -16); g.lineTo(-bw * 0.25, -16); g.lineTo(-bw * 0.3, 6);
+  g.closePath(); g.fill();
+
+  if (detail) {
+    g.fillStyle = lv.trim;                                     // livery stripe down the spine
+    g.fillRect(-bw * 0.13, -16, bw * 0.26, 22);
+    g.fillStyle = 'rgba(255,255,255,0.10)';                    // top highlight
+    g.fillRect(-bw * 0.78, -16, bw * 1.56, 2.5);
+    g.fillStyle = '#120e1c';                                   // rear bumper
+    g.fillRect(-bw * 0.95, 3, bw * 1.9, 4);
+  }
+
+  g.fillStyle = 'rgba(255,255,255,0.16)';                      // cockpit lip
+  g.beginPath();
+  g.moveTo(-bw * 0.82, -16); g.lineTo(bw * 0.82, -16); g.lineTo(bw * 0.62, -22); g.lineTo(-bw * 0.62, -22);
+  g.closePath(); g.fill();
+  g.fillStyle = 'rgba(0,0,0,0.55)';                            // cockpit interior
+  g.fillRect(-bw * 0.58, -21, bw * 1.16, 5);
+
+  // ── ENGINE + EXHAUST (rear three-quarter only) ──────────────────────────────────────────────
+  if (detail && rear) {
+    g.fillStyle = '#241c33';
+    g.fillRect(bw * 0.34, -14, bw * 0.34, 9);                  // engine block, offset like a real kart
+    g.fillStyle = '#3b3150';
+    g.fillRect(bw * 0.34, -14, bw * 0.34, 2.5);
+    g.fillStyle = boosting ? '#ffb057' : '#6d6480';            // exhaust, glowing under boost
+    g.fillRect(bw * 0.44, -20, 4, 7);
+    g.fillRect(bw * 0.58, -19, 4, 6);
+  }
+
+  // ── ROLL HOOP / SPOILER ─────────────────────────────────────────────────────────────────────
+  g.fillStyle = '#0e0b16';
+  if (rear) {
+    g.fillRect(-bw * 0.95, -30, bw * 1.9, 6);
+    g.fillRect(-3, -30, 6, 12);
+    if (detail) {
+      g.fillStyle = lv.helmet2;                                // livery flash on the wing endplates
+      g.fillRect(-bw * 0.95, -30, bw * 0.22, 6);
+      g.fillRect(bw * 0.73, -30, bw * 0.22, 6);
+    }
+  }
+
+  // ── DRIVER ──────────────────────────────────────────────────────────────────────────────────
+  // Shoulders, arms and head, all leaning INTO the corner. The head leads the hands the way a real
+  // driver looks through a bend, so the character reads as actively driving rather than a helmet
+  // glued to a seat — and it gives the turn a second, human tell alongside the front wheels.
+  const hx = side * 4 + st * 2.4;                              // head tracks the corner
+  if (detail) {
+    g.fillStyle = lv.suit;                                     // shoulders / torso above the lip
+    g.beginPath();
+    g.moveTo(-bw * 0.5, -20); g.lineTo(-bw * 0.42, -28);
+    g.lineTo(bw * 0.42, -28); g.lineTo(bw * 0.5, -20);
+    g.closePath(); g.fill();
+    g.fillStyle = 'rgba(0,0,0,0.22)';
+    g.fillRect(-bw * 0.5, -23, bw * 1.0, 3);
+
+    if (!rear) {
+      // Facing us: the wheel and both gloves are visible, and the wheel actually turns with `st`.
+      g.save();
+      g.translate(hx * 0.6, -21);
+      g.rotate(-st * 0.5);
+      g.strokeStyle = '#15111d'; g.lineWidth = 2.4;
+      g.beginPath(); g.ellipse(0, 0, bw * 0.3, bw * 0.17, 0, 0, 7); g.stroke();
+      g.restore();
+    }
+    g.fillStyle = lv.glove;                                    // hands, counter-steering
+    g.fillRect(-bw * 0.46 + st * 3, -24 - st * 2, 5, 4);
+    g.fillRect(bw * 0.46 - 5 + st * 3, -24 + st * 2, 5, 4);
+  }
+
+  // Helmet: dome, livery stripe, visor and a specular highlight.
+  g.fillStyle = lv.helmet;
+  g.beginPath(); g.arc(hx, -26, 9, Math.PI, 0); g.fill();
+  g.fillRect(hx - 9, -26, 18, 3);
+  if (detail) {
+    g.fillStyle = lv.helmet2;                                  // stripe over the crown
+    g.fillRect(hx - 2.2, -35, 4.4, 9);
+  }
+  g.fillStyle = lv.visor;                                      // visor band
+  g.fillRect(hx - 9, -27.5, 18, 4.5);
+  if (detail) {
+    g.fillStyle = 'rgba(255,255,255,0.30)';                    // glint, offset by which way we see it
+    g.fillRect(hx - 7 + side * 3, -27, 5, 1.6);
+  }
+
+  // ── LIGHTS ──────────────────────────────────────────────────────────────────────────────────
+  // Tail lights when we see its back, headlights when it is coming at us — and the brake lights
+  // BRIGHTEN and widen under braking. That is real information in a race: you can read exactly where
+  // the kart ahead is braking and adjust your own entry, which rewards attention rather than reflex.
+  const lw = Math.max(4, bw * 0.32);
+  if (rear && braking) {
+    g.fillStyle = '#ff2d1a';
+    g.fillRect(-bw * 0.82, -5.5, lw * 1.35, 6);
+    g.fillRect(bw * 0.82 - lw * 1.35, -5.5, lw * 1.35, 6);
+    if (detail) {
+      g.globalAlpha = 0.32;                                    // halo so it pops at distance
+      g.fillRect(-bw * 0.95, -8, lw * 1.9, 11);
+      g.fillRect(bw * 0.95 - lw * 1.9, -8, lw * 1.9, 11);
+      g.globalAlpha = 1;
+    }
+  } else {
+    g.fillStyle = rear ? '#e8452c' : '#fff6d8';
+    g.fillRect(-bw * 0.78, -4, lw, 4);
+    g.fillRect(bw * 0.78 - lw, -4, lw, 4);
+  }
+
+  // Race number on the tail, so drivers are identifiable from behind at a glance. The badge is baked
+  // once per livery: setting g.font and calling fillText every frame makes the browser resolve the
+  // font and shape the glyph on EVERY kart, EVERY frame, which is far more expensive than it looks.
+  if (detail && rear) g.drawImage(numBadge(lv), -7, -16, 14, 12);
+
+  if (boosting && rear) {
+    g.globalAlpha = 0.55 + Math.random() * 0.4;
+    g.fillStyle = flameGrad(g);            // built once, not per frame
+    g.beginPath(); g.moveTo(-11, 8); g.lineTo(11, 8); g.lineTo(0, 30 + Math.random() * 10); g.closePath(); g.fill();
+    g.globalAlpha = 1;
+  }
+  g.restore();
+}
+
+// Pre-rendered number roundels, drawn once and blitted thereafter.
+// Keyed by what is actually PAINTED (the digit and its ink), not by the livery object — your own
+// livery keeps its identity while its number changes to whatever grid slot the server gave you, and
+// an object-keyed cache would have kept serving the badge from the first race you ever joined.
+const _badges = new Map();
+function numBadge(lv) {
+  const key = lv.num + '|' + lv.numInk;
+  let c = _badges.get(key);
+  if (c) return c;
+  c = document.createElement('canvas');
+  c.width = 56; c.height = 48;
+  const b = c.getContext('2d');
+  b.fillStyle = 'rgba(255,255,255,0.88)';
+  b.beginPath(); b.ellipse(28, 24, 26, 21, 0, 0, 7); b.fill();
+  b.fillStyle = lv.numInk;
+  b.font = 'bold 30px ui-monospace,monospace';
+  b.textAlign = 'center'; b.textBaseline = 'middle';
+  b.fillText(lv.num, 28, 25);
+  _badges.set(key, c);
+  return c;
+}
+let _flame = null;
+function flameGrad(g) {
+  if (_flame) return _flame;
+  _flame = g.createLinearGradient(0, 8, 0, 30);
+  _flame.addColorStop(0, '#9945ff'); _flame.addColorStop(1, 'rgba(57,211,83,0)');
+  return _flame;
+}
+
+function driftTier(k) { return k.driftT >= TIERS[2] ? 2 : k.driftT >= TIERS[1] ? 1 : k.driftT >= TIERS[0] ? 0 : -1; }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// NETWORK — lobbies, racing, spectating
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// The game runs perfectly well with no server: NET.on stays false, the scripted pace car stays, and
+// nothing below ever fires. That is deliberate — a failed connection must degrade to a playable game,
+// never to a dead screen. Every failure path here ends in "keep driving".
+const GAME_SERVERS = {
+  NA: { url: 'https://us.pac-arena.com', label: '🇺🇸 Chicago, US' },
+  EU: { url: 'https://eu.pac-arena.com', label: '🇩🇪 Frankfurt, EU' },
+};
+// Embedded on the platform (snakepot.com /play/kart) the player already HAS an identity, so the host
+// hands it down in the query string rather than making them type a name into a game they just opened.
+// Nothing here is trusted for anything — kart lobbies are free, this is a display name and a server
+// choice. Falls back to localStorage exactly as the standalone build does.
+const KQS = (() => { try { return new URLSearchParams(location.search); } catch (_) { return new URLSearchParams(''); } })();
+const QS_NAME = (KQS.get('name') || '').slice(0, 14).trim();
+const QS_REGION = (KQS.get('region') || '').toUpperCase() === 'EU' ? 'EU' : (KQS.get('region') || '').toUpperCase() === 'NA' ? 'NA' : '';
+const EMBEDDED = KQS.get('embed') === '1';
+const NET = {
+  on: false,             // are we in a live race?
+  sock: null,
+  region: QS_REGION || localStorage.getItem('kart.region') || 'NA',
+  name: QS_NAME || localStorage.getItem('kart.name') || '',
+  lobbyId: null,
+  spectating: false,
+  state: 'waiting',
+  startAt: 0,
+  roster: [],
+  lobbies: [],
+  remotes: new Map(),    // id -> interpolated opponent
+  lastSent: 0,
+  lastInput: -1,
+  queued: false,
+};
+
+/*
+ * Remote cars arrive at 30Hz and are drawn at up to 240. Rendering the newest packet directly makes
+ * every opponent visibly step; so each car keeps its last two samples and is drawn INTERPOLATED
+ * slightly in the past. Snake landed on ~28ms of delay against a 60Hz feed after a lot of tuning —
+ * this feed is 33ms, so a whole packet of delay is the equivalent trade: smooth motion for a frame of
+ * latency, which is the right way round for a car you are only trying to avoid.
+ */
+const NET_DELAY = 40;
+function netApplyCars(list, tServer) {
+  const now = performance.now();
+  const seen = new Set();
+  list.forEach((c, i) => {
+    // Our own car is no longer skipped: it is the SERVER's copy of us, and the truth we correct to.
+    if (c.id === (NET.sock && NET.sock.id)) { if (!NET.spectating) netReconcile(c); return; }
+    seen.add(c.id);
+    let r = NET.remotes.get(c.id);
+    if (!r) {
+      r = {
+        x: c.x, y: c.y, ang: c.a, spd: c.s, lap: c.lap,
+        px: c.x, py: c.y, pang: c.a, pt: now, nt: now,
+        nx: c.x, ny: c.y, nang: c.a,
+        driftYaw: 0, steerVis: 0, braking: false, wheelPhase: 0, drifting: false,
+        // Provisional only — the real livery is chosen by the server's GRID SLOT in the roster pass
+        // below. Indexing NET_LIVERIES by the position in this array was the bug: the cars array is
+        // in whatever order the server iterates, so a rival's colour AND race number changed every
+        // time somebody joined or left, and two cars could carry the same number at once.
+        livery: NET_LIVERIES[0], slot: -1, name: '',
+      };
+      NET.remotes.set(c.id, r);
+    }
+    r.px = r.nx; r.py = r.ny; r.pang = r.nang; r.pt = r.nt;
+    r.nx = c.x; r.ny = c.y; r.nang = c.a; r.nt = now;
+    r.spd = c.s; r.lap = c.lap; r.drifting = !!c.df; r.boosting = !!c.b; r.finished = !!c.fin;
+  });
+  for (const id of [...NET.remotes.keys()]) if (!seen.has(id)) NET.remotes.delete(id);
+  // Names, and the grid slot that decides colour and race number, come from the roster — which
+  // changes far less often than positions do, and unlike the cars array it is in a stable order.
+  for (const p of NET.roster) {
+    const r = NET.remotes.get(p.id);
+    if (r) {
+      r.name = p.name; r.lapNo = p.lap;
+      if (isFinite(p.slot) && p.slot !== r.slot) {
+        r.slot = p.slot;
+        r.livery = NET_LIVERIES[p.slot % NET_LIVERIES.length];   // num is slot+1, i.e. 1..8
+      }
+    }
+  }
+}
+function netInterpolate() {
+  const t = performance.now() - NET_DELAY;
+  for (const r of NET.remotes.values()) {
+    const span = r.nt - r.pt;
+    const f = span > 0 ? Math.max(0, Math.min(1.6, (t - r.pt) / span)) : 1;
+    r.x = r.px + (r.nx - r.px) * f;
+    r.y = r.py + (r.ny - r.py) * f;
+    // Shortest-arc so a car crossing the +/-PI seam does not spin the long way round.
+    const da = Math.atan2(Math.sin(r.nang - r.pang), Math.cos(r.nang - r.pang));
+    r.ang = r.pang + da * f;
+    // The wheels and lean are derived the same way the scripted rival's were, so opponents animate
+    // instead of sliding around bolt upright.
+    const rate = span > 0 ? da / (span / 1000) : 0;
+    const want = Math.max(-1, Math.min(1, rate / 1.6));
+    r.steerVis += (want - r.steerVis) * 0.15;
+    r.driftYaw += (want * 0.22 - r.driftYaw) * 0.12;
+    r.braking = Math.abs(want) > 0.45;
+    r.wheelPhase = (r.wheelPhase + r.spd * 0.0009) % (Math.PI * 2);
+  }
+}
+
+function netConnect(cb) {
+  if (typeof io === 'undefined') { netNote('Offline — practice mode'); return cb && cb(false); }
+  if (NET.sock && NET.sock.connected) return cb && cb(true);
+  const url = (GAME_SERVERS[NET.region] || GAME_SERVERS.NA).url;
+  // WebSocket first. Polling-first is what left snake players stuck on long-poll with a permanently
+  // bad ping — do not reorder these.
+  NET.sock = io(url, { path: '/kart/socket.io', transports: ['websocket', 'polling'], reconnectionAttempts: 6 });
+  const s = NET.sock;
+  s.on('connect', () => { netNote(''); s.emit('k-list'); cb && cb(true); });
+  s.on('connect_error', () => { netNote('Can’t reach ' + NET.region + ' — practice mode'); cb && cb(false); });
+  s.on('k-lobbies', (d) => { NET.lobbies = d.lobbies || []; renderLobbyList(); });
+  s.on('k-created', (d) => {
+    s.emit('k-join', { lobbyId: d.id, name: netName(), color: LIVERY.me.body });
+    NET.lobbyId = d.id;
+    /*
+     * Opening a PAID race commits you to it. The owner's rule: the creator pays immediately and then
+     * waits for someone to turn up. So CREATE RACE is the pay button for the person creating — they
+     * are auto-readied, which is the single charge point, rather than having to press READY as a
+     * separate step in a room they just made for themselves.
+     *
+     * Safe because the refund path exists: if nobody else arrives and the race never runs, the entry
+     * comes back in full when the room empties or is reaped.
+     */
+    // Ready up automatically on the race you just opened — free or paid. For a paid room this is
+    // the single charge point, and pressing CREATE is what committed you to it.
+    if (_createStake !== null) setTimeout(() => { if (NET.sock) NET.sock.emit('k-ready', { ready: true }); }, 350);
+  });
+  s.on('k-state', (d) => {
+    NET.state = d.state; NET.startAt = d.startAt; NET.roster = d.roster || [];
+    // Absolute deadline preferred, but fall back to the duration so a client with a skewed clock still
+    // counts down correctly rather than showing a nonsense number.
+    NET.readyDeadline = d.readyDeadline || (d.readyInMs != null ? Date.now() + d.readyInMs : 0);
+    NET.on = true;
+    // Take the grid slot the server assigned. Every client would otherwise build its car on slot 0 and
+    // the whole field would start stacked on one square.
+    {
+      // Your RACE NUMBER is that slot + 1, so a grid of eight carries 1..8 and no two cars share one.
+      // It used to be hardcoded to '7' in LIVERY.me, so every player on the grid was number 7 to
+      // themselves while their rivals were numbered by an unrelated array index.
+      const mine = NET.roster.find((p) => p.id === s.id);
+      LIVERY.me.num = mine && isFinite(mine.slot) ? String(mine.slot + 1) : '7';
+    }
+    if (!NET.spectating && d.state !== 'racing') {
+      const mine = NET.roster.find((p) => p.id === s.id);
+      if (mine && isFinite(mine.gx)) {
+        me.x = mine.gx; me.y = mine.gy; me.ang = mine.ga; me.spd = 0;
+        me.lap = 1; me.sectors.clear(); me.prevSec = -1; me.best = 0; me.fuel = 0;
+      }
+    }
+    renderLobbyPanel();
+    if (d.state === 'countdown') { state = 'countdown'; countdown = Math.max(0, (d.startAt - Date.now()) / 1000); }
+    if (d.state === 'racing' && state !== 'race') {
+      // Clearing the lights is normally the job of the local countdown reaching zero. Online the SERVER
+      // decides when the race is live, so that branch never runs and "GO!" would sit on screen for the
+      // whole race — clear it here, where the transition actually happens.
+      // Clear last race's flag, or a player who finished one race would start the next already
+      // ghosted and coasting to the side of the road instead of driving it.
+      state = 'race'; tRace = 0; me.lapStart = 0; me.finished = false; msg.innerHTML = '';
+    }
+    if (d.state === 'waiting') { state = 'countdown'; countdown = 3.999; me.finished = false; msg.innerHTML = ''; }
+  });
+  s.on('k-cars', (d) => netApplyCars(d.cars || [], d.t));
+  s.on('k-finish', (d) => netNote(d.name + ' finished P' + d.place + '  ' + d.time.toFixed(2) + 's'));
+  s.on('k-results', (d) => { showNetResults(d); refreshWallet(); setTimeout(refreshWallet, 6000); });
+  s.on('k-notice', (d) => netNote(d.msg || ''));
+  /*
+   * PAYING FOR A PAID RACE. The server refuses the ready and asks for an entry instead; the game
+   * cannot pay for itself — it holds no key and builds no transaction — so it asks the platform page
+   * to do it and waits for a signed ticket back.
+   *
+   * Nothing here is trusted by anyone: the ticket is signed by the money backend with a secret this
+   * file never sees, and the kart server checks that signature. The worst a tampered game can do is
+   * fail to get a ticket.
+   */
+  s.on('k-need-pay', (d) => {
+    if (!EMBED) { netNote('Paid races need the Snake Pot site — open it from snakepot.com'); unarmReady(); return; }
+    if (_payPending) return;                        // one entry request at a time, ever
+    _payPending = true;
+    netNote('Taking your $' + ((d.stakeCents || 0) / 100).toFixed(2).replace(/\.00$/, '') + ' entry…');
+    try { window.parent.postMessage({ __kart: 1, kind: 'KART_PAY', lobbyId: d.lobbyId, stakeCents: d.stakeCents }, '*'); }
+    catch (_) { _payPending = false; netNote('Could not reach the wallet.'); unarmReady(); }
+  });
+  s.on('k-queued', (d) => { NET.queued = !!(d && d.queued); renderLobbyPanel(); });
+  s.on('k-track', () => netNote('New daily circuit — reload to race it'));
+  s.on('disconnect', () => { netNote('Disconnected — practice mode'); NET.on = false; NET.remotes.clear(); });
+}
+function netName() {
+  if (!NET.name) NET.name = 'Racer' + (1000 + Math.floor(Math.random() * 9000));
+  localStorage.setItem('kart.name', NET.name);
+  return NET.name;
+}
+/*
+ * INPUTS, not positions. The server runs the simulation now (physics.js is generated from this file,
+ * so it is the same simulation), and the only thing this client is trusted to say is which buttons
+ * are held. There is nothing in this message to inflate: a modified client can claim to be holding
+ * the throttle, which is just... holding the throttle.
+ *
+ * Sent as STATE at 30Hz rather than as key events. A dropped event would leave the server holding a
+ * throttle that was released; a dropped state packet costs 33ms of staleness and then corrects
+ * itself. It also sends immediately whenever the buttons CHANGE, so the response to a keypress is
+ * not waiting on the next tick boundary.
+ */
+function netSendInput(ctrl) {
+  if (!NET.on || NET.spectating || !NET.sock || !NET.sock.connected) return;
+  const packed = (ctrl.gas ? 1 : 0) | (ctrl.brake ? 2 : 0) | (ctrl.left ? 4 : 0)
+               | (ctrl.right ? 8 : 0) | (ctrl.drift ? 16 : 0) | (ctrl.fire ? 32 : 0);
+  const now = performance.now();
+  if (packed === NET.lastInput && now - NET.lastSent < 33) return;
+  NET.lastSent = now; NET.lastInput = packed;
+  NET.sock.emit('k-in', { g: ctrl.gas, b: ctrl.brake, l: ctrl.left, r: ctrl.right, d: ctrl.drift, f: ctrl.fire });
+}
+
+/*
+ * RECONCILIATION — how the local car follows the server's.
+ *
+ * The car is still simulated locally every frame, because a racer that waits a round trip before it
+ * turns is unplayable. But the server's copy is the truth, so the local one is eased toward it.
+ *
+ * SOFT, not a snap. Both sides run identical code from the same inputs, so they agree closely and the
+ * residual is network jitter — snapping to every packet would visibly stutter the car 30 times a
+ * second for no gain. Snake learned this the hard way twice: a hard 96px snap read as teleporting,
+ * and a rigid whole-path correction produced camera wobble and was rolled back. A gentle pull plus a
+ * hard snap only for a genuinely large disagreement is what survived there.
+ */
+const OWN_CORRECT = 0.14;        // fraction of the remaining error taken per received packet
+const OWN_SNAP = 260;            // ...beyond this the client is simply wrong; take the server's word
+function netReconcile(c) {
+  const dx = c.x - me.x, dy = c.y - me.y;
+  const err = Math.hypot(dx, dy);
+  if (err > OWN_SNAP) {
+    me.x = c.x; me.y = c.y; me.ang = c.a; me.spd = c.s;
+    return;
+  }
+  me.x += dx * OWN_CORRECT;
+  me.y += dy * OWN_CORRECT;
+  const da = Math.atan2(Math.sin(c.a - me.ang), Math.cos(c.a - me.ang));
+  me.ang += da * OWN_CORRECT;
+  // Speed converges harder than position: it is a scalar the server owns outright (caps, off-road
+  // scrub, contact all live there), and a local copy that disagrees keeps re-earning the position
+  // error we just corrected.
+  me.spd += (c.s - me.spd) * 0.30;
+}
+
+// ── Lobby UI ────────────────────────────────────────────────────────────────────────────────────
+const lobbyEl = document.getElementById('lobby');
+const gridEl  = document.getElementById('gridPanel');
+let _noteT = null;
+function netNote(msg) {
+  const n = document.getElementById('netnote');
+  if (!n) return;
+  if (!msg) { n.classList.remove('on'); return; }
+  n.textContent = msg; n.classList.add('on');
+  clearTimeout(_noteT);
+  _noteT = setTimeout(() => n.classList.remove('on'), 4200);
+}
+/*
+ * The name input does not always exist. When the game is embedded and the platform has already told us
+ * who the player is, the name row is REPLACED with a static "RACING AS <name>" — which removes #lbName
+ * from the document entirely. Every place that reached for `.value` on it then threw on null and took
+ * the whole click handler down with it, silently: CREATE RACE and QUICK RACE did nothing at all, and
+ * only in the embedded build, i.e. the one everybody actually plays.
+ */
+function lbNameValue() {
+  const el = document.getElementById('lbName');
+  return el ? String(el.value || '').trim().slice(0, 16) : '';
+}
+function openLobby() {
+  lobbyEl.classList.add('on');
+  document.getElementById('lbTrack').textContent = TRACK_ID;
+  { const el = document.getElementById('lbName'); if (el) el.value = NET.name || ''; }
+  // Embedded on the platform you already ARE someone — the account name came down in the query
+  // string. Asking a logged-in player to type a name again is a pointless step that also lets them
+  // race under a name that is not the one on their profile, leaderboard and payouts.
+  const nameRow = document.querySelector('.lobbyName');
+  if (nameRow) {
+    if (EMBEDDED && QS_NAME) {
+      nameRow.innerHTML = '<label>RACING AS</label><b style="flex:1;color:#e8e2ff;font:600 14px/1.2 ui-sans-serif,system-ui,sans-serif">'
+        + esc(QS_NAME) + '</b>';
+    }
+  }
+  for (const b of document.querySelectorAll('.rgn')) b.classList.toggle('sel', b.dataset.rgn === NET.region);
+  updateStakeNote();
+  renderLobbyList();
+  netConnect();
+}
+function closeLobby() { lobbyEl.classList.remove('on'); stage.focus(); }
+
+function renderLobbyList() {
+  const box = document.getElementById('lbList');
+  if (!box) return;
+  if (!NET.lobbies.length) {
+    box.innerHTML = '<div class="lbEmpty">' +
+      (NET.sock && NET.sock.connected ? 'No races open — create one.' : 'Connecting…') + '</div>';
+    return;
+  }
+  box.innerHTML = '';
+  for (const lb of NET.lobbies) {
+    const row = document.createElement('div');
+    row.className = 'lbRow';
+    const full = lb.racers >= lb.max;
+    // Money is the first thing you look for in a lobby list, so it leads the row. A pot only appears
+    // once there is one — an empty paid room showing "$0 pot" reads as broken rather than as new.
+    const money = lb.stakeCents > 0
+      ? '<span class="stake">$' + (lb.stakeCents / 100).toFixed(2).replace(/\.00$/, '') + '</span>'
+      : '<span class="stake free">FREE</span>';
+    const pot = lb.potCents > 0 ? ' · pot $' + (lb.potCents / 100).toFixed(2).replace(/\.00$/, '') : '';
+    row.innerHTML =
+      '<span class="pill ' + lb.state + '">' + lb.state.toUpperCase() + '</span>' +
+      money +
+      '<span class="nm">' + esc(lb.name) + '</span>' +
+      '<span class="meta">' + lb.racers + '/' + lb.max + pot +
+      (lb.spectators ? ' · 👁 ' + lb.spectators : '') + '</span>';
+    // A race already under way can only be watched — offering "join" there would put someone on the
+    // grid half a lap down, which reads as a broken game rather than a late entry.
+    const canRace = lb.state === 'waiting' && !full;
+    const join = document.createElement('button');
+    join.textContent = canRace ? 'JOIN' : 'WATCH';
+    if (!canRace) join.className = 'watch';
+    join.onclick = () => (canRace ? doJoin(lb.id) : doSpectate(lb.id));
+    row.appendChild(join);
+    box.appendChild(row);
+  }
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// Drive the ready clock once a second. renderLobbyPanel only ran when the roster changed, so a
+// countdown drawn inside it would have frozen on whatever second it was first painted at — which is
+// indistinguishable from the bug this is fixing. One timer, cheap, and it stops itself being work when
+// the panel is hidden because renderLobbyPanel returns early.
+setInterval(() => { try { if (NET.on && NET.readyDeadline) renderLobbyPanel(); } catch (_) {} }, 1000);
+
+function renderLobbyPanel() {
+  // Also shown while SPECTATING a live race — that is where the "join the next one" button lives, so
+  // hiding the panel during a race left a spectator with no way in short of reopening the lobby list.
+  const show = NET.on && (NET.state === 'waiting' || NET.state === 'countdown' || NET.spectating);
+  gridEl.classList.toggle('on', show);
+  if (!show) return;
+  document.getElementById('gridCount').textContent = NET.roster.length + '/8';
+  /*
+   * THE CLOCK EVERYONE WAS WAITING FOR. Ticked from a deadline rather than a stored number so it stays
+   * correct across re-renders and a dropped k-state. Hidden unless the race is actually waiting on it,
+   * because a countdown on a screen that is not counting down is worse than none.
+   */
+  {
+    const rc = document.getElementById('readyClock');
+    if (rc) {
+      const left = NET.readyDeadline ? NET.readyDeadline - Date.now() : 0;
+      if (NET.state === 'waiting' && left > 0) {
+        const secs = Math.ceil(left / 1000);
+        const nReady = (NET.roster || []).filter((r) => r.ready).length;
+        rc.textContent = nReady >= 2
+          ? 'RACE STARTS IN ' + secs + 's'
+          : 'STARTS IN ' + secs + 's · NEEDS 1 MORE';
+        rc.style.display = '';
+      } else { rc.style.display = 'none'; }
+    }
+  }
+  const rows = document.getElementById('gridRows');
+  rows.innerHTML = '';
+  NET.roster.forEach((p, i) => {
+    const d = document.createElement('div');
+    d.className = 'r';
+    // Colour by the server's GRID SLOT, exactly like the cars on track, so the dot beside a name in
+    // here is the same colour as the kart you are looking at. Keyed off the roster index it wasn't.
+    const slot = isFinite(p.slot) ? p.slot : i;
+    const col = p.id === (NET.sock && NET.sock.id) ? LIVERY.me.body : NET_LIVERIES[slot % NET_LIVERIES.length].body;
+    d.innerHTML = '<span class="dot" style="background:' + col + '"></span>' +
+                  '<span class="no">' + (slot + 1) + '</span>' +
+                  '<span class="nm">' + esc(p.name) + '</span>';
+    rows.appendChild(d);
+  });
+  // Spectator: READY is meaningless (you are not on this grid) — the control you need is the one that
+  // puts you in the NEXT race. Pressing it is the single moment an entry is created, and the server
+  // keys the queue by socket so pressing it twice cannot enter you (or charge you) twice.
+  const ready = document.getElementById('btnReady');
+  const joinNext = document.getElementById('btnJoinNext');
+  ready.style.display = NET.spectating ? 'none' : '';
+  // Show what the SERVER thinks, not only what this client last clicked. Arriving with a stake readies
+  // you server-side without the button ever being pressed, and a button still reading READY while you
+  // are already on the grid reads as "it didn't work".
+  {
+    const meRow = (NET.roster || []).find((p2) => p2.id === (NET.sock && NET.sock.id));
+    if (meRow) {
+      const on = !!meRow.ready;
+      ready.classList.toggle('armed', on);
+      // Locked in reads as locked in — and it is not clickable, so it cannot look like something that
+      // failed to take. Waiting shows the label as an instruction.
+      ready.textContent = on ? 'READY ✓ · LOCKED IN' : 'READY';
+      ready.disabled = on;
+      ready.style.cursor = on ? 'default' : '';
+    }
+  }
+  joinNext.style.display = NET.spectating ? '' : 'none';
+  joinNext.disabled = !!NET.queued;
+  joinNext.textContent = NET.queued ? 'IN THE NEXT RACE ✓' : 'JOIN NEXT RACE';
+  joinNext.classList.toggle('armed', !!NET.queued);
+}
+
+function doJoin(id) {
+  NET.spectating = false;
+  netConnect((ok) => {
+    if (!ok) return;
+    NET.sock.emit('k-join', { lobbyId: id, name: netName(), color: LIVERY.me.body });
+    NET.lobbyId = id; NET.on = true;
+    closeLobby();
+  });
+}
+function doSpectate(id) {
+  NET.spectating = true; NET.queued = false;
+  netConnect((ok) => {
+    if (!ok) return;
+    NET.sock.emit('k-spectate', { lobbyId: id });
+    NET.lobbyId = id; NET.on = true;
+    netNote('Watching — JOIN NEXT RACE to get in');
+    closeLobby();
+    renderLobbyPanel();
+  });
+}
+function showNetResults(d) {
+  const rows = (d.results || []).map((r) =>
+    '<div class="row"><span>' + r.place + '. ' + esc(r.name) + '</span><b>' + r.time.toFixed(2) + '</b></div>').join('');
+  /*
+   * After a race you get a CHOICE and a clock, not a single button. The 30-second window is the rule
+   * — the first eight to ready are in the next race — so it is shown counting down rather than left
+   * for people to guess at, and READY UP is what enters you. Nobody is charged by this screen: the
+   * entry is taken when you ready, and handed straight back if the race never runs.
+   */
+  msg.innerHTML = '<div class="card"><h2>RESULT — ' + esc(d.trackId) + '</h2><div class="rows">' + rows +
+    '</div><div class="note" id="nextIn" style="margin:10px 0 4px">Next race: first 8 to ready up, within 30s</div>' +
+    '<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">' +
+    '<button id="rsReady">READY UP</button>' +
+    '<button id="rsWatch" class="ghost">JUST WATCH</button>' +
+    '<button id="rsHome" class="ghost">HOME</button></div></div>';
+  const rr = document.getElementById('rsReady');
+  if (rr) rr.onclick = () => { if (NET.sock) NET.sock.emit('k-ready', { ready: true }); msg.innerHTML = ''; };
+  const rw = document.getElementById('rsWatch');
+  if (rw) rw.onclick = () => { if (NET.sock) NET.sock.emit('k-ready', { ready: false }); msg.innerHTML = ''; };
+  const rh = document.getElementById('rsHome');
+  if (rh) rh.onclick = () => {
+    // Leaving refunds anything staked on a race that has not started, server-side.
+    if (NET.sock) NET.sock.emit('k-leave');
+    if (EMBED) { try { location.assign('/games/kart'); return; } catch (_) {} }
+    NET.on = false; NET.remotes.clear(); msg.innerHTML = ''; openLobby();
+  };
+  // Live countdown off the server's own deadline, so the number on screen is the real one.
+  const tick = setInterval(() => {
+    const el = document.getElementById('nextIn');
+    if (!el) { clearInterval(tick); return; }
+    const lb = (NET.lobbies || []).find((l) => l.id === NET.lobbyId);
+    const ms = lb && lb.readyInMs != null ? lb.readyInMs : null;
+    el.textContent = ms != null
+      ? 'Next race in ' + Math.ceil(ms / 1000) + 's — first 8 to ready up are in'
+      : 'Next race: first 8 to ready up. Needs 2 ready or the clock restarts.';
+  }, 500);
+  setTimeout(() => clearInterval(tick), 60000);
+}
+
+// Selected stake in dollars. 0 == free. Custom overrides the tiers the moment it has a value, so a
+// player who types an amount does not have to also remember to deselect a chip.
+let _stake = 0;
+function updateStakeNote() {
+  const v = readStake();
+  const t = document.getElementById('lbTitle'), n2 = document.getElementById('lbStakeNote');
+  if (t) t.textContent = v > 0 ? '$' + v + ' RACES' : 'FREE RACES';
+  if (n2) n2.textContent = v > 0
+    ? 'winner takes the pot − 10%, ties split'
+    : 'no stake';
+}
+function readStake() {
+  const c = parseFloat((document.getElementById('stkCustom') || {}).value || '');
+  if (isFinite(c) && c > 0) return c;
+  return _stake;
+}
+for (const b of document.querySelectorAll('.stk')) {
+  b.onclick = () => {
+    _stake = parseFloat(b.dataset.stake) || 0;
+    const cu = document.getElementById('stkCustom'); if (cu) cu.value = '';
+    for (const o2 of document.querySelectorAll('.stk')) o2.classList.toggle('sel', o2 === b);
+    updateStakeNote();
+  };
+}
+{
+  const cu = document.getElementById('stkCustom');
+  if (cu) cu.oninput = () => {
+    const v = parseFloat(cu.value);
+    if (isFinite(v) && v > 0) for (const o2 of document.querySelectorAll('.stk')) o2.classList.remove('sel');
+    updateStakeNote();
+  };
+}
+document.getElementById('lbCreate').onclick = () => {
+  NET.name = lbNameValue() || NET.name;
+  netConnect((ok) => { if (!ok) return; NET.on = true; NET.spectating = false;
+    _createStake = readStake();
+    NET.sock.emit('k-create', { name: (netName() + '’s race'), player: netName(), stake: _createStake }); closeLobby(); });
+};
+document.getElementById('lbQuick').onclick = () => {
+  NET.name = lbNameValue() || NET.name;
+  // Prefer a race that is actually waiting; the server falls back to the house lobby on a bad id.
+  const open = NET.lobbies.find((l) => l.state === 'waiting' && l.racers < l.max);
+  doJoin(open ? open.id : '');
+};
+document.getElementById('lbSolo').onclick = () => {
+  NET.on = false; NET.remotes.clear();
+  if (NET.sock) { NET.sock.emit('k-leave'); }
+  closeLobby();
+};
+{ const _n = document.getElementById('lbName'); if (_n) _n.oninput = (e) => {
+  NET.name = e.target.value.trim().slice(0, 16);
+  if (NET.name) localStorage.setItem('kart.name', NET.name);
+}; }
+for (const b of document.querySelectorAll('.rgn')) {
+  b.onclick = () => {
+    NET.region = b.dataset.rgn;
+    localStorage.setItem('kart.region', NET.region);
+    for (const o of document.querySelectorAll('.rgn')) o.classList.toggle('sel', o === b);
+    if (NET.sock) { NET.sock.disconnect(); NET.sock = null; }
+    NET.remotes.clear(); NET.lobbies = []; renderLobbyList();
+    netConnect();
+  };
+}
+document.getElementById('btnJoinNext').onclick = (e) => {
+  if (!NET.sock || NET.queued) return;                 // already in — never send a second entry
+  e.target.disabled = true;                            // and never let a double-click send two
+  NET.sock.emit('k-join', { lobbyId: NET.lobbyId, name: netName(), color: LIVERY.me.body });
+};
+// Is this the game embedded by the platform? Only then is there a page that can pay for an entry.
+const EMBED = (() => { try { return new URLSearchParams(location.search).get('embed') === '1' && window.parent !== window; } catch (_) { return false; } })();
+let _payPending = false;
+let _createStake = null;   // stake a race was opened with; null = not a create/quick flow
+let _walLast = null, _walUsdLast = null;
+// Ask the platform to re-read the balance at the moments it actually changes, rather than waiting for
+// the next poll — being charged and being paid are exactly when a player is looking at the number.
+function refreshWallet() { if (EMBED) try { window.parent.postMessage({ __kart: 1, kind: 'KART_BALANCE_PLEASE' }, '*'); } catch (_) {} }
+let _ticket = null;          // { lobbyId, ticket, tsig } — the entry we have already paid for
+function unarmReady() {
+  const b = document.getElementById('btnReady');
+  if (b) { b.classList.remove('armed'); b.textContent = 'READY'; }
+}
+// The ticket comes back from the platform page, which did the on-chain payment and had the backend
+// sign it. Re-sending ready WITH the ticket is what actually puts you on the grid.
+window.addEventListener('message', (ev) => {
+  const d = ev.data;
+  if (!d || d.__kart !== 1) return;
+  if (d.kind === 'KART_WALLET') {
+    // Display only. The game never acts on this — it cannot spend, and a balance it was handed is not
+    // evidence of anything. It exists so a player can watch an entry leave and a win arrive without
+    // leaving the race.
+    const chip = document.getElementById('walChip'), amt = document.getElementById('walAmt');
+    if (chip && amt && typeof d.sol === 'number') {
+      const txt = d.usd != null ? '$' + d.usd.toFixed(2) : d.sol.toFixed(4) + ' SOL';
+      if (_walLast != null && d.sol !== _walLast) {
+        const up = d.sol > _walLast;
+        chip.classList.toggle('up', up);
+        chip.classList.toggle('dn', !up);
+        setTimeout(() => chip.classList.remove('up', 'dn'), 2600);
+        /*
+         * Say it, briefly. Money moving is the one thing a player must never have to wonder about —
+         * but a full-screen "YOU WERE CHARGED" between races would be worse than saying nothing, so it
+         * rides the same small pill everything else uses and is gone in a few seconds.
+         *
+         * Driven off the real balance delta rather than off our own intentions: it reports what
+         * actually happened to the wallet, so it cannot congratulate someone on a payout that failed.
+         * Dust below a cent is ignored — that is a network fee, not news.
+         */
+        const dUsd = (d.usd != null && _walUsdLast != null) ? d.usd - _walUsdLast : null;
+        if (dUsd != null && Math.abs(dUsd) >= 0.01) {
+          netNote((up ? '▲ PAID  +$' : '▼ ENTRY  −$') + Math.abs(dUsd).toFixed(2));
+        }
+      }
+      if (d.usd != null) _walUsdLast = d.usd;
+      _walLast = d.sol;
+      amt.textContent = txt;
+      chip.style.display = '';
+    }
+    return;
+  }
+  if (d.kind === 'KART_PAID') {
+    _payPending = false;
+    _ticket = { lobbyId: d.lobbyId, ticket: d.ticket, tsig: d.tsig };
+    netNote('Entry paid — you are in this race.');
+    refreshWallet();
+    if (NET.sock) NET.sock.emit('k-ready', { ready: true, ticket: d.ticket, tsig: d.tsig });
+  } else if (d.kind === 'KART_PAY_FAILED') {
+    _payPending = false;
+    netNote(d.error || 'Entry failed — you have not been charged.');
+    unarmReady();
+  }
+});
+
+document.getElementById('btnReady').onclick = (e) => {
+  if (!NET.sock) return;
+  /*
+   * READY IS A COMMITMENT, NOT A TOGGLE. In a paid race readying takes the entry fee and puts you on
+   * the grid, so the others are now waiting on a field that must stop changing — a button that could
+   * take it back meant the pot could shrink while the clock ran. The server refuses an un-ready from
+   * a paid seat; this stops the UI from offering one in the first place, which is the honest version.
+   *
+   * Getting out is still free and still simple: LEAVE refunds in full for any race that has not
+   * started. You are either in this race or out of the room, never half-committed.
+   */
+  if (e.target.classList.contains('armed')) return;
+  const armed = true;
+  e.target.classList.add('armed');
+  e.target.textContent = 'READY ✓';
+  // Re-present a ticket already bought for THIS lobby rather than paying again. The server keys the
+  // entry by address, so this is belt and braces against a second charge, not the only guard.
+  const t = (_ticket && _ticket.lobbyId === NET.lobbyId) ? _ticket : null;
+  NET.sock.emit('k-ready', armed && t ? { ready: true, ticket: t.ticket, tsig: t.tsig } : { ready: armed });
+};
+document.getElementById('btnLeave').onclick = () => {
+  if (NET.sock) NET.sock.emit('k-leave');
+  NET.on = false; NET.remotes.clear(); gridEl.classList.remove('on');
+  /*
+   * LEAVE MEANS LEAVE. This used to drop you on the race-picker, which is a screen you have to get
+   * through rather than one you asked for — you pressed leave, so the destination is home. Inside the
+   * platform that means telling the parent to navigate; standalone, fall back to the picker because
+   * there is nowhere else to go.
+   *
+   * The entry is refunded server-side for any race that has not started, so leaving costs nothing.
+   */
+  try {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ __kart: 1, kind: 'EXIT', reason: 'leave' }, '*');
+      return;
+    }
+  } catch (_) {}
+  openLobby();
+};
+
+// Boost-streak alphas, baked. The originals were `strokeStyle` alpha 0.5 multiplied by a per-streak
+// `globalAlpha` of random()*0.5, giving an effective 0..0.25; these are the four bucket midpoints of
+// that same range, folded into the colour so no alpha state has to be touched while drawing.
+const STREAK_COL = [0, 1, 2, 3].map((b) => 'rgba(200,180,255,' + (0.5 * ((b + 0.5) / 4 * 0.5)).toFixed(4) + ')');
+
+function render() {
+  const camAng = me.ang + me.driftYaw * 0.22;
+  const camX = me.x - Math.cos(camAng) * CAM_BACK;
+  const camY = me.y - Math.sin(camAng) * CAM_BACK;
+
+  renderGround(camX, camY, camAng);
+
+  const sx = shake > 0 ? (Math.random() - 0.5) * shake : 0;
+  const sy = shake > 0 ? (Math.random() - 0.5) * shake : 0;
+  ctx.drawImage(gbuf, sx, sy, W, H);
+
+  // ── ONE DEPTH-SORTED SPRITE PASS ──────────────────────────────────────────────────────────────
+  // Scenery and every kart go into one list sorted far-to-near, so nearer things correctly
+  // paint over further ones. Anything behind the camera or off the sides is dropped before it costs a
+  // draw call, which is what keeps a track lined with scenery essentially free.
+  const sprites = [];
+  for (const o of SCENERY) {
+    const q = project(o.x, o.y, camX, camY, camAng);
+    if (!q || q.fd > 2600 || q.x < -0.25 || q.x > 1.25) continue;
+    sprites.push({ fd: q.fd, kind: 'obj', q, o });
+  }
+  // Online: every other car in the lobby. Offline: the scripted pace car. NET.on is the only switch —
+  // the rival stays in the build so a player with no connection still has something to race.
+  if (NET.on) {
+    for (const r of NET.remotes.values()) {
+      const q = project(r.x, r.y, camX, camY, camAng);
+      if (q && q.x > -0.4 && q.x < 1.4) {
+        // A kart that has taken the flag is drawn through — it is a ghost in resolveContact, so it
+        // must LOOK like one too, or you brake for something that is no longer there.
+        sprites.push({ fd: q.fd, kind: 'kart', q, ang: r.ang, k: r, livery: r.livery, tag: r.name,
+                       alpha: r.finished ? 0.42 : 1 });
+      }
+    }
+  } else {
+    const q = project(rival.x, rival.y, camX, camY, camAng);
+    if (q && q.x > -0.4 && q.x < 1.4) {
+      sprites.push({ fd: q.fd, kind: 'kart', q, ang: rival.ang, k: rival, livery: LIVERY.rival });
+    }
+  }
+  sprites.sort((a, b) => b.fd - a.fd);
+  for (const sp of sprites) {
+    const X = sp.q.x * W + sx, Y = sp.q.y * H + sy;
+    if (sp.kind === 'obj') {
+      drawScenery(ctx, X, Y, sp.q.s * 0.9 * sp.o.h * (W / GW), sp.o);
+    } else {
+      const rel = Math.atan2(Math.sin(sp.ang - camAng), Math.cos(sp.ang - camAng));
+      const sc = sp.q.s * KART_SPR * (W / GW);
+      if (sc <= 0.02) continue;
+      const k = sp.k;
+      if (sp.alpha != null && sp.alpha < 1) ctx.globalAlpha = sp.alpha;
+      drawKart(ctx, X, Y, sc, rel, k.driftYaw, sp.livery, k, k.burning || k.padT > 0);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Drift sparks trail behind the player's rear wheels.
+  for (const s of sparks) {
+    const q = project(s.x, s.y, camX, camY, camAng);
+    if (!q) continue;
+    ctx.globalAlpha = Math.max(0, s.life) * 0.9;
+    ctx.fillStyle = s.col;
+    const r = Math.max(1, q.s * 2.4 * (W / GW));
+    ctx.beginPath(); ctx.arc(q.x * W + sx, q.y * H + sy, r, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Player kart — fixed on screen, the world moves around it.
+  const boosting = me.burning || me.padT > 0;
+  // Projected from its OWN world position — identical treatment to every rival. This also means the
+  // kart naturally swings across the screen when the camera lags behind a drift, instead of being
+  // pinned dead centre.
+  const mp = project(me.x, me.y, camX, camY, camAng);
+  if (mp) {
+    drawKart(ctx, mp.x * W + sx, mp.y * H + sy,
+             mp.s * KART_SPR * (W / GW), me.driftYaw * 0.55, me.driftYaw, LIVERY.me, me, boosting);
+  }
+
+  // Speed streaks while boosting. Same 16 streaks, same random scatter, but drawn as FOUR batched
+  // paths instead of sixteen individually-alpha'd strokes. Each streak used to set globalAlpha and then
+  // stroke on its own, and a state change between draws is what stops the canvas batching them — so the
+  // one moment the player most wants to feel fast was also the one paying the most draw calls. The
+  // per-streak alpha is quantised into four buckets, which is indistinguishable from a continuous
+  // random alpha at this size and opacity.
+  if (boosting) {
+    ctx.lineWidth = 2;
+    for (let b = 0; b < 4; b++) {
+      ctx.strokeStyle = STREAK_COL[b];
+      ctx.beginPath();
+      for (let i = 0; i < 4; i++) {
+        const a = Math.random() * Math.PI * 2, rr = 0.28 + Math.random() * 0.6;
+        const x1 = W / 2 + Math.cos(a) * W * rr, y1 = H * 0.55 + Math.sin(a) * H * rr;
+        ctx.moveTo(x1, y1); ctx.lineTo(x1 + Math.cos(a) * 60, y1 + Math.sin(a) * 60);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // Mirror LAST so it sits over the world but under nothing else, and only every other frame — see
+  // the note on the buffer. Never while spectating: there is no "behind you" if you are not driving.
+  // Re-RENDER the mirror every other frame, but BLIT it every frame. Doing both at half rate meant
+  // the glass simply was not drawn on alternate frames, which at 240fps is a 120Hz strobe.
+  if (!(NET.on && NET.spectating)) { try { drawMirror(ctx, W, H, (++_mirrorTick & 1) === 1); } catch (_) {} }
+  drawMinimap();
+
+  // Vignette — keeps the eye on the road and hides the buffer edges. The gradient depends only on the
+  // viewport, so it is rebuilt on resize rather than allocated fresh on every single frame.
+  if (!_vig || _vigW !== W || _vigH !== H) {
+    _vig = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.95);
+    _vig.addColorStop(0, 'rgba(0,0,0,0)'); _vig.addColorStop(1, 'rgba(0,0,0,0.55)');
+    _vigW = W; _vigH = H;
+  }
+  ctx.fillStyle = _vig; ctx.fillRect(0, 0, W, H);
+}
+let _vig = null, _vigW = 0, _vigH = 0;
+
+function drawMinimap() {
+  const R = Math.min(92, H * 0.19), pad = R + 16;
+  const ox = W - pad, oy = pad;
+
+  // The ribbon used to be stroked at a flat 7px while the road is really ROAD_W wide — about 23px at
+  // this scale. So anyone running the edge of the track was drawn OUTSIDE the band and looked off
+  // course. The stroke width is now the road's actual width in minimap units, and the scale solves for
+  // it (sc = (R-2)/(R_MAX + ROAD_W/2)) so the widest part of the circuit plus half a road still fits
+  // inside the dial instead of being clipped.
+  const sc = (R - 2) / (R_MAX + ROAD_W / 2);
+  const roadPx = ROAD_W * sc;
+
+  ctx.save();
+  ctx.globalAlpha = 0.9;
+  ctx.beginPath();
+  for (let i = 0; i <= 160; i++) {
+    const t = i / 160 * Math.PI * 2, r = radiusAt(t) * sc;
+    const x = ox + Math.cos(t) * r, y = oy + Math.sin(t) * r;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = roadPx + 3; ctx.stroke();  // kerb hint
+  ctx.strokeStyle = 'rgba(255,255,255,0.24)'; ctx.lineWidth = roadPx; ctx.stroke();      // the road
+  ctx.strokeStyle = 'rgba(153,69,255,0.5)';  ctx.lineWidth = 1.4; ctx.stroke();          // centreline
+
+  const dot = (k, col, big) => {
+    const t = Math.atan2(k.y - CY, k.x - CX), r = Math.hypot(k.x - CX, k.y - CY) * sc;
+    const x = ox + Math.cos(t) * r, y = oy + Math.sin(t) * r;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.beginPath(); ctx.arc(x, y, (big ? 4 : 3.4) + 1.4, 0, 7); ctx.fill();
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(x, y, big ? 4 : 3.4, 0, 7); ctx.fill();
+  };
+  dot(rival, '#ff5f7a', false); dot(me, '#39d353', true);
+  ctx.restore();
+}
+
+// ── HUD ──────────────────────────────────────────────────────────────────────────────────────────
+const el = {
+  lap: document.getElementById('lap'), time: document.getElementById('time'),
+  best: document.getElementById('best'), spd: document.getElementById('spd'),
+  bar: document.querySelector('.driftRow'), fill: document.getElementById('driftFill'),
+  driftBar: document.getElementById('driftBar'),
+  fps: document.getElementById('fps'),
+  fuel: document.getElementById('fuel'), fuelFill: document.getElementById('fuelFill'),
+  fuelPend: document.getElementById('fuelPend'),
+  tyreBar: document.getElementById('tyreBar'), tyreFill: document.getElementById('tyreFill'),
+  tyreLbl: document.getElementById('tyreLbl'),
+  fuelLbl: document.getElementById('fuelLbl'),
+  slip: document.getElementById('slip'), posrows: document.getElementById('posrows'),
+};
+
+// ── LIVE RACE POSITIONS ─────────────────────────────────────────────────────────────────────────
+// Because the circuit is radial, progress round it is just the angle about the centre. Total race
+// progress = completed laps + that angle, so sorting on it gives the running order every frame — the
+// same value a server would compute and broadcast in the real game.
+function progressOf(k) {
+  const t = Math.atan2(k.y - CY, k.x - CX);
+  const frac = ((t % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  return (k.lap - 1) * Math.PI * 2 + frac;
+}
+function standings() {
+  // Online this has to be the REAL field. It was hardcoded to [me, rival], so during an actual race
+  // the board showed the offline pace car — a driver who is not in the lobby, on a lap number from a
+  // different simulation — and never showed the people you were actually racing.
+  const field = NET.on
+    ? [me, ...NET.remotes.values()]
+    : [me, rival];
+  return field
+    .map((k) => ({ k, name: k === me ? 'YOU' : (k.name || (NET.on ? 'RACER' : 'RIVAL')), you: k === me, prog: progressOf(k) }))
+    .sort((a, b) => b.prog - a.prog);
+}
+let _posHtml = '';
+let _posAt = 0;   // last standings rebuild — see the throttle in hud()
+let _fuelShown = -1, _fuelBurn = null, _fuelFull = null, _fuelLbl = null;
+let _tyreShown = -1, _tyreState = null;
+let _adShown = null;
+let _pendShown = -1, _pendCol = null;
+// Frame-rate readout, averaged over a short window so it reads steadily rather than flickering.
+let _fpsAcc = 0, _fpsN = 0, _fpsShown = 0, _fpsAt = 0;
+function hud() {
+  el.lap.textContent = Math.min(me.lap, LAPS) + '/' + LAPS;
+  el.time.textContent = fmt(Math.max(0, tRace - me.lapStart));
+  el.best.textContent = me.best ? fmt(me.best) : '—';
+  el.spd.textContent = (me.spd < -1 ? 'R ' : '') +
+    Math.round(Math.abs(me.spd) * KMH_PER_UNIT * MPH_PER_KMH / SPD_SC);
+  const tier = driftTier(me);
+  if (me.drifting) {
+    el.bar.classList.add('on');
+    const prog = Math.min(1, me.driftT / TIERS[2]);
+    el.fill.style.width = (prog * 100) + '%';
+    el.fill.style.background = tier >= 0 ? TIER_COL[tier] : 'rgba(255,255,255,0.35)';
+  } else el.bar.classList.remove('on');
+  // Fuel bar: fills from drifts, drains while held. Reads as a resource you spend, not a one-shot.
+  //
+  // Writing style.width EVERY frame is what quietly cost ~60fps here: an inline style assignment
+  // invalidates layout, so the bar forced a style recalc 240 times a second. Quantising to whole
+  // percent and only touching the DOM on an actual change costs nothing visually and gives it back.
+  const fuelPct = Math.max(0, Math.min(1, me.fuel / BOOST_MAX));
+  const fuelStep = Math.round(fuelPct * 100);
+  if (fuelStep !== _fuelShown) { _fuelShown = fuelStep; el.fuelFill.style.width = fuelStep + '%'; }
+  // The charge the current drift has EARNED SO FAR, shown live on the end of the reserve. Clamped by
+  // the headroom left in the bar so the preview can never promise fuel the cap will not actually give
+  // you — a full bar correctly shows a drift earning nothing.
+  const pend = me.drifting ? Math.min(driftFuel(me.driftT), BOOST_MAX - me.fuel) : 0;
+  const pendStep = Math.round(Math.max(0, pend / BOOST_MAX) * 100);
+  if (pendStep !== _pendShown) { _pendShown = pendStep; el.fuelPend.style.width = pendStep + '%'; }
+  // Tint via `color` so the segment's own `background:currentColor` follows the tier without a second
+  // per-frame background write.
+  const pendCol = pendStep === 0 ? 'transparent' : (tier >= 0 ? TIER_COL[tier] : 'rgba(255,255,255,0.45)');
+  if (pendCol !== _pendCol) { _pendCol = pendCol; el.fuelPend.style.color = pendCol; }
+  // GRIP. Quantised and only written on change, for the same reason the boost bar is: an inline style
+  // write invalidates layout, and doing that every frame at 240fps was measured costing ~60fps here.
+  const tyreVal = (typeof me.tyre === 'number' && isFinite(me.tyre)) ? me.tyre : 1;
+  const tyrePct = (tyreVal - TYRE_MIN) / (1 - TYRE_MIN);          // 1 = fresh, 0 = fully worn
+  const tyreStep = Math.round(Math.max(0, Math.min(1, tyrePct)) * 100);
+  if (tyreStep !== _tyreShown) { _tyreShown = tyreStep; el.tyreFill.style.width = tyreStep + '%'; }
+  // ATTACK / DEFEND readiness. Showing WHEN a move is available is most of the mechanic: the whole
+  // design rests on each being inert outside its situation, and a player cannot learn that rule from a
+  // button that silently does nothing. Lit = the situation is real and you can afford it.
+  const canAtk = me.slip >= ATK_MIN && me.fuel >= ATK_COST;
+  const canDef = me.threat >= DEF_MIN && me.fuel >= DEF_COST;
+  const adState = me.atkT > 0 ? 'ATTACK' : me.defT > 0 ? 'DEFEND'
+                : canAtk ? 'Q · ATTACK READY' : canDef ? 'E · DEFEND READY' : 'GRIP';
+  if (adState !== _adShown) { _adShown = adState; el.tyreLbl.textContent = adState;
+    el.tyreLbl.style.color = (me.atkT > 0) ? '#ff9b3d' : (me.defT > 0) ? '#4aa3ff'
+                           : (canAtk || canDef) ? '#f8e6ad' : '#6f6790'; }
+  const tState = tyreStep <= 25 ? 'worn' : tyreStep <= 60 ? 'warn' : '';
+  if (tState !== _tyreState) {
+    _tyreState = tState;
+    el.tyreBar.classList.toggle('warn', tState === 'warn');
+    el.tyreBar.classList.toggle('worn', tState === 'worn');
+  }
+  const burn = !!me.burning, full = fuelPct > 0.995, lbl = me.fuel > 0.001 || pend > 0.001;
+  if (burn !== _fuelBurn) { _fuelBurn = burn; el.fuel.classList.toggle('burn', burn); }
+  if (full !== _fuelFull) { _fuelFull = full; el.fuel.classList.toggle('full', full); }
+  if (lbl !== _fuelLbl) { _fuelLbl = lbl; el.fuelLbl.classList.toggle('on', lbl); }
+  // The wake gives and takes at the same time, so the readout has to say WHICH is happening right
+  // now or the mechanic is invisible: a player who only ever sees "SLIPSTREAM" learns that following
+  // closely is free, and then loses corners they can't explain. Steering into it flips the label.
+  {
+    const on = me.slip > 0.3;
+    el.slip.classList.toggle('on', on);
+    if (on) {
+      const cornering = Math.abs(me.steerVis) > 0.3;
+      el.slip.textContent = cornering ? 'DIRTY AIR' : 'SLIPSTREAM';
+      el.slip.classList.toggle('dirty', cornering);
+    }
+  }
+  el.fps.textContent = _fpsShown || '—';
+  // Only touch the DOM when the order or a lap actually changes — rewriting innerHTML every frame
+  // would churn the board 240 times a second for nothing.
+  /*
+   * THE GAP, IN SECONDS, TO THE CAR AHEAD.
+   *
+   * A list of positions is not tense. "+0.42" ticking toward zero is — it is the difference between a
+   * board that tells you the order and one that tells you a pass is coming, which is the whole reason
+   * anyone watches (or bets on) a race rather than reading the result afterwards.
+   *
+   * Progress is already an angle about the circuit's centre, so the distance between two cars is that
+   * angular difference along the centreline, and the TIME between them is that distance over the speed
+   * they are closing it at. Using the car BEHIND's own speed is the honest choice: it answers "how long
+   * until I am there at my current pace", which is the question being asked. Below about walking pace
+   * the number is meaningless (dividing by nearly zero), so it is suppressed rather than printed as a
+   * spurious 900.0.
+   */
+  /*
+   * ...and rebuilt at 8Hz, not 240. The board only ever redrew when the ORDER changed, which was cheap
+   * because the string was identical between changes. A live gap changes every single frame, so that
+   * guard would now pass every frame and rewrite the whole panel's innerHTML at the refresh rate — the
+   * same layout thrash that the boost bar was measured costing ~60fps for. A gap readout updating
+   * eight times a second is indistinguishable from one updating 240 times.
+   */
+  const _nowMs = performance.now();
+  if (_nowMs - _posAt < 125) return;
+  _posAt = _nowMs;
+  const st = standings();
+  const GAP_MIN_SPD = 40 * SPD_SC;
+  const html = st.map((e, i) => {
+    let gap = '';
+    if (i > 0) {
+      const ahead = st[i - 1];
+      const dProg = ahead.prog - e.prog;                 // radians of circuit between them
+      if (dProg > 0) {
+        const arc = dProg * radiusAt(nearestT(e.k.x, e.k.y));   // ...as real track distance
+        const spd = Math.max(Math.abs(e.k.spd || 0), GAP_MIN_SPD);
+        const secs = arc / spd;
+        if (secs < 60) gap = '+' + secs.toFixed(2);
+      }
+    }
+    return '<div class="r' + (e.you ? ' you' : '') + '"><span class="n">' + (i + 1) + '</span>' +
+      '<span class="nm">' + e.name + '</span>' +
+      '<span class="gap">' + gap + '</span>' +
+      '<span class="lp">L' + Math.min(e.k.lap, LAPS) + '</span></div>';
+  }).join('');
+  if (html !== _posHtml) { _posHtml = html; el.posrows.innerHTML = html; }
+}
+
+// ── Loop ─────────────────────────────────────────────────────────────────────────────────────────
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000; last = now;
+  if (dt > 0) { _fpsAcc += 1 / dt; _fpsN++; }
+  if (now - _fpsAt > 400) { _fpsShown = _fpsN ? Math.round(_fpsAcc / _fpsN) : 0; _fpsAcc = 0; _fpsN = 0; _fpsAt = now; }
+  if (dt > 0.05) dt = 0.05;                    // a stall must never teleport the kart
+  gpPoll(dt);                                  // controller, read once per frame for every state
+
+  if (state === 'done') {
+    /*
+     * SLOW-DOWN LAP. Taking the flag used to set state to 'done' and nothing else, so the car froze
+     * on the spot — parked ON the racing line, right at the finish, exactly where everyone still
+     * racing has to drive. The server keeps broadcasting that last position, so it sat there as a
+     * solid obstacle for the rest of the race.
+     *
+     * A finished kart now drives itself off the line: throttle off, and steer to whichever side of
+     * the road it is already nearest until it is in the outside lane, then coast to a stop. Combined
+     * with ghosting it in resolveContact, a car that has finished can no longer affect the race it
+     * has already left.
+     */
+    tRace += dt;
+    if (me.spd > 4 * SPD_SC) {
+      const tt = nearestT(me.x, me.y);
+      const p = pointAt(tt), h = headingAt(tt);
+      const perpx = -Math.sin(h), perpy = Math.cos(h);
+      const off = (me.x - p.x) * perpx + (me.y - p.y) * perpy;   // signed distance from the centreline
+      const want = (off >= 0 ? 1 : -1) * ROAD_W * 0.40;          // park on the side we are already on
+      // Heading that converges on that lane. A heading rotated +θ from the track heading moves you
+      // +sin(θ) along the perpendicular, so the aim angle is just atan2(error, lookahead).
+      const aim = h + Math.atan2(want - off, 260);
+      const dA = Math.atan2(Math.sin(aim - me.ang), Math.cos(aim - me.ang));
+      stepKart(me, dt, {
+        gas: false, brake: me.spd > 130 * SPD_SC,
+        left: dA < -0.03, right: dA > 0.03,
+        drift: false, fire: false, slipFrom: [],
+      });
+    } else me.spd = 0;
+  } else if (state === 'countdown') {
+    /*
+     * HELD ON THE GRID. Offline this is a 4-second local countdown and then you drive. Online it is
+     * NOT: the server decides when a race is live, and until it says so the car must not move at all.
+     *
+     * Without this the local timer ran on its own the moment the page loaded, so a player sitting in
+     * the lobby — not on any grid, not ready, possibly still choosing a race — was already driving.
+     * They would be most of a lap up the road before anyone else had pressed READY. The lights are
+     * the server's to give, so the countdown only ticks down when the server has actually set a start
+     * time, and the transition to racing comes from the server event, never from this timer.
+     */
+    if (NET.on) {
+      if (NET.state === 'countdown' && NET.startAt) {
+        countdown = Math.max(0, (NET.startAt - Date.now()) / 1000);
+        const n = Math.ceil(countdown);
+        msg.innerHTML = countdown <= 1 ? '<div class="big go">GO!</div>'
+                                       : '<div class="big">' + Math.max(1, n) + '</div>';
+      } else {
+        msg.innerHTML = '';               // waiting in the lobby: no lights, no driving
+      }
+      // Keep the car parked on its slot so a held throttle cannot creep it forward.
+      me.spd = 0; me.drifting = false; me.driftT = 0; me.fuel = me.fuel || 0;
+    } else {
+      countdown -= dt;
+      const n = Math.ceil(countdown);
+      msg.innerHTML = countdown <= 1
+        ? '<div class="big go">GO!</div>'
+        : '<div class="big">' + Math.max(1, n - 1) + '</div>';
+      if (countdown <= 0) { state = 'race'; msg.innerHTML = ''; me.lapStart = 0; tRace = 0; }
+    }
+  } else if (state === 'race') {
+    tRace += dt;
+    // A spectator watches; they have no car on the grid, so their inputs must do nothing.
+    const live = !(NET.on && NET.spectating);
+    const ctrl = {
+      gas: live && !!(keys.arrowup || keys.w || GP.gas), brake: live && !!(keys.arrowdown || keys.s || GP.brake),
+      left: live && !!(keys.arrowleft || keys.a || GP.steer < -GP_DZ), right: live && !!(keys.arrowright || keys.d || GP.steer > GP_DZ),
+      drift: live && !!(keys.shift || GP.drift),
+      fire: live && !!(keys[' '] || GP.boost),
+      // Q attacks, E defends. Both are no-ops unless the situation is real (see stepKart), so a
+      // player mashing them on an empty track spends nothing and gains nothing.
+      attack: live && !!(keys.q || GP.attack),
+      defend: live && !!(keys.e || GP.defend),
+      // EVERY other car on track, not just the scripted pace car. This used to be `rival` alone, so
+      // the one build where slipstream actually matters — a real race against real people — was the
+      // one build where it did nothing at all.
+      slipFrom: wakeSources(),
+    };
+    // Tell the server what is held BEFORE stepping locally, so the input it simulates is the same
+    // input this frame used — half a frame of skew here is half a frame of correction later.
+    netSendInput(ctrl);
+    const info = stepKart(me, dt, ctrl);
+
+    // Rival: follows the centreline at a steady, beatable pace so sprite scaling can be judged.
+    rival.t += ((232 * SPD_SC) / Math.max(120, radiusAt(rival.t))) * dt;
+    const rp = pointAt(rival.t), rh = headingAt(rival.t);
+    // Hold the grid slot off the line, then ease onto the racing line over the first few seconds —
+    // otherwise it would teleport to the centre the instant the lights go out.
+    rival.lane += (0 - rival.lane) * Math.min(1, dt * 0.55);
+    const rperp = rh + Math.PI / 2;
+    rival.x = rp.x + Math.cos(rperp) * rival.lane;
+    rival.y = rp.y + Math.sin(rperp) * rival.lane;
+    const prevAng = rival.ang;
+    rival.ang = rh;
+    rival.lap = 1 + Math.floor(rival.t / (Math.PI * 2));   // for the standings board
+
+    // The rival is scripted along the centreline rather than run through stepKart, so none of the
+    // animation state gets filled in for it. Deriving steering from how fast its heading is actually
+    // changing means the same sprite code animates it — wheels turning, body leaning, driver looking
+    // into the corner — instead of it sliding round bends bolt upright with dead wheels.
+    const rate = Math.atan2(Math.sin(rh - prevAng), Math.cos(rh - prevAng)) / Math.max(dt, 1e-4);
+    const wantSteer = Math.max(-1, Math.min(1, rate / 1.6));
+    rival.steerVis += (wantSteer - rival.steerVis) * Math.min(1, dt * 8);
+    rival.driftYaw += (wantSteer * 0.22 - rival.driftYaw) * Math.min(1, dt * 6);
+    rival.spd = 232 * SPD_SC;
+    rival.wheelPhase = (rival.wheelPhase + rival.spd * dt * 0.055) % (Math.PI * 2);
+    // Brake lights where its line genuinely tightens. That gives you a braking point to read and copy,
+    // which is exactly the kind of information a skill-based racer should hand you for free.
+    rival.braking = Math.abs(wantSteer) > 0.45;
+
+    resolveContact(dt);
+
+    if (lapLogic(me, dt)) { state = 'done'; finished = tRace; me.finished = true; showResult(); }
+
+    // Sparks while drifting, coloured by the charge tier you have reached.
+    const tier = driftTier(me);
+    if (me.drifting && tier >= 0) {
+      for (let i = 0; i < 2; i++) {
+        const a = me.ang + Math.PI + (Math.random() - 0.5) * 0.7;
+        sparks.push({ x: me.x + Math.cos(a) * 26, y: me.y + Math.sin(a) * 26, life: 1, col: TIER_COL[tier] });
+      }
+    }
+    // Lay rubber while drifting, and scuff the grass when you run wide.
+    if (me.drifting || (!info.onRoad && me.spd > 60 * SPD_SC)) {
+      const back = me.ang + Math.PI, per = me.ang + Math.PI / 2;
+      for (const sgn of [-1, 1]) {
+        skidStamp(me.x + Math.cos(back) * 22 + Math.cos(per) * 17 * sgn,
+                  me.y + Math.sin(back) * 22 + Math.sin(per) * 17 * sgn,
+                  me.drifting ? 0.16 : 0.07);
+      }
+    }
+    for (const s of sparks) s.life -= dt * 2.6;
+    if (sparks.length > 220) sparks.splice(0, sparks.length - 220);
+    sparks = sparks.filter((s) => s.life > 0);
+
+    if (audioOn && actx && engGain) {
+      const rev = me.spd / MAX_SPD;
+      eng.frequency.setTargetAtTime(58 + rev * 165 + (me.boost > 0 ? 40 : 0), actx.currentTime, 0.05);
+      engGain.gain.setTargetAtTime(0.028 + rev * 0.05, actx.currentTime, 0.08);
+      skidGain.gain.setTargetAtTime(me.drifting ? 0.05 : (info.onRoad ? 0 : 0.03), actx.currentTime, 0.06);
+    }
+  }
+
+  // Network last, after the sim has moved us: report where we ended up, and advance the opponents'
+  // interpolation so they are drawn smoothly between the 30Hz packets.
+  if (NET.on) { netInterpolate(); }
+
+  // Controls are shown while you are WAITING (grid or lobby), where you actually read them, and stay
+  // up if pinned with H. During a race they get out of the way unless asked for.
+  renderCtrls();
+  showCtrls(_ctrlsPinned || lobbyEl.classList.contains('on') || state !== 'race');
+
+  shake *= Math.pow(0.001, dt);
+  if (shake < 0.2) shake = 0;
+
+  render();
+  hud();
+  requestAnimationFrame(frame);
+}
+
+function showResult() {
+  if (actx && engGain) { engGain.gain.setTargetAtTime(0, actx.currentTime, 0.2); skidGain.gain.setTargetAtTime(0, actx.currentTime, 0.2); }
+  msg.innerHTML =
+    '<div class="panel"><h2>RACE COMPLETE</h2><div class="sub">' + LAPS + ' laps · identical karts · no rubber-banding</div>' +
+    '<div class="rows"><div><span>Total</span><b>' + fmt(finished) + 's</b></div>' +
+    '<div><span>Best lap</span><b>' + (me.best ? fmt(me.best) + 's' : '—') + '</b></div></div>' +
+    '<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">' +
+    '<button id="again">RACE AGAIN</button>' +
+    '<button id="goHome" class="ghost">HOME</button></div></div>';
+  const b = document.getElementById('again');
+  { const gh = document.getElementById('goHome');
+    if (gh) gh.onclick = () => { if (EMBED) { try { location.assign('/games/kart'); return; } catch (_) {} } openLobby(); }; }
+  if (b) b.onclick = () => { reset(); stage.focus(); };
+}
+
+document.getElementById('trk').textContent = TRACK_ID;
+window.__dbg={get me(){return me;},get rival(){return rival;},CX,CY,TRACK_ID,KART_R,ROAD_W,
+  // The simulation itself, so a physics change can be MEASURED offline instead of eyeballed. Balance
+  // claims about slipstream/dirty air are only worth anything if the two halves can be run head to
+  // head on the same corner — see the SLIP_* constants for why the ratio between them matters.
+  stepKart,mkKart,wakeSources,SLIP_MAX,SLIP_COS,DIRTY_TURN,SPD_SC,MAX_SPD,
+  // Frame INTERVAL is useless for measuring the renderer once the display cap is the binding
+  // constraint — at 240Hz every frame reads 4.17ms whether the ground loop took 1ms or 4ms. This times
+  // the loop itself so a change can be shown to have actually done something.
+  surfaceAt,offsetFromLine,pointAt,headingAt,radiusAt,TRK,TEX,MASKN,SURF,
+  // The painted mask, still readable so the computed surface can be checked AGAINST the artwork.
+  maskAt(x,y){const mx=(x*MASKN/TEX)|0,my=(y*MASKN/TEX)|0;
+    if(mx<0||my<0||mx>=MASKN||my>=MASKN)return SURF.GRASS;
+    const v=maskData[(my*MASKN+mx)*4];
+    return v>200?SURF.BOOST:v>130?SURF.KERB:v>60?SURF.ROAD:SURF.GRASS;},
+  groundMs(n){n=n||200;const t=performance.now();for(let i=0;i<n;i++)renderGround(me.x,me.y,me.ang);return (performance.now()-t)/n;},
+  // Times the FULL frame draw, so boost-only costs can be isolated from the ground loop.
+  renderMs(n,sh){n=n||120;const s0=shake;if(sh!==undefined)shake=sh;
+    const t=performance.now();for(let i=0;i<n;i++)render();const r=(performance.now()-t)/n;shake=s0;return r;},
+  // Checksum of the rendered ground buffer for a FIXED camera, so an optimisation can be proved to
+  // have changed only the cost and not the picture.
+  groundHash(x,y,a){
+    renderGround(x,y,a);
+    let sum=0,diff=0;
+    // alpha included: the fast path copies whole texture words, so an opaque-texture assumption has to
+    // be checked rather than trusted.
+    for(let i=0;i<gpx.length;i+=4){sum=(sum+gpx[i]+gpx[i+1]*3+gpx[i+2]*7+gpx[i+3]*11)>>>0;}
+    return {sum,px:[gpx[0],gpx[1],gpx[2],gpx[(GW*300+320)*4],gpx[(GW*300+320)*4+1],gpx[(GW*300+320)*4+2]]};
+  },
+  // Full RGB buffer as base64, so two builds can be diffed pixel by pixel instead of trusting a
+  // checksum to tell you HOW different they are.
+  groundB64(x,y,a){
+    renderGround(x,y,a);
+    const n=gpx.length/4, out=new Uint8Array(n*3);
+    for(let i=0,j=0;i<n;i++){out[j++]=gpx[i*4];out[j++]=gpx[i*4+1];out[j++]=gpx[i*4+2];}
+    let s='';for(let i=0;i<out.length;i+=8192)s+=String.fromCharCode.apply(null,out.subarray(i,i+8192));
+    return btoa(s);
+  }};
+/*
+ * WHERE A PLAYER LANDS.
+ *
+ * ?lobby=  — a deep link from Live Matches. Go straight into that race.
+ * ?stake=  — they already chose a stake on the game page and pressed PLAY. That press WAS the
+ *            decision, so put them in a race at that stake and ready them up. Showing the lobby
+ *            browser here made them make the same choice twice on two different screens, and the
+ *            second one is the confusing one because it looks like the first didn't work.
+ * neither  — show the browser.
+ *
+ * For ?stake= we wait one beat for the lobby list before acting, so we join a room someone is already
+ * waiting in rather than opening a duplicate next to it.
+ */
+(function () {
+  let lob = '', stk = null;
+  try {
+    const qs = new URLSearchParams(location.search);
+    lob = qs.get('lobby') || '';
+    const raw = qs.get('stake');
+    if (raw !== null) { const v = parseFloat(raw); if (isFinite(v) && v >= 0) stk = v; }
+  } catch (_) {}
+
+  if (lob) {
+    netConnect((ok) => {
+      if (!ok) { openLobby(); return; }
+      NET.on = true; NET.spectating = false; NET.lobbyId = lob;
+      NET.sock.emit('k-join', { lobbyId: lob, name: netName(), color: LIVERY.me.body });
+    });
+    return;
+  }
+  if (stk === null) { openLobby(); return; }
+
+  netConnect((ok) => {
+    if (!ok) { openLobby(); return; }
+    const cents = Math.round(stk * 100);
+    NET.sock.emit('k-list');
+    netNote(cents > 0 ? 'Finding a $' + stk + ' race…' : 'Finding a free race…');
+    setTimeout(() => {
+      if (!NET.sock) { openLobby(); return; }
+      const match = (NET.lobbies || []).find((l) =>
+        l.state === 'waiting' && l.racers < l.max && Math.round((l.stakeUsd || 0) * 100) === cents);
+      NET.on = true; NET.spectating = false; _createStake = stk;
+      if (match) {
+        NET.lobbyId = match.id;
+        NET.sock.emit('k-join', { lobbyId: match.id, name: netName(), color: LIVERY.me.body });
+        setTimeout(() => { if (NET.sock) NET.sock.emit('k-ready', { ready: true }); }, 320);
+      } else {
+        NET.sock.emit('k-create', { name: (netName() + '’s race'), player: netName(), stake: stk });
+      }
+    }, 450);
+  });
+})();
+stage.focus();
+requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
