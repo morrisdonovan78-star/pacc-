@@ -45,7 +45,35 @@ async function recordLink(sub, address) {
   await Promise.all([
     kvSetPerm('a2c:' + address, sub).catch(() => {}),
     kvSetPerm('c2a:' + sub, address).catch(() => {}),
+    // EVERY wallet this account has ever presented, newest first. `c2a` is a single slot that gets
+    // re-stamped on every game login with whatever wallet the client hands over, and an account
+    // carrying the old Privy hydration duplicate has TWO embedded wallets — so signing in on a
+    // session where the empty one sorted first silently re-points `c2a` at a 0-SOL wallet, and from
+    // then on the leaderboard, the profile card and any Send all resolve there. That is money going
+    // to a wallet the player does not use.
+    //
+    // Keeping the full list means a caller is never stuck with whichever one happened to be stamped
+    // last: it can check the balances and pay the funded one. A sorted set stands in for a set
+    // because this KV wrapper has no SADD; the score is the timestamp, so ZREVRANGE is most-recent
+    // first and re-linking an existing wallet just refreshes its score rather than duplicating it.
+    kvZadd('a2all:' + sub, Date.now(), address).catch(() => {}),
   ]);
+}
+
+// Every wallet on the account that owns `address` — including `address` itself, and always with the
+// currently-stamped wallet present. Callers that are about to MOVE MONEY should resolve among these
+// by balance rather than trusting the single `c2a` slot.
+async function walletsFor(address) {
+  try {
+    const sub = await kvGet('a2c:' + address);
+    if (!sub) return [address];
+    const raw = await kvZrevrange('a2all:' + sub, 0, 19) || [];
+    const out = [];
+    for (let i = 0; i < raw.length; i += 2) if (raw[i]) out.push(raw[i]);
+    const cur = await kvGet('c2a:' + sub);
+    for (const a of [cur, address]) if (a && out.indexOf(a) < 0) out.push(a);
+    return out;
+  } catch (_) { return [address]; }
 }
 // Resolve ANY (possibly old) address to the account's current wallet. Falls back to the input.
 async function currentAddr(address) {
@@ -452,7 +480,11 @@ module.exports = async function handler(req, res) {
       // account). That is one recipient, not two, so it must not read as ambiguous.
       const byWallet = new Map();
       for (const m of matches) if (!byWallet.has(m.payTo)) byWallet.set(m.payTo, m);
-      return res.status(200).json({ matches: [...byWallet.values()] });
+      const uniqMatches = [...byWallet.values()];
+      // Hand back every wallet on each matched account so the sender can pay the FUNDED one. Without
+      // this a match is only as good as the last `c2a` stamp, which is exactly what goes wrong.
+      await Promise.all(uniqMatches.map(async (m) => { m.wallets = await walletsFor(m.payTo).catch(() => [m.payTo]); }));
+      return res.status(200).json({ matches: uniqMatches });
     } catch (err) {
       console.error('[leaderboard/recipient]', err);
       return res.status(500).json({ error: 'Internal server error' });
@@ -516,8 +548,11 @@ module.exports = async function handler(req, res) {
         .reverse();
       // `payTo` is the CURRENT wallet for this account and is the only address a caller should ever
       // send money to — `address` may be a historical key someone had saved.
+      // `wallets` is every address on this account. A client about to send money should pick the
+      // funded one from here rather than trusting payTo, which is only the last-stamped slot.
+      const wallets = await walletsFor(addr).catch(() => [addr]);
       return res.status(200).json({
-        player: { address: addr, payTo: cur || addr, code: recipientCode(cur || addr), pfp: pfp || null, ...stats, history },
+        player: { address: addr, payTo: cur || addr, wallets, code: recipientCode(cur || addr), pfp: pfp || null, ...stats, history },
       });
     } catch (err) {
       console.error('[leaderboard/player]', err);
