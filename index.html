@@ -3491,17 +3491,21 @@ function updateScoreboard(){
   const usd=ST.lobbyUsd||0, pot=usd>0?(usd*sorted.length):0;
   // Skip the innerHTML rebuild when nothing changed (incl. mute state + voice mode). But ALWAYS keep
   // the per-peer proximity gains fresh (players move every frame), so run that even on a no-op.
-  const sig=sorted.length+'|'+usd+'|'+(_voiceProximity?'P':'G')+'|'+[..._mutedPeers].join(',')+'|'+sorted.map(p=>p.id.slice(0,6)+':'+p.sc+','+p.lives+(_voiceSpeaking.has(p.id)?'S':'')).join('|');
+  const sig=sorted.length+'|'+usd+'|'+(_voiceProximity?'P':'G')+'|'+[..._mutedPeers].join(',')+'|'+sorted.map(p=>p.id.slice(0,6)+':'+(p.name||'')+':'+p.sc+','+p.lives+(_voiceSpeaking.has(p.id)?'S':'')).join('|');
   if(sig===_lastSbSig){ _voiceUpdateProximity(); return; }
   _lastSbSig=sig;
   // PULP-style leaderboard: Total Pot on top, ranked players, a per-player mute, a proximity toggle.
   let h='<div style="text-align:center;color:#9aa;font-family:Orbitron,sans-serif;font-size:9px;letter-spacing:2px;">TOTAL POT</div>'
     +'<div style="text-align:center;color:#39FF14;font-family:Orbitron,sans-serif;font-size:19px;font-weight:900;margin-bottom:8px;">'+(usd>0?'$'+pot:'FREE')+'</div>';
   sorted.slice(0,6).forEach((p,i)=>{
-    const me=p.id===myPid, nm=me?'YOU':('P'+(p.num+1)), muted=_mutedPeers.has(p.id);
+    // REAL names. This was hardcoded to 'YOU' for yourself and 'P1'/'P2' for everyone else, so the
+    // board never showed a single actual player name however many of them had one set.
+    const me=p.id===myPid;
+    const nm=((me?(_cachedMyName||getMyName()):(p.name||''))||('P'+(p.num+1))).slice(0,10).replace(/[<>&]/g,'');
+    const muted=_mutedPeers.has(p.id);
     const muteBtn=me?'':'<button onclick="togglePeerMute(\''+p.id+'\')" title="Mute this player" style="background:none;border:none;cursor:pointer;font-size:11px;line-height:1;padding:0 0 0 4px;color:'+(muted?'#FF4444':'#888')+';">'+(muted?'🔇':'🔊')+'</button>';
-    h+='<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:11px;padding:2px 0;color:'+p.color+';">'
-      +'<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:96px;">'+(i===0?'👑 ':(i+1)+'. ')+nm+(_voiceSpeaking.has(p.id)?' 🎤':'')+'</span>'
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:12px;padding:2px 0;color:'+p.color+';">'
+      +'<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px;">'+(i===0?'👑 ':(i+1)+'. ')+nm+(_voiceSpeaking.has(p.id)?' 🎤':'')+'</span>'
       +'<span style="display:flex;align-items:center;gap:3px;white-space:nowrap;"><b style="color:#FFD700;">'+p.sc+'</b><span style="font-size:8px;color:#FF4d6d;">'+'❤'.repeat(Math.max(0,p.lives))+'</span>'+muteBtn+'</span></div>';
   });
   h+='<button onclick="toggleVoiceMode()" title="Toggle proximity / global voice" style="width:100%;text-align:center;color:#9aa;font-size:8px;margin-top:6px;border:none;border-top:1px solid rgba(255,255,255,0.12);padding-top:5px;background:none;cursor:pointer;">🎙️ Voice: '+(_voiceProximity?'Proximity':'Global')+' ⇄</button>';
