@@ -2184,14 +2184,25 @@ module.exports = async function handler(req, res) {
         note: skipped ? 'skipped bets that are still live or not yours' : undefined });
     }
 
-    // ── solvency: READ-ONLY view of escrow vs every claim against it ──────────────────────────
-    // There was no way to see this from outside, which is exactly why "it says he won but nobody
-    // got the money" was a mystery: a payout is refused when
-    //     escrow < playerDeposits + betLiability + accruedFee
-    // so a perfectly small bet still fails if the escrow is short against TOTAL obligations. That
-    // refusal is silent to the player. This exposes the same figures assertSolvency() uses, plus
-    // what a hypothetical payout would do. Moves no money, mutates nothing, reveals no secrets —
-    // the escrow balance is already public via action:'balance'.
+    /* ── solvency: READ-ONLY view of escrow vs every claim against it ──────────────────────────
+     * There was no way to see this from outside, which is exactly why "it says he won but nobody got
+     * the money" was a mystery: the refusal is silent to the player. This exposes the same figures
+     * assertSolvency() uses plus what a hypothetical payout would do. Moves no money, mutates
+     * nothing, reveals no secrets — the escrow balance is already public via action:'balance'.
+     *
+     * ⚠️ `accruedFee` IS NOT A LIABILITY AND DOES NOT GATE ANYTHING. Read that before reacting to it.
+     * It is a dead counter from the old design, where the 8% was tracked as still sitting inside
+     * escrow. The fee now leaves escrow in the SAME transaction that pays the winner, so nothing in
+     * this codebase increments it any more — every remaining reference is a `-TX_FEE` decrement — and
+     * checkInvariant() deliberately excludes it, because the platform's own profit is JUNIOR to
+     * everyone and absorbs shortfalls rather than creating them.
+     *
+     * This mattered: the stale figure (0.0274 SOL against an escrow of 0.0175) was read as "the fee
+     * owed exceeds the entire escrow", and a whole session went looking for a leak that was not
+     * there. The real cause of `payout held: insolvent` is the plain one directly below —
+     * escrow < payout + txFee + what is still owed to OTHER bettors. It is now labelled and the
+     * figure that actually decides the refusal is reported alongside it.
+     */
     if (action === 'solvency') {
       const probe = Math.max(0, Math.floor(Number(body.payoutLamports) || 0));
       const inv = await assertSolvency(esc.pubkeyB58, probe);
@@ -2200,6 +2211,15 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         escrowPubkey: esc.pubkeyB58,
+        // What a payout is ACTUALLY tested against, so the answer to "why was this refused?" is here
+        // rather than inferred from the raw figures.
+        gate: {
+          formula: 'escrow - payout - txFee >= betLiability - payout',
+          spendableNowLamports: Math.max(0, inv.onChainBalance - TX_FEE),
+          spendableNowSol: sol(Math.max(0, inv.onChainBalance - TX_FEE)),
+          owedToOtherBettorsLamports: inv.betLiability,
+          largestPayoutThatWouldClearLamports: Math.max(0, inv.onChainBalance - TX_FEE),
+        },
         lamports: {
           escrow: inv.onChainBalance,
           playerDeposits: inv.wagerLiability,
@@ -2212,6 +2232,9 @@ module.exports = async function handler(req, res) {
           betLiability: sol(inv.betLiability),
           accruedFee: sol(inv.accruedFee),
         },
+        accruedFeeNote: 'LEGACY COUNTER — not a liability, not part of the solvency gate. Nothing ' +
+          'increments it; the 8% now leaves escrow in the same tx as the payout. Ignore it when ' +
+          'diagnosing a refused payout.',
         probePayoutLamports: probe,
         payoutsWouldSucceed: !!inv.ok,
         deficitLamports: inv.deficit || 0,
