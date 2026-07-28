@@ -2708,24 +2708,33 @@ async function recordWager(walletAddress,wagerLamports,txSig,lobbyId,playerName)
    * Errors that will NEVER come good on a retry — a ban, a bad signature, a deposit that was genuinely
    * too small — are surfaced immediately instead of being hidden behind 20 seconds of pointless waiting.
    */
-  const FINAL = /ban|signature|too small|not found in transaction|failed on-chain|already used|replay/i;
-  let lastErr = 'join failed';
-  for (let attempt = 0; attempt < 5; attempt++) {
-    if (attempt) await new Promise(r2 => setTimeout(r2, 1200 * attempt));
-    let r, d;
-    try {
-      r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-settle-sig': sig, 'x-settle-ts': String(ts) },
-        body: JSON.stringify({ walletAddress, wagerLamports, txSig, lobbyId, playerName: playerName || '', refCode }) });
-      d = await r.json().catch(() => ({}));
-    } catch (e) { lastErr = 'network'; continue; }   // fetch itself failed — the tx still stands, try again
-    if (r.ok) return d;
-    lastErr = d.error || ('HTTP ' + r.status);
-    if (FINAL.test(lastErr)) break;
-    try { if (attempt === 1) addToast('Confirming your deposit…', '#FFD700', 2500); } catch (_) {}
-  }
-  // Out of retries. Say plainly that the money is accounted for rather than leaving them guessing —
-  // the deposit is on chain and the same txSig will still be honoured.
-  throw new Error(lastErr + ' — your deposit is on-chain and still valid. Press JOIN again and it will be used, not charged twice.');
+  /*
+   * ONE request, with a hard timeout. NOT a retry loop — _redeemDeposit above already retries this
+   * call 2-4 times with its own backoff, and nesting a second loop in here turned a slow join into up
+   * to sixteen attempts of thirteen seconds each: a player watching a screen that just said "loading"
+   * for minutes, unable to tell whether their money was gone or the page was stuck.
+   *
+   * The timeout matters on its own: api/join has a 20s ceiling on Vercel, and a request that hits it
+   * dies without a useful answer. Aborting at 13s hands control back to the outer loop while there is
+   * still time for another go, instead of burning the whole budget on one hung call.
+   *
+   * Repeating is safe regardless: the server is idempotent on txSig and re-issues the SAME credentials
+   * for a deposit already on record, so no retry can charge twice or create a second entry.
+   */
+  const ac = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const killer = ac ? setTimeout(() => { try { ac.abort(); } catch (_) {} }, 13000) : null;
+  let r, d;
+  try {
+    r = await fetch('/api/join', { method: 'POST', signal: ac ? ac.signal : undefined,
+      headers: { 'Content-Type': 'application/json', 'x-settle-sig': sig, 'x-settle-ts': String(ts) },
+      body: JSON.stringify({ walletAddress, wagerLamports, txSig, lobbyId, playerName: playerName || '', refCode }) });
+    d = await r.json().catch(() => ({}));
+  } finally { if (killer) clearTimeout(killer); }
+  if (r.ok) return d;
+  const err = d.error || ('HTTP ' + r.status);
+  // A deposit that is on-chain is NOT lost, whatever happens next — say so, because "join failed"
+  // after money has left the wallet is the message that makes people think they were robbed.
+  throw new Error(err + ' — your deposit is on-chain and still valid; joining again will use it, not charge you twice.');
 }
 
 async function settle(){
