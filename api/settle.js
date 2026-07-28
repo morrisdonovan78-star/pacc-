@@ -1982,6 +1982,56 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, refundId, refunded: out });
     }
 
+    /*
+     * UNCLAIMED PAID ENTRIES — list, and clear the ones already refunded by hand.
+     *
+     * `pw:<wallet>` is an unconsumed paid wager: money that was taken and has not yet been played or
+     * cashed out. When a join fails and the owner refunds the player DIRECTLY, that entry is left
+     * behind — and it is not harmless, because the replay guard treats a live `pw:` as proof the
+     * player already paid and will let them straight into a race on a deposit that has since been
+     * given back. Refunding by hand and leaving the entry is therefore paying twice.
+     *
+     * `action:'wager-orphans'` lists them so they can be eyeballed first; `action:'clear-entry'`
+     * removes named ones. Neither moves any money — clearing is bookkeeping to match a refund that
+     * already happened off-chain, which is why it names wallets explicitly and has no "clear all".
+     */
+    if (action === 'wager-orphans') {
+      if (!verifyGameProof(req, 'wager-orphans:' + (req.headers['x-game-ts'] || ''))) {
+        clearTimeout(guard); done = true; return res.status(403).json({ error: 'bad proof' });
+      }
+      const keys = await kvScan('pw:*').catch(() => []);
+      const out = [];
+      for (let i = 0; i < keys.length && out.length < 200; i += 128) {
+        const slice = keys.slice(i, i + 128);
+        const vals = await kvMget(slice).catch(() => []);
+        for (let j = 0; j < slice.length; j++) {
+          const lam = Math.floor(Number(vals[j]) || 0);
+          if (lam > 0) out.push({ wallet: String(slice[j]).slice(3), lamports: lam, sol: lam / 1e9 });
+        }
+      }
+      out.sort((a, b) => b.lamports - a.lamports);
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, count: out.length, entries: out });
+    }
+
+    if (action === 'clear-entry') {
+      const wallets = Array.isArray(body.wallets) ? body.wallets.map(String).slice(0, 50) : [];
+      if (!wallets.length) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wallets required' }); }
+      if (!verifyGameProof(req, 'clear-entry:' + wallets.slice().sort().join(',') + ':' + (req.headers['x-game-ts'] || ''))) {
+        clearTimeout(guard); done = true; return res.status(403).json({ error: 'bad proof' });
+      }
+      const cleared = [];
+      for (const w of wallets) {
+        const had = await kvGet('pw:' + w).catch(() => null);
+        if (had === null) { cleared.push({ wallet: w, had: null, cleared: false }); continue; }
+        await kvDel('pw:' + w).catch(() => {});
+        cleared.push({ wallet: w, had: Math.floor(Number(had) || 0), cleared: true });
+      }
+      betAlert('paid entries CLEARED (already refunded by hand): ' + wallets.map((w) => w.slice(0, 8)).join(', '));
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, cleared, lamportsMoved: 0 });
+    }
+
     if (action === 'kart-settle') {
       const raceId = String(body.raceId || '').slice(0, 80);
       const winners = Array.isArray(body.winners) ? body.winners.slice(0, 8) : [];
