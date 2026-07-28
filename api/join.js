@@ -343,6 +343,22 @@ module.exports = async function handler(req, res) {
       // pw: present ⇔ an active, unconsumed paid wager ⇔ case 1. pw: absent ⇔ case 2.
       const existingWager = await kvGet('pw:' + walletAddress);
       if (existingWager !== null) {
+        /*
+         * A RESUME LETS SOMEBODY IN WITHOUT A FRESH PAYMENT, so it must never be silent. It is correct
+         * when the first join genuinely paid and only its HTTP reply was lost — but it is also exactly
+         * what a refunded-by-hand player would hit: the operator returns their SOL directly, the pw:
+         * entry survives (a manual transfer cannot know to remove it), and the next JOIN walks in free
+         * on a deposit that has already been given back.
+         *
+         * The fix for that case is clearing the entry (settle: action 'clear-entry'), and the point of
+         * logging here is that you can SEE it happened. A resume for a wallet you refunded is money
+         * leaving twice, and it should be findable in the log rather than invisible.
+         */
+        console.warn('[join] RESUMED unconsumed wager', {
+          wallet: String(walletAddress).slice(0, 8), lobbyId,
+          lamports: Number(existingWager) || lamps, txSig: String(txSig).slice(0, 12),
+          note: 'no new charge; if this wallet was refunded by hand its pw: entry should have been cleared',
+        });
         const { gameToken, entryToken } = mintTokensFor(walletAddress, lobbyId);
         return res.status(200).json({ ok: true, recorded: Number(existingWager) || lamps, gameToken, entryToken, resumed: true });
       }
