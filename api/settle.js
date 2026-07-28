@@ -1839,6 +1839,26 @@ module.exports = async function handler(req, res) {
         const w = await wgLoad(wid);
         if (!w) { clearTimeout(guard); done = true; return res.status(404).json({ error: 'wager not found' }); }
         if (w.status === P2P.STATUS.RETURNED) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+        /*
+         * REVIVE A LAPSED RESERVATION FIRST — otherwise this is a dead end holding real money.
+         *
+         * 'reserved' is a short-lived claim by an acceptor who is part-way through depositing, and the
+         * legal transitions out of it are only ['matched','open']. So a wager whose acceptor walked
+         * away at the wrong moment could never match (the claim is stale) and could never be returned
+         * (the transition is illegal) — it just sat there, and prod logged
+         * `cannot return a reserved wager` over and over while the creator's stake stayed locked in
+         * escrow with no path out in either direction.
+         *
+         * Every other place that reads a wager already reverts a LAPSED claim back to open (the two
+         * reconcile passes and the accept path all do it); the return path was the one that did not.
+         * An UNEXPIRED reservation is still refused below, which is correct — someone is mid-deposit
+         * and their accept must be allowed to land.
+         */
+        if (w.status === P2P.STATUS.RESERVED && Number(w.reservedUntil || 0) < Date.now()) {
+          w.status = P2P.STATUS.OPEN; w.reservedBy = null; w.reservedUntil = 0;
+          w.reservedSubject2 = null; w.reservedSubject2Name = ''; w.reservedSubject2Ip = '';
+          await wgSave(w);
+        }
         // Only an UNMATCHED wager can be returned — a matched one must settle.
         if (!P2P.canTransition(w.status, P2P.STATUS.RETURNED)) {
           clearTimeout(guard); done = true; return res.status(400).json({ error: 'cannot return a ' + w.status + ' wager' });
