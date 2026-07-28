@@ -165,6 +165,7 @@ hr{border:none;border-top:1px solid var(--border);margin:16px 0;}
       <div class="nav-item"        onclick="openTab('player')" id="nav-player"><span class="nav-icon">🔍</span>PLAYER</div>
       <div class="nav-item"        onclick="openTab('bans')"   id="nav-bans">  <span class="nav-icon">🚫</span>GAME BANS</div>
       <div class="nav-item"        onclick="openTab('voice')"  id="nav-voice"> <span class="nav-icon">🔇</span>VOICE BANS</div>
+      <div class="nav-item"        onclick="openTab('wallets')" id="nav-wallets"><span class="nav-icon">🔑</span>OLD WALLETS</div>
       <div class="nav-item"        onclick="openTab('log')"    id="nav-log">   <span class="nav-icon">📋</span>MOD LOG</div>
       <div class="nav-item"        onclick="openTab('stats')"  id="nav-stats"> <span class="nav-icon">🔄</span>STATS</div>
     </div>
@@ -339,7 +340,7 @@ function closeModal() { document.getElementById('modal-bg').classList.remove('op
 function modalConfirm() { const cb = _modalCb; closeModal(); if (cb) cb(); }
 
 // ── Nav ───────────────────────────────────────────────────────────────────────
-const TABS = ['live','player','bans','voice','log','stats'];
+const TABS = ['live','player','bans','voice','wallets','log','stats'];
 function openTab(t) {
   _tab = t;
   TABS.forEach(id => {
@@ -347,7 +348,7 @@ function openTab(t) {
     if (el) el.classList.toggle('active', id === t);
   });
   clearInterval(_liveTimer);
-  const renders = { live: renderLive, player: renderPlayer, bans: renderBans, voice: renderVoice, log: renderLog, stats: renderStats };
+  const renders = { live: renderLive, player: renderPlayer, bans: renderBans, voice: renderVoice, wallets: renderWallets, log: renderLog, stats: renderStats };
   if (renders[t]) renders[t]();
 }
 
