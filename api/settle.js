@@ -1885,6 +1885,56 @@ module.exports = async function handler(req, res) {
       } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
     }
 
+    /* ── wager-close-manual: mark wagers terminal that were ALREADY PAID OUT-OF-BAND ────────────
+     * The owner refunded wmrsh3egsfqolyv and wmrsh3yhtweug5t by hand after they deadlocked in
+     * 'reserved' (see the revive fix in the return path). The settle loop did not know that and kept
+     * retrying them forever, so they had to be closed — but closing them must NOT pay anybody, or the
+     * owner would be refunding the same stake twice. Precedent: the bounty event where 2nd place was
+     * paid manually needed exactly this kind of short-circuit to avoid a double-pay.
+     *
+     * This moves NO money. It has no call to wgPayOne, wgPayWinnerAndFee or any transfer at all. It:
+     *   - takes the `wgpaid:` NX lock PERMANENTLY, so no later retry, sweep or void can ever pay them
+     *   - marks the wager settled with manual/paidOutOfBand flags and no payoutTx (there is no tx —
+     *     recording a fake one would corrupt the audit trail)
+     *   - drops them from the open/live sets so nothing re-queues them
+     *
+     * It deliberately does NOT touch betLiability. The ledger already reads 0 for these; decrementing
+     * would drive it negative and make the solvency gate under-report what is owed to real bettors.
+     *
+     * GAME_SECRET-HMAC authed, and it only ever acts on wager ids named explicitly in the request —
+     * there is no "close everything" form of this on purpose.
+     */
+    if (action === 'wager-close-manual') {
+      const ids = Array.isArray(body.wagerIds) ? body.wagerIds.map(String).slice(0, 25) : [];
+      if (!ids.length) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wagerIds required' }); }
+      if (!verifyGameProof(req, 'wager-close-manual:' + ids.slice().sort().join(',') + ':' + (req.headers['x-game-ts'] || ''))) {
+        clearTimeout(guard); done = true; return res.status(403).json({ error: 'bad proof' });
+      }
+      const out = [];
+      for (const wid of ids) {
+        const w = await wgLoad(wid);
+        if (!w) { out.push({ id: wid, ok: false, reason: 'not found' }); continue; }
+        if (w.status === P2P.STATUS.SETTLED || w.status === P2P.STATUS.RETURNED) {
+          out.push({ id: wid, ok: true, already: true, status: w.status }); continue;
+        }
+        // Hold the pay-lock with no TTL so nothing can ever claim it and send funds.
+        await kvSetPerm('wgpaid:' + wid, 'manual-out-of-band').catch(() => {});
+        const prev = w.status;
+        w.status = P2P.STATUS.SETTLED;
+        w.manuallyClosed = true; w.paidOutOfBand = true; w.payoutTx = null; w.fee = 0;
+        w.settledTs = Date.now();
+        w.closeNote = 'refunded by the operator directly; closed so the retry loop stops. No on-chain payout from settle.';
+        await wgSave(w);
+        const lk = wgLobbyKey(w.region, w.lobby);
+        await kvZrem('wgopen:' + lk, wid).catch(() => {});
+        await kvZrem('wglive:' + lk, wid).catch(() => {});
+        out.push({ id: wid, ok: true, from: prev, to: w.status, moved: 0 });
+      }
+      betAlert('wagers CLOSED manually (no payout): ' + ids.join(', '));
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, closed: out, lamportsMoved: 0 });
+    }
+
     // ── Wallet signature auth — required for all fund-moving actions ─────────
     // The player signs the request with their Solana private key.
     // Only the real wallet owner can produce a valid signature.
