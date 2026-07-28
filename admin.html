@@ -371,7 +371,33 @@ function renderWallets() {
         <button class="btn btn-g btn-sm" onclick="doWalletFind()">LOOK UP</button>
       </div>
     </div>
-    <div id="wf-out"></div>`;
+    <div id="wf-out"></div>
+
+    <div class="section-title" style="margin-top:22px;">🤝 CREDIT A REFERRAL BY HAND</div>
+    <div class="card">
+      <div class="muted" style="font-size:12px;line-height:1.7;margin-bottom:12px;">
+        Use when someone genuinely used a link and paid but was never attributed. First touch is
+        permanent — a player already referred by someone keeps that referrer.
+      </div>
+      <input id="rb-ref" placeholder="REFERRER wallet (who gets the credit)" style="width:100%;box-sizing:border-box;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;margin-bottom:8px;">
+      <input id="rb-play" placeholder="REFEREE wallet (the friend who joined)" style="width:100%;box-sizing:border-box;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;margin-bottom:10px;">
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px;cursor:pointer;">
+        <input type="checkbox" id="rb-count" checked> also count them as a QUALIFIED RECRUIT this week
+      </label>
+      <button class="btn btn-g btn-sm" onclick="doRefBind()">CREDIT REFERRAL</button>
+      <div id="rb-out" style="margin-top:10px;"></div>
+    </div>`;
+}
+async function doRefBind() {
+  const out = document.getElementById('rb-out');
+  const referrer = (document.getElementById('rb-ref').value || '').trim();
+  const player   = (document.getElementById('rb-play').value || '').trim();
+  const count    = document.getElementById('rb-count').checked;
+  out.innerHTML = '<span class="muted">Working…</span>';
+  try {
+    const d = await api({ action: 'ref-bind', referrer, address: player, countRecruit: count });
+    out.innerHTML = '<span style="color:#39FF14;">✓ Credited' + (d.countedRecruit ? ' — counted as a qualified recruit this week.' : ' — bound, but the recruit was already counted.') + '</span>';
+  } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
 }
 async function doWalletFind() {
   const out = document.getElementById('wf-out');

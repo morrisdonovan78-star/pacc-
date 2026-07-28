@@ -11,7 +11,7 @@
 //                    (set the SAME value in PM2 env on Vultr: ADMIN_SECRET=...)
 const crypto = require('crypto');
 const { kvGet, kvSet, kvSetPerm, kvDel, kvHgetall, kvHset,
-        kvZadd, kvZrevrange, kvZrem, kvScan,
+        kvZadd, kvZrevrange, kvZrem, kvScan, kvSetNX, kvHincrby,
         kvLpush, kvLtrim, kvLrange } = require('../lib/kv');
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -195,6 +195,47 @@ module.exports = async function handler(req, res) {
    * copy to audit. It returns { email, address } only; the secret key derives a public key and is
    * then dropped, never returned and never logged.
    */
+  /*
+   * ── ref-bind: attribute a referral BY HAND ────────────────────────────────────────────────────
+   *
+   * The automatic bind needs three things to line up on the referee's FIRST paid join: the ?ref= code
+   * captured into localStorage, that code resolving to a referrer, and the join taking the fresh path
+   * (a resumed join returns before accrual ever runs). Any one of those missing and the referral is
+   * silently lost, with no way to put it right - which is where LUCKMAN is: a friend who genuinely
+   * used his link and paid, showing zero.
+   *
+   * So there has to be a manual door. Same first-touch rule as the automatic path: a player already
+   * bound to someone keeps that binding, because a referral that could be reassigned later is a
+   * referral nobody can trust.
+   */
+  if (action === 'ref-bind') {
+    const referrer = String(req.body.referrer || '').trim();
+    const player   = String(address || '').trim();
+    if (referrer.length < 20 || player.length < 20) return res.status(400).json({ error: 'referrer and address (the referee) both required' });
+    if (referrer === player) return res.status(400).json({ error: 'cannot refer yourself' });
+    const existing = await kvGet('refby:' + player).catch(() => null);
+    if (existing) {
+      let who = existing;
+      try { who = JSON.parse(existing).ref || existing; } catch (_) {}
+      return res.status(409).json({ error: 'Already referred by ' + String(who).slice(0, 8) + '… — first touch is permanent.' });
+    }
+    const bind = { code: 'MANUAL', ref: referrer, ts: Date.now() };
+    await kvSet('refby:' + player, JSON.stringify(bind), 100 * 24 * 60 * 60);
+    await kvHincrby('refstats:' + referrer, 'players', 1).catch(() => {});
+    // Count the qualified recruit too when asked — the operator can see they really paid.
+    let counted = false;
+    if (req.body.countRecruit) {
+      const RECRUIT_ANCHOR = Date.UTC(2026, 6, 23, 4, 0, 0), WK = 7 * 24 * 60 * 60 * 1000;
+      const wk = 'rw' + Math.floor((Date.now() - RECRUIT_ANCHOR) / WK);
+      if (await kvSetNX('refq:' + player, String(Date.now()))) {
+        await kvHincrby('recruit:' + wk, referrer, 1).catch(() => {});
+        counted = true;
+      }
+    }
+    await logAction('ref-bind' + (counted ? '+recruit' : ''), player, 'referrer=' + referrer.slice(0, 8));
+    return res.json({ ok: true, referrer, player, countedRecruit: counted });
+  }
+
   if (action === 'wallet-find') {
     try {
       const { walletFind } = require('./wallet.js');

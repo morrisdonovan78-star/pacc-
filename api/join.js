@@ -435,6 +435,11 @@ module.exports = async function handler(req, res) {
           lamports: Number(existingWager) || lamps, txSig: String(txSig).slice(0, 12),
         });
         const { gameToken, entryToken } = mintTokensFor(walletAddress, lobbyId);
+        // A resumed join is still a REAL paid join for referral purposes. This path returned before
+        // accrueReferral ever ran, so a referee whose first join happened to be a lost-response retry
+        // was silently never attributed — one of the ways "my friend used my link and it says 0"
+        // happens with everything else configured correctly.
+        try { await accrueReferral(walletAddress, refCode, Number(existingWager) || lamps); } catch (_) {}
         return res.status(200).json({ ok: true, recorded: Number(existingWager) || lamps, gameToken, entryToken, resumed: true });
       }
 
