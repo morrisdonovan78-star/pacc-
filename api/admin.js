@@ -199,7 +199,7 @@ module.exports = async function handler(req, res) {
     try {
       const { walletFind } = require('./wallet.js');
       const wallets = await walletFind(address);   // blank address = list them all
-      return res.json({ ok: true, count: wallets.length, wallets });
+      return res.json({ ok: true, count: wallets.length, wallets, stats: wallets.stats || null });
     } catch (e) {
       return res.status(500).json({ error: (e && e.message) || 'lookup failed' });
     }

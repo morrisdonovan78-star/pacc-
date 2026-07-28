@@ -12,7 +12,7 @@
     "api/price.js":      { "regions": ["iad1"], "maxDuration": 10 },
     "api/privy.js":      { "regions": ["iad1"], "maxDuration": 10 },
     "api/wallet.js":  { "regions": ["iad1"], "maxDuration": 15 },
-    "api/admin.js":   { "regions": ["iad1"], "maxDuration": 15 }
+    "api/admin.js":   { "regions": ["iad1"], "maxDuration": 60 }
   },
   "redirects": [
     { "source": "/", "has": [{ "type": "host", "value": "snakepot.com" }],     "destination": "/play", "permanent": false },

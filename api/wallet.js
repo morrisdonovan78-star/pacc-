@@ -190,26 +190,38 @@ module.exports = async function handler(req, res) {
 async function walletFind(wantAddress) {
   const want = String(wantAddress || '').trim();
   const out = [];
+  // Counters, because "not found" on its own is unanswerable: it cannot tell you whether nothing was
+  // scanned, nothing has a stored wallet, or the address simply is not one of them. Each of those
+  // needs a different next step, so the caller gets the numbers rather than a shrug.
+  const stats = { scanned: 0, withStore: 0, decoded: 0, failed: 0 };
   let cursor = null, pages = 0;
   do {
     const q = cursor ? ('/users?limit=100&cursor=' + encodeURIComponent(cursor)) : '/users?limit=100';
     const page = await privyMgmt('GET', q);
     const users = (page && (page.data || page.users)) || [];
     for (const u of users) {
+      stats.scanned++;
       const meta = u.customMetadata || u.custom_metadata || {};
       if (!meta.paWallet) continue;
-      const email = (u.linkedAccounts || u.linked_accounts || []).find((a) => a.type === 'email')?.address;
-      if (!email) continue;
+      stats.withStore++;
+      const accts = u.linkedAccounts || u.linked_accounts || [];
+      // The key is derived from the email, so an account with a stored wallet but no email account is
+      // undecryptable by design - count it rather than skipping in silence.
+      const email = (accts.find((a) => a.type === 'email') || {}).address
+                 || (accts.find((a) => a.type === 'google_oauth') || {}).email;
+      if (!email) { stats.failed++; continue; }
       let address = null;
       try {
         const skB64 = decryptWallet(meta.paWallet, email);
         const kp = nacl.sign.keyPair.fromSecretKey(new Uint8Array(Buffer.from(skB64, 'base64')));
         address = b58Encode(Buffer.from(kp.publicKey));
-      } catch (_) { continue; }
+        stats.decoded++;
+      } catch (_) { stats.failed++; continue; }
       if (!want || address === want) out.push({ email, address });
     }
     cursor = (page && (page.nextCursor || page.next_cursor)) || null;
   } while (cursor && ++pages < 20);
+  out.stats = stats;
   return out;
 }
 module.exports.walletFind = walletFind;

@@ -379,8 +379,17 @@ async function doWalletFind() {
   out.innerHTML = '<div class="card muted">Searching every account… this can take a few seconds.</div>';
   try {
     const d = await api({ action: 'wallet-find', address: addr });
+    // Say WHAT was searched. A bare "not found" cannot distinguish "nothing was scanned" from
+    // "nothing has a stored wallet" from "that address is not one of them" - and each needs a
+    // different next step.
+    const st = d.stats || {};
+    const detail = '<div class="muted" style="font-size:11px;margin-top:8px;">scanned ' + (st.scanned || 0)
+      + ' accounts &middot; ' + (st.withStore || 0) + ' have a stored wallet &middot; '
+      + (st.decoded || 0) + ' decoded' + (st.failed ? ' &middot; ' + st.failed + ' unreadable' : '') + '</div>';
     if (!d.wallets || !d.wallets.length) {
-      out.innerHTML = '<div class="card muted">No stored wallet found' + (addr ? ' for that address.' : '.') + '</div>';
+      out.innerHTML = '<div class="card muted">No stored wallet found' + (addr ? ' for that address.' : '.')
+        + (st.withStore === 0 ? '<br><br>No account has an old-game wallet stored at all — this address is most likely a Privy embedded wallet, which lives on the account you log in with rather than here.' : '')
+        + detail + '</div>';
       return;
     }
     out.innerHTML = '<div class="card"><div class="card-title">' + d.count + ' WALLET' + (d.count === 1 ? '' : 'S') + '</div>'
@@ -389,7 +398,7 @@ async function doWalletFind() {
             + '<span style="font-family:monospace;font-size:11px;word-break:break-all;">' + esc(w.address) + '</span>'
             + '<b style="font-size:12px;white-space:nowrap;color:#39FF14;">' + esc(w.email) + '</b></div>';
         }).join('')
-      + '</div>';
+      + detail + '</div>';
   } catch (e) { out.innerHTML = '<div class="card" style="color:#FF4444;">' + esc(e.message || 'Lookup failed') + '</div>'; }
 }
 
