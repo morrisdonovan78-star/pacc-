@@ -480,6 +480,7 @@ module.exports = async function handler(req, res) {
     // finishes — that's exactly what caused games/wagered to go missing while a later,
     // properly-awaited request (e.g. cashout) recorded fine. Errors are still swallowed so
     // a stats hiccup never fails the actual join.
+    let nameTaken=null;   // set when a requested display name is already held by another wallet
     try{
       const game=(lobbyId&&lobbyId.startsWith('ss-'))?'ss':'pac';
       const namePk='ph:'+walletAddress;      // display name is shared across both games
@@ -505,10 +506,30 @@ module.exports = async function handler(req, res) {
         if(clean&&clean!=='SNAKE'){
           const current=await kvHget(namePk,'name');
           if(current!==clean){
-            if(current) { await kvDel('nameReg:'+current).catch(()=>{}); await kvZrem('nameIndex',current).catch(()=>{}); }
-            await kvHset(namePk,'name',clean);
-            await kvSetPerm('nameReg:'+clean, walletAddress);
-            await kvZadd('nameIndex', 0, clean);
+            /*
+             * A NAME BELONGS TO THE WALLET THAT CLAIMED IT FIRST.
+             *
+             * This used to overwrite nameReg:<NAME> unconditionally, so ANY account could take a name
+             * already in use simply by setting it and doing a paid join. That is not a cosmetic
+             * problem: `nameReg` is what "Find a player" and the Recipient ID box resolve a name to,
+             * so taking someone's name redirects money people meant to send THEM. A player lost $3.80
+             * to an impersonator of GODBLESSED42 this way.
+             *
+             * First claim wins and is permanent. A name in use by another wallet is refused outright
+             * and the claimer simply keeps whatever name they had - nothing is overwritten, so the
+             * mapping money is resolved through can never silently move to a different person.
+             */
+            const heldBy = await kvGet('nameReg:'+clean).catch(()=>null);
+            if(heldBy && heldBy !== walletAddress){
+              console.warn('[name] REFUSED - already claimed', { name: clean,
+                heldBy: String(heldBy).slice(0,8), attemptedBy: String(walletAddress).slice(0,8) });
+              nameTaken = clean;
+            } else {
+              if(current) { await kvDel('nameReg:'+current).catch(()=>{}); await kvZrem('nameIndex',current).catch(()=>{}); }
+              await kvHset(namePk,'name',clean);
+              await kvSetPerm('nameReg:'+clean, walletAddress);
+              await kvZadd('nameIndex', 0, clean);
+            }
           }
         }
       }
@@ -539,7 +560,7 @@ module.exports = async function handler(req, res) {
     // (Same mint is re-used by the idempotent lost-response retry path above.)
     const { gameToken, entryToken } = mintTokensFor(walletAddress, lobbyId);
 
-    return res.status(200).json({ ok: true, recorded: lamps, gameToken, entryToken });
+    return res.status(200).json({ ok: true, recorded: lamps, gameToken, entryToken, nameTaken });
   } catch (e) {
     console.error('[join]', e.message);
     return res.status(500).json({ error: e.message });
