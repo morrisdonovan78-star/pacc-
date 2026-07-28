@@ -1881,7 +1881,7 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 const _TEST_DEFAULTS={grazePx:1.0,grazeHead:1.0,bodyScale:1.0,grazeReach:1.0,circDeg:360,faceDeg:60,grazeScaleK:0.75,rule:'biggest_wins',dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
-const _LIVE_TUNING_DEFAULTS={grazePx:2.9,grazeHead:1.15,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:0.75,rule:'biggest_wins',dbg:false};
+const _LIVE_TUNING_DEFAULTS={grazePx:1.68,grazeHead:1.02,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:0.75,rule:'biggest_wins',dbg:false};
 let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
@@ -6215,7 +6215,7 @@ function snakeTick(){
 // Two base-radius snakes (sectionRadius(0)=8 each) — the anchor where graze scaling is a no-op, so the
 // smallest-size feel is unchanged and only the fall-off away from it is corrected. Matches the server.
 const _GRAZE_REF_REACH=16;
-const _PT={ grazePx:2.9, grazeHead:1.15, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:0.75, rule:'biggest_wins' };
+const _PT={ grazePx:1.68, grazeHead:1.02, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:0.75, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
 // per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
 // per-tick @30Hz, so the "not turning" floor is doubled — winding still arms after one full circDeg loop).
