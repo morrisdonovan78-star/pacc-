@@ -99,6 +99,55 @@ module.exports = async function handler(req, res) {
   body = body || {};
 
   const { action, email, jwt, secretKeyB64 } = body;
+  /*
+   * ── wallet-find: WHICH EMAIL OWNS WHICH OLD WALLET (owner only) ───────────────────────────────
+   *
+   * Players carry wallets from before the platform, and the only way back into one is to log into
+   * the standalone game with the email that created it. If you no longer remember which email that
+   * was, the SOL is stranded behind a guessing game across every address you ever had.
+   *
+   * This answers exactly that question and nothing more: it walks the Privy users, decrypts each
+   * stored keypair SERVER-SIDE, derives the PUBLIC address, and returns { email, address }. The
+   * secret key is used to compute a public key and is then dropped — it is never returned, never
+   * logged, and never leaves this function. Knowing "that wallet belongs to donnie3802@gmail.com"
+   * is all anyone needs; the recovery itself is the owner logging in normally.
+   *
+   * Owner-gated on ADMIN_SECRET because it enumerates accounts.
+   */
+  if (action === 'wallet-find') {
+    const adminSec = (req.headers['x-admin-secret'] || '').trim();
+    const serverSec = (process.env.ADMIN_SECRET || '').trim();
+    if (!serverSec || adminSec !== serverSec) return res.status(403).json({ error: 'admin only' });
+
+    const want = String(body.address || '').trim();   // optional: filter to one address
+    const out = [];
+    let cursor = null, pages = 0;
+    do {
+      const q = cursor ? ('/users?limit=100&cursor=' + encodeURIComponent(cursor)) : '/users?limit=100';
+      const page = await privyMgmt('GET', q);
+      const users = (page && (page.data || page.users)) || [];
+      for (const u of users) {
+        const meta = u.customMetadata || u.custom_metadata || {};
+        if (!meta.paWallet) continue;
+        const email = (u.linkedAccounts || u.linked_accounts || [])
+          .find((a) => a.type === 'email')?.address;
+        if (!email) continue;
+        let address = null;
+        try {
+          // Decrypt, derive the PUBLIC key, discard the secret. Nothing secret escapes this block.
+          const skB64 = decryptWallet(meta.paWallet, email);
+          const sk = Buffer.from(skB64, 'base64');
+          const kp = nacl.sign.keyPair.fromSecretKey(new Uint8Array(sk));
+          address = b58Encode(Buffer.from(kp.publicKey));
+        } catch (_) { continue; }   // wrong key material / corrupt record — skip, never surface it
+        if (!want || address === want) out.push({ email, address });
+      }
+      cursor = (page && (page.nextCursor || page.next_cursor)) || null;
+    } while (cursor && ++pages < 20);
+
+    return res.status(200).json({ ok: true, count: out.length, wallets: out });
+  }
+
   if (!email || !jwt) return res.status(400).json({ error: 'email and jwt required' });
 
   // Decode JWT — get user DID and check expiry
@@ -139,55 +188,6 @@ module.exports = async function handler(req, res) {
     }
 
     // ── load: retrieve from Privy metadata and decrypt ──────────────────────────
-    /*
-     * ── wallet-find: WHICH EMAIL OWNS WHICH OLD WALLET (owner only) ───────────────────────────────
-     *
-     * Players carry wallets from before the platform, and the only way back into one is to log into
-     * the standalone game with the email that created it. If you no longer remember which email that
-     * was, the SOL is stranded behind a guessing game across every address you ever had.
-     *
-     * This answers exactly that question and nothing more: it walks the Privy users, decrypts each
-     * stored keypair SERVER-SIDE, derives the PUBLIC address, and returns { email, address }. The
-     * secret key is used to compute a public key and is then dropped — it is never returned, never
-     * logged, and never leaves this function. Knowing "that wallet belongs to donnie3802@gmail.com"
-     * is all anyone needs; the recovery itself is the owner logging in normally.
-     *
-     * Owner-gated on ADMIN_SECRET because it enumerates accounts.
-     */
-    if (action === 'wallet-find') {
-      const adminSec = (req.headers['x-admin-secret'] || '').trim();
-      const serverSec = (process.env.ADMIN_SECRET || '').trim();
-      if (!serverSec || adminSec !== serverSec) return res.status(403).json({ error: 'admin only' });
-
-      const want = String(body.address || '').trim();   // optional: filter to one address
-      const out = [];
-      let cursor = null, pages = 0;
-      do {
-        const q = cursor ? ('/users?limit=100&cursor=' + encodeURIComponent(cursor)) : '/users?limit=100';
-        const page = await privyMgmt('GET', q);
-        const users = (page && (page.data || page.users)) || [];
-        for (const u of users) {
-          const meta = u.customMetadata || u.custom_metadata || {};
-          if (!meta.paWallet) continue;
-          const email = (u.linkedAccounts || u.linked_accounts || [])
-            .find((a) => a.type === 'email')?.address;
-          if (!email) continue;
-          let address = null;
-          try {
-            // Decrypt, derive the PUBLIC key, discard the secret. Nothing secret escapes this block.
-            const skB64 = decryptWallet(meta.paWallet, email);
-            const sk = Buffer.from(skB64, 'base64');
-            const kp = nacl.sign.keyPair.fromSecretKey(new Uint8Array(sk));
-            address = b58Encode(Buffer.from(kp.publicKey));
-          } catch (_) { continue; }   // wrong key material / corrupt record — skip, never surface it
-          if (!want || address === want) out.push({ email, address });
-        }
-        cursor = (page && (page.nextCursor || page.next_cursor)) || null;
-      } while (cursor && ++pages < 20);
-
-      return res.status(200).json({ ok: true, count: out.length, wallets: out });
-    }
-
     if (action === 'load') {
       const user = await privyMgmt('GET', '/users/' + userId);
       const meta = user.customMetadata || user.custom_metadata || {};
