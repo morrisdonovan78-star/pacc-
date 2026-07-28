@@ -10,6 +10,327 @@ const { Server } = require('socket.io');
 
 const crypto = require('crypto');
 
+// ── OWNER TUNING AUTH ────────────────────────────────────────────────────────────────────────────
+// The owner wallet's ed25519 public key as a DER SubjectPublicKeyInfo, so crypto.verify can use it
+// directly and the server needs no base58 decoder. Wallet: 4B9MgNPUgDiKKQRhsC3pmdWoAehs4yjHb8VfL2Nahzpv
+// (owner-confirmed 2026-07-26; keep OWNER_WALLETS in slither-snakes.html in sync)
+const SS_OWNER_SPKI_B64 = 'MCowBQYDK2VwAyEALyxRUCKgOO+rQExbgJ5D4MwMaQXXdRaz/z8VCp91Ww8=';
+let _ssOwnerKey = null;
+function ssOwnerKey() {
+  if (!_ssOwnerKey) {
+    _ssOwnerKey = crypto.createPublicKey({
+      key: Buffer.from(SS_OWNER_SPKI_B64, 'base64'), format: 'der', type: 'spki',
+    });
+  }
+  return _ssOwnerKey;
+}
+// Canonical JSON over a FIXED key order — both sides must hash byte-identical text.
+function ssTuneCanon(t) {
+  const k = ['grazePx', 'grazeHead', 'bodyScale', 'grazeReach', 'circDeg', 'faceDeg', 'n2nScale', 'rule'];
+  return JSON.stringify(k.map((x) => (t[x] === undefined || t[x] === null ? null : t[x])));
+}
+function ssOwnerVerify(lobbyId, tuning, ts, sigB64) {
+  try {
+    const n = Number(ts);
+    if (!n || Math.abs(Date.now() - n) > 300000) return false;      // 5-minute window
+    if (!sigB64 || typeof sigB64 !== 'string') return false;
+    const sig = Buffer.from(sigB64, 'base64');
+    if (sig.length !== 64) return false;
+    const hash = crypto.createHash('sha256').update(ssTuneCanon(tuning)).digest('hex');
+    const msg = Buffer.from('ss-tune:' + lobbyId + ':' + n + ':' + hash, 'utf8');
+    return crypto.verify(null, msg, ssOwnerKey(), sig);
+  } catch (e) { console.warn('[ss-tune] verify ' + (e && e.message)); return false; }
+}
+// The tuning NEW lobbies start from. Owner changes update this (and every live lobby) and are saved to
+// disk, so a pm2 restart doesn't silently snap the whole game back to the shipped constants.
+const SS_TUNING_FILE = '/opt/pac-arena/ss-tuning.json';
+let SS_TUNING_DEFAULT = { n2nScale: 0.30, bodyScale: 0.75, grazePx: 3.3, grazeHead: 1.20, grazeReach: 1.00, circDeg: 360, faceDeg: 21, rule: 'biggest_wins' };
+// Load the owner's saved tuning. This USED to run right here as a bare try-block, and it threw on
+// every single boot: `fs` is declared ~270 lines below and ssClampTuning falls back to SS_CAMP_*_D
+// constants declared ~950 lines below, and a hoisted `const` is not initialised until its line runs.
+// The catch turned each one into a warning, so the file on disk was silently ignored and every
+// restart snapped the game back to the shipped constants - NA had grazePx 3.35 saved and had been
+// running 3.3 for 100 restarts. Chasing the individual names is whack-a-mole; the block simply has to
+// run after the module has finished evaluating, so it is a function now and it is called at the
+// bottom of the file. Nothing reads SS_TUNING_DEFAULT before then (lobbies copy it on creation).
+function ssLoadSavedTuning() {
+  try {
+    if (fs.existsSync(SS_TUNING_FILE)) {
+      const saved = JSON.parse(fs.readFileSync(SS_TUNING_FILE, 'utf8'));
+      SS_TUNING_DEFAULT = ssClampTuning(saved, SS_TUNING_DEFAULT);
+      console.log('[tuning] loaded saved tuning ' + JSON.stringify(SS_TUNING_DEFAULT));
+    } else { console.log('[tuning] no saved tuning file, using shipped defaults'); }
+  } catch (e) { console.warn('[tuning] load failed ' + (e && e.message)); }
+}
+function ssSaveTuning(t) {
+  try { fs.writeFileSync(SS_TUNING_FILE, JSON.stringify(t)); } catch (e) { console.warn('[tuning] save failed ' + (e && e.message)); }
+}
+// Clamp every knob to a range the simulation stays sane in. Anything missing keeps its current value.
+function ssClampTuning(t, cur) {
+  const num = (v, lo, hi, dflt) => {
+    const n = Number(v);
+    if (!isFinite(n)) return dflt;
+    return Math.min(hi, Math.max(lo, n));
+  };
+  const c = cur || {};
+  return {
+    n2nScale:   num(t.n2nScale,   0.05, 1.00, c.n2nScale   != null ? c.n2nScale   : 0.30),
+    bodyScale:  num(t.bodyScale,  0.20, 2.00, c.bodyScale  != null ? c.bodyScale  : 0.75),
+    grazePx:    num(t.grazePx,    0.00, 20.0, c.grazePx    != null ? c.grazePx    : 3.3),
+    grazeHead:  num(t.grazeHead,  0.50, 2.50, c.grazeHead  != null ? c.grazeHead  : 1.20),
+    grazeReach: num(t.grazeReach, 0.20, 2.00, c.grazeReach != null ? c.grazeReach : 1.00),
+    circDeg:    Math.round(num(t.circDeg, 90, 720, c.circDeg != null ? c.circDeg : 360)),
+    faceDeg:    Math.round(num(t.faceDeg,  1,  90, c.faceDeg != null ? c.faceDeg : 21)),
+    rule:       (['biggest_wins', 'smallest_wins', 'random', 'both_die'].indexOf(t.rule) >= 0) ? t.rule : (c.rule || 'biggest_wins'),
+
+    // ── anti-camp arena push ──
+
+    campSec:      num(t.campSec,      0,  120, c.campSec      != null ? c.campSec      : SS_CAMP_SEC_D),
+
+    campPush:     num(t.campPush,     0, 1500, c.campPush     != null ? c.campPush     : SS_CAMP_PUSH_D),
+
+    campMaxOff:   num(t.campMaxOff,   0, 3000, c.campMaxOff   != null ? c.campMaxOff   : SS_CAMP_MAXOFF_D),
+
+    campEase:     num(t.campEase,     0, 1500, c.campEase     != null ? c.campEase     : SS_CAMP_EASE_D),
+
+    campEscapeSec:num(t.campEscapeSec,0,   60, c.campEscapeSec!= null ? c.campEscapeSec: SS_CAMP_ESCSEC_D),
+
+    campEscapeDist:num(t.campEscapeDist,0,5000,c.campEscapeDist!=null ? c.campEscapeDist: SS_CAMP_ESCDIST_D),
+
+    campShrink:   num(t.campShrink,    0, 0.30, c.campShrink   != null ? c.campShrink   : SS_CAMP_SHRINK_D),
+
+    campShrinkMax:num(t.campShrinkMax, 0, 0.80, c.campShrinkMax!= null ? c.campShrinkMax: SS_CAMP_SHRINKMAX_D),
+
+    campAccel:    num(t.campAccel,     0, 1.00, c.campAccel    != null ? c.campAccel    : SS_CAMP_ACCEL_D),
+
+    campPushMax:  num(t.campPushMax,   1, 5.00, c.campPushMax  != null ? c.campPushMax  : SS_CAMP_PUSHMAX_D),
+
+  };
+
+}
+
+
+
+// ── ANTI-CAMP ARENA PUSH ─────────────────────────────────────────────────────────────────────────
+
+// Defaults (all live-tunable from the COMBAT TUNING panel).
+
+const SS_CAMP_SEC_D     = 15;    // seconds of continuous circling before the map starts pushing
+
+const SS_CAMP_PUSH_D    = 509;   // px/sec the push STARTS at (owner: 485 +5%)
+
+const SS_CAMP_ACCEL_D   = 0.0034; // +0.34%/s: reaches the +10% ceiling at ~29s, i.e. only once the border has travelled all the way across to where they were sitting
+
+const SS_CAMP_PUSHMAX_D = 1.10;  // ...up to this multiple of the start speed (owner: +10% max, not +70%)
+
+const SS_CAMP_MAXOFF_D  = 3000;  // px cap on how far the centre may travel from origin
+
+const SS_CAMP_EASE_D    = 260;   // px/sec the centre drifts back once nobody is camping
+
+const SS_CAMP_ESCSEC_D  = 5;     // seconds of genuine travel needed to call off the push
+
+const SS_CAMP_ESCDIST_D = 600;   // ...and how far they must actually get from the camp spot
+
+const SS_CAMP_SHRINK_D    = 0.020;  // arena radius fraction/sec the ring closes while anyone camps
+
+const SS_CAMP_SHRINKMAX_D = 0.45;   // ...never past this fraction, so the arena cannot collapse
+
+
+
+function ssCampTune(sg, k, d) { const v = sg.tuning && sg.tuning[k]; return (v == null ? d : v); }
+
+
+
+// Runs once per tick. Picks the longest-standing camper, slides the arena centre away from them, and
+
+// eases it back when nobody qualifies.
+
+function ssCampPush(sg, dt) {
+
+  if (sg.cx == null) { sg.cx = 0; sg.cy = 0; }
+
+  const now = Date.now();
+
+  const secNeeded  = ssCampTune(sg, 'campSec', SS_CAMP_SEC_D);
+
+  const pushSpeed  = ssCampTune(sg, 'campPush', SS_CAMP_PUSH_D);
+
+  const maxOff     = ssCampTune(sg, 'campMaxOff', SS_CAMP_MAXOFF_D);
+
+  const easeSpeed  = ssCampTune(sg, 'campEase', SS_CAMP_EASE_D);
+
+  const escSec     = ssCampTune(sg, 'campEscapeSec', SS_CAMP_ESCSEC_D);
+
+  const escDist    = ssCampTune(sg, 'campEscapeDist', SS_CAMP_ESCDIST_D);
+
+
+
+  const campers = [];
+
+  const shrinkRate = ssCampTune(sg, 'campShrink', SS_CAMP_SHRINK_D);
+
+  const shrinkMax  = ssCampTune(sg, 'campShrinkMax', SS_CAMP_SHRINKMAX_D);
+
+  const shrinkEase = shrinkRate * 2;   // recovers twice as fast as it closes
+
+  const accel   = ssCampTune(sg, 'campAccel', SS_CAMP_ACCEL_D);
+
+  const pushMax = ssCampTune(sg, 'campPushMax', SS_CAMP_PUSHMAX_D);
+
+  for (const sn of sg.snakes.values()) {
+
+    if (!sn.alive || sn.bot) continue;
+
+    const h = sn.path && sn.path[0];
+
+    if (!h) continue;
+
+    if (sn.circleActive) {
+
+      // Circling: start/continue the camp clock.
+
+      if (!sn._campStart) sn._campStart = now;
+
+      // RE-ANCHOR every frame they are circling, and wipe any escape progress. Two reasons:
+
+      //  1. Resuming the circle before the escape window elapses restarts the FULL escape time. You
+
+      //     cannot break off for 4 seconds, circle again, and keep the old progress.
+
+      //  2. The escape distance must be measured from where they are ACTUALLY camping now. Anchoring
+
+      //     once let a player drift, resume circling somewhere new, and then count as instantly "far
+
+      //     from the camp spot" against a stale anchor they had already left.
+
+      sn._campX = h.x; sn._campY = h.y;
+
+      sn._campEscFrom = 0;
+
+    } else if (sn._campStart) {
+
+      // NOT circling — but stopping is not enough. They must break the circle AND actually travel
+
+      // escDist away from where they were camping, and keep BOTH true for escSec. Anything less
+
+      // (a twitch, a brief straighten, stopping then resuming) leaves the push running.
+
+      const far = Math.hypot(h.x - (sn._campX || 0), h.y - (sn._campY || 0)) >= escDist;
+
+      if (!far) sn._campEscFrom = 0;                       // hasn't gone anywhere yet
+
+      else if (!sn._campEscFrom) sn._campEscFrom = now;    // clock starts the moment they're clear
+
+      else if (now - sn._campEscFrom >= escSec * 1000) {   // sustained escape → free
+
+        sn._campStart = 0; sn._campEscFrom = 0;
+
+      }
+
+    }
+
+    if (sn._campStart) {
+
+      const held = (now - sn._campStart) / 1000;
+
+      if (held >= secNeeded) campers.push(sn);   // EVERY camper counts, not just the longest
+
+    }
+
+  }
+
+
+
+  if (campers.length) {
+
+    // TRANSLATE by the resultant of every camper's away-vector. One camper => a full directional
+
+    // push. Two on opposite sides => the vectors cancel and the ring stops sliding, because there is
+
+    // no single direction that punishes both. The shrink below is what gets them.
+
+    let ax = 0, ay = 0;
+
+    for (const c of campers) {
+
+      const h = c.path[0];
+
+      let dx = sg.cx - h.x, dy = sg.cy - h.y;
+
+      const m = Math.hypot(dx, dy);
+
+      if (m < 1) { dx = 1; dy = 0; } else { dx /= m; dy /= m; }
+
+      ax += dx; ay += dy;
+
+    }
+
+    ax /= campers.length; ay /= campers.length;   // resultant; ~0 when they oppose each other
+
+    // RAMP: gentle for the first moments, then it leans on them harder the longer they hold the
+
+    // circle. campPushT is wall-time spent actually pushing and resets as soon as nobody qualifies.
+
+    sg.campPushT = (sg.campPushT || 0) + dt;
+
+    const spd = pushSpeed * Math.min(pushMax, 1 + accel * sg.campPushT);
+
+    sg.cx += ax * spd * dt;
+
+    sg.cy += ay * spd * dt;
+
+    // Remember where the ring is heading so displaced food can be dropped into the ground it is
+
+    // about to uncover, instead of scattered uniformly and lagging behind the leading edge.
+
+    sg.cvx = ax; sg.cvy = ay;
+
+    const off = Math.hypot(sg.cx, sg.cy);
+
+    if (off > maxOff) { sg.cx = sg.cx / off * maxOff; sg.cy = sg.cy / off * maxOff; }
+
+    // SHRINK — the pressure that CANNOT be cancelled by standing opposite one another. Ramps while
+
+    // anyone is camping, faster with more campers, and is capped so the arena never collapses.
+
+    const rate = shrinkRate * Math.min(3, campers.length);
+
+    sg.campShrinkPct = Math.min(shrinkMax, (sg.campShrinkPct || 0) + rate * dt);
+
+    sg.campPushing = true;
+
+  } else {
+
+    const off = Math.hypot(sg.cx, sg.cy);
+
+    if (off > 0.5) {
+
+      const step = Math.min(off, easeSpeed * dt);
+
+      sg.cx -= (sg.cx / off) * step; sg.cy -= (sg.cy / off) * step;
+
+      // Coming HOME is still travelling, and the ground on the return side is being uncovered just
+
+      // like the leading edge was on the way out. Publishing the direction here keeps the food bias
+
+      // AND the in-motion food bonus alive for the whole journey — without it both switched off the
+
+      // instant the camper died and the ring slid back onto bare ground.
+
+      sg.cvx = -sg.cx / off; sg.cvy = -sg.cy / off;
+
+    } else { sg.cx = 0; sg.cy = 0; sg.cvx = 0; sg.cvy = 0; }
+
+    sg.campShrinkPct = Math.max(0, (sg.campShrinkPct || 0) - shrinkEase * dt);
+
+    sg.campPushT = 0;   // next offence starts gentle again
+
+    sg.campPushing = false;
+
+  }
+
+}
+
 const fs = require('fs');
 
 
@@ -375,6 +696,16 @@ function placePowerups(maze) {
 // ── Lobby defs (match client) ─────────────────────────────────────────────────
 
 const LOBBY_IDS = new Set(['free-lobby', 'ss-free-lobby', 'ss-test-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
+// Paid arenas are created on demand at ANY stake (ss-paid-lobby-0.07, -0.25, -12 ...), so the fixed
+// set above can never describe what is actually running. A spectator may watch a room that both looks
+// like a lobby AND exists right now — which keeps the old guarantee (no arbitrary name, and nothing
+// here ever CREATES a room) while making every real arena watchable instead of only $1 and $5.
+function isSpectatableLobby(id) {
+  if (typeof id !== 'string' || !id || id.length > 40) return false;
+  if (LOBBY_IDS.has(id)) return true;
+  if (!/^(ss-)?paid-lobby-\d+(?:\.\d+)?$/.test(id)) return false;
+  return ssGames.has(id) || rooms.has(id);
+}
 
 // Owner-only isolated sandbox for trying experimental hitboxes. FREE (no wager) and it uses a
 
@@ -467,17 +798,19 @@ const SS_BORDER_SHRINK_OUT   = SS_ARENA_R * 0.0009; // outward ease-back/tick (~
 
 const SS_MAX_TURN      = 0.274;   // rad/tick — client MAX_TURN
 
-const SS_FOOD_TARGET   = 68;     // regular-pebble baseline maintained on the map (topped up every tick in ssTick via ssReconcileFood — always ≥ this, a few transient over from boost/deaths is fine). Same for free + paid.
+const SS_FOOD_TARGET   = 68;     // client FOOD_TARGET
+
+const SS_FOOD_PUSH_BONUS = 25;   // extra orbs held while the arena is sliding (owner: 70 was too much)
 
 const SS_FOOD_GROW     = 2;       // client FOOD_GROW
 
-const SS_BOOST_MIN     = 12;      // client BOOST_MIN
+const SS_BOOST_MIN     = 8;       // client BOOST_MIN (owner 2026-07-26: 12 -> 8)
 
 const SS_BOOST_DRAIN_A = 3.0;    // client BOOST_DRAIN_AMT
 
 const SS_BOOST_DRAIN_T = 8;      // client BOOST_DRAIN
 
-const SS_INIT_NS       = 17;     // client INIT_SECTIONS
+const SS_INIT_NS       = 30;     // client INIT_SECTIONS (owner 2026-07-26: longer spawn)
 
 const SS_MIN_NS        = 8;      // client MIN_SECTIONS
 
@@ -697,7 +1030,11 @@ function ssMakeFood(x, y, k, w, o, ne) {
 
   }
 
-  return { x, y, ci: Math.floor(Math.random() * 20), size: 4 + Math.random() * 3,
+  // Money orbs render 20% larger than ordinary pebbles (owner) so the two are never confused.
+
+  const _sz = (4 + Math.random() * 3) * (k ? 1.2 : 1);
+
+  return { x, y, ci: Math.floor(Math.random() * 20), size: _sz,
 
            k: k || 0, w: w || 0, o: o || null, ne: ne || 0 };
 
@@ -723,9 +1060,29 @@ function ssMakeFoodSpread(sg) {
 
     const a = Math.random() * Math.PI * 2;
 
-    const r = Math.sqrt(Math.random()) * SS_ARENA_R * 0.9;
+    // Spawn relative to the arena CENTRE and its CURRENT radius, not the origin and the constant.
 
-    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+    // Once ssCampPush starts sliding the map, the newly-exposed side would otherwise be barren while
+
+    // food piled up behind — new food now fills the area the ring actually covers, so density stays
+
+    // what it is today no matter where the arena has moved to.
+
+    const _fR = (sg.arenaR || SS_ARENA_R) * 0.9;
+
+    const _fcx = sg.cx || 0, _fcy = sg.cy || 0;
+
+    // While the ring is travelling, weight fresh food toward the side being uncovered (same reason
+
+    // as the relocation above); otherwise spread it evenly.
+
+    const _mvx = sg.cvx || 0, _mvy = sg.cvy || 0;
+
+    const _aa = (_mvx || _mvy) ? (Math.atan2(_mvy, _mvx) + (Math.random() - 0.5) * Math.PI) : a;
+
+    const r = (_mvx || _mvy) ? _fR * (0.45 + 0.5 * Math.sqrt(Math.random())) : Math.sqrt(Math.random()) * _fR;
+
+    const x = _fcx + Math.cos(_aa) * r, y = _fcy + Math.sin(_aa) * r;
 
     let nd = Infinity;
 
@@ -755,7 +1112,11 @@ function ssReconcileFood(sg) {
 
   sg.food.forEach(f => { if (!f.k) reg++; });
 
-  while (reg < SS_FOOD_TARGET) { sg.food.push(ssMakeFoodSpread(sg)); reg++; }
+  // A travelling ring uncovers new ground every tick, so stock it heavier while that is happening.
+
+  const _tgt = SS_FOOD_TARGET + ((sg.campPushing || sg.cvx || sg.cvy) ? SS_FOOD_PUSH_BONUS : 0);
+
+  while (reg < _tgt) { sg.food.push(ssMakeFoodSpread(sg)); reg++; }
 
 }
 
@@ -795,9 +1156,19 @@ function ssSpawnKillFood(sg, sn) {
 
     let y = p.y + (Math.random() - 0.5) * 8;
 
-    const d = Math.sqrt(x * x + y * y);
+    const _kcx = sg.cx || 0, _kcy = sg.cy || 0;
 
-    if (d > EDGE) { const s = EDGE / d; x *= s; y *= s; }
+
+
+    const _kdx = x - _kcx, _kdy = y - _kcy;
+
+
+
+    const d = Math.sqrt(_kdx * _kdx + _kdy * _kdy);
+
+
+
+    if (d > EDGE) { const s = EDGE / d; x = _kcx + _kdx * s; y = _kcy + _kdy * s; }
 
     sg.food.push(ssMakeFood(x, y, 1, wPerOrb));
 
@@ -895,37 +1266,131 @@ function ssRestoreParkedFood(lid, sg) {
 
 function ssFindSafeSpawn(sg) {
 
-  const minDist = 900;
+  // Spawn placement = the emptiest spot inside the LIVE arena.
 
-  let best = null, bestMin = -1;
+  //
 
-  for (let att = 0; att < 40; att++) {
+  // The old version drew a point at SS_ARENA_R * [0.22 .. 0.78] around the ORIGIN and measured only
 
-    const a = Math.random() * Math.PI * 2;
+  // the distance to other snakes' HEADS. Both halves stopped being true once the border started
 
-    const r = SS_ARENA_R * (0.22 + Math.random() * 0.56);
+  // moving:
 
-    const sx = Math.cos(a) * r, sy = Math.sin(a) * r;
+  //   * The arena is a circle at (sg.cx, sg.cy) with radius sg.arenaR. The anti-camp push slides that
 
-    let nearestDist = Infinity;
+  //     centre up to SS_CAMP_MAXOFF_D (3000) from the origin and the ring shrinks by up to 55%
 
-    sg.snakes.forEach(sn => {
+  //     (0.10 border-death + 0.45 camp), so the playable circle can be 1350 wide and sitting entirely
 
-      if (!sn.alive) return;
+  //     to one side of the origin. A point drawn 2340 from the ORIGIN is then usually OUTSIDE it —
 
-      const dx = sn.x - sx, dy = sn.y - sy;
+  //     which is players 'spawning into the moving border' and dying on arrival.
 
-      nearestDist = Math.min(nearestDist, Math.sqrt(dx * dx + dy * dy));
+  //   * A snake is a BODY, not a point. Being 900 from someone's head means nothing when their tail
 
-    });
+  //     is lying across the square you just landed on, so head-only distance did not prevent a
 
-    if (nearestDist > minDist) return [sx, sy]; // good spot found
+  //     spawn kill either.
 
-    if (nearestDist > bestMin) { bestMin = nearestDist; best = [sx, sy]; }
+  //
+
+  // Now: score candidate points across the live circle by their CLEARANCE — the distance to the
+
+  // nearest thing that can kill them, wall or snake — and take the best one. That is exactly 'as far
+
+  // from the border and from everyone else as this arena allows'. No spawn immunity is involved;
+
+  // the position is simply correct.
+
+  const cx = sg.cx || 0, cy = sg.cy || 0;
+
+  const aR = sg.arenaR || SS_ARENA_R;
+
+  // The ring closes at SS_BORDER_SHRINK_IN per tick, so landing just inside it is still spawning into
+
+  // the border, only a second later. Clearance is credited beyond this margin, never inside it.
+
+  const wallMin = Math.max(300, aR * 0.28);
+
+  // Everything that can kill a spawn: each alive snake's head plus its body, sampled along the same
+
+  // path the H2B collision loop reads. A coarse stride is right here — we are measuring hundreds of
+
+  // units of clearance, not testing an overlap — and it keeps the cost flat however long snakes get.
+
+  const occ = [];
+
+  sg.snakes.forEach(sn => {
+
+    if (!sn.alive) return;
+
+    occ.push(sn.x, sn.y);
+
+    const path = sn.path;
+
+    if (!path || !path.length) return;
+
+    const spacing = ssSegSpacing(sn.ns);
+
+    const stride = Math.max(1, Math.ceil(48 / Math.max(1, spacing)));   // ~one sample per 48px of body
+
+    const lim = Math.min(sn.ns, 1200);
+
+    for (let k = 2; k < lim; k += stride) {
+
+      const pt = path[Math.round(k * spacing / SS_POINT_DIST)];
+
+      if (pt) occ.push(pt.x, pt.y);
+
+    }
+
+  });
+
+  // Concentric rings of candidates out to the last radius that still clears the wall, rotated by a
+
+  // random phase so two players joining in the same second are not handed the same square.
+
+  const usable = Math.max(0, aR - wallMin);
+
+  const phase = Math.random() * Math.PI * 2;
+
+  const RINGS = 6;
+
+  let best = null, bestScore = -Infinity;
+
+  for (let ring = 0; ring <= RINGS; ring++) {
+
+    const rr = usable * (ring / RINGS);
+
+    const n = ring === 0 ? 1 : ring * 6;
+
+    for (let s = 0; s < n; s++) {
+
+      const a = phase + (s / n) * Math.PI * 2 + ring * 0.7;
+
+      const sx = cx + Math.cos(a) * rr, sy = cy + Math.sin(a) * rr;
+
+      let clear = usable - rr;                       // room to the wall, past the safety margin
+
+      for (let i = 0; i < occ.length; i += 2) {
+
+        const dx = occ[i] - sx, dy = occ[i + 1] - sy;
+
+        const d = Math.sqrt(dx * dx + dy * dy);
+
+        if (d < clear) clear = d;
+
+        if (clear <= bestScore) break;               // already beaten — stop measuring this candidate
+
+      }
+
+      if (clear > bestScore) { bestScore = clear; best = [sx, sy]; }
+
+    }
 
   }
 
-  return best || [Math.cos(Math.random() * Math.PI * 2) * SS_ARENA_R * 0.5, Math.sin(Math.random() * Math.PI * 2) * SS_ARENA_R * 0.5];
+  return best || [cx, cy];
 
 }
 
@@ -939,6 +1404,8 @@ function ssSpawnSnake(pid, color, name, sg) {
 
   else {
 
+    // No arena object at all (shouldn't happen for a real join) — the origin IS the centre here.
+
     const a = Math.random() * Math.PI * 2;
 
     const r = SS_ARENA_R * (0.22 + Math.random() * 0.56);
@@ -947,7 +1414,17 @@ function ssSpawnSnake(pid, color, name, sg) {
 
   }
 
-  const face = Math.atan2(-sy, -sx);
+  // Face the LIVE arena centre, not the origin. Once the anti-camp push has slid the ring away the
+
+  // origin can be well outside the playable circle, so facing it aimed a fresh spawn AT the wall —
+
+  // and the seeded tail behind the head pointed inward, the wrong way round.
+
+  const _sfcx = sg ? (sg.cx || 0) : 0, _sfcy = sg ? (sg.cy || 0) : 0;
+
+  const _sfdx = _sfcx - sx, _sfdy = _sfcy - sy;
+
+  const face = (_sfdx * _sfdx + _sfdy * _sfdy) < 1 ? Math.random() * Math.PI * 2 : Math.atan2(_sfdy, _sfdx);
 
   const ns = SS_INIT_NS;
 
@@ -1085,7 +1562,7 @@ function getSsGame(lid) {
 
     noseCollision: true,
 
-    tuning: { n2nScale: 0.30, bodyScale: 0.75, grazePx: 6.5, grazeHead: 1.25, grazeReach: 1.00, circDeg: 360, faceDeg: 21, rule: 'biggest_wins' }
+    tuning: { ...SS_TUNING_DEFAULT }   // inherits the owner's live tuning; see ss-tune
 
   });
 
@@ -1139,6 +1616,14 @@ function ssHandleInput(lid, pid, d, io) {
     // NOTE this does NOT affect a refresh/reconnect: that snake still exists and is alive, so this
     // whole spawn branch is skipped and the player resumes their real server-side length. Only genuine
     // fresh spawns and post-death respawns come through here, and both correctly start at 17.
+
+    // A fresh life wipes any recorded exit: fate is keyed by pid and is otherwise never
+
+    // cleared, so a stale 'already out' record from an earlier death in this lobby would
+
+    // decide a later duel/outlast against the player who is actually still alive.
+
+    try { if (wgEnabled(lid)) wgLobby(lid).fate.delete(String(pid)); } catch (_) {}
 
     sg.snakes.set(pid, sn);
 
@@ -1271,9 +1756,9 @@ function ssForfeitNow(lid, pid, io) {
 
 // Wager-scaled growth cap breakpoints. Keep in sync with SS_CAP_* / ssCapFromRatio in the
 // client (slither-snakes.html); the server is authoritative, the client only predicts.
-const SS_CAP_BASE   = 30;   // carrying just your entry wager (1x)
-const SS_CAP_DOUBLE = 45;   // double the entry wager (2x)
-const SS_CAP_MAX    = 50;   // triple (3x) and the hard ceiling beyond it
+const SS_CAP_BASE   = 43;   // carrying just your entry wager (1x) — spawn(30) + 13 headroom
+const SS_CAP_DOUBLE = 58;   // double the entry wager (2x)
+const SS_CAP_MAX    = 63;   // triple (3x) and the hard ceiling beyond it
 // Growth cap by how many ENTRY WAGERS you are carrying (r = usd / entry wager).
 // r<=1 (just your entry) => 30; 2x => 45; 3x => 50; beyond 3x => still 50 (hard ceiling).
 // Two legs by design: +15/wager up to double, then +5/wager to triple.
@@ -1342,7 +1827,13 @@ function ssStepMovement(sn, sg, lid, io, now) {
 
     const aR = sg.arenaR || SS_ARENA_R;
 
-    if (sn.x * sn.x + sn.y * sn.y >= aR * aR) {
+    // Measured from the arena's (possibly pushed) centre — this is what makes the advancing wall
+
+    // actually lethal to a camper instead of just looking like it moved. See ssCampPush.
+
+    const _bx = sn.x - (sg.cx || 0), _by = sn.y - (sg.cy || 0);
+
+    if (_bx * _bx + _by * _by >= aR * aR) {
 
       // Death to the border → close the arena in a bit more (capped), and (re)start the hold clock.
 
@@ -1508,11 +1999,19 @@ function ssTick(lid, io) {
 
   if (sg.arenaR == null) sg.arenaR = SS_ARENA_R;
 
+  // Anti-camp: slide the arena centre away from anyone holding a circle past the trigger.
+
+  try { ssCampPush(sg, 1 / 60); } catch (e) { /* never let this break the sim */ }
+
   if ((sg.shrinkPct || 0) > 0 && now > (sg.shrinkResetAt || 0)) sg.shrinkPct = 0; // hold expired → ease back out
 
   {
 
-    const targetR = SS_ARENA_R * (1 - (sg.shrinkPct || 0));
+    // campShrinkPct is the anti-camp concentric squeeze (see ssCampPush) — it rides on top of the
+
+    // existing death-driven shrink and uses the same smooth chase below.
+
+    const targetR = SS_ARENA_R * (1 - Math.min(0.8, (sg.shrinkPct || 0) + (sg.campShrinkPct || 0)));
 
     if (sg.arenaR > targetR)      sg.arenaR = Math.max(targetR, sg.arenaR - SS_BORDER_SHRINK_IN);  // closing in — fast
 
@@ -1528,11 +2027,77 @@ function ssTick(lid, io) {
 
       const e2 = edge * edge;
 
+      const _fcx = sg.cx || 0, _fcy = sg.cy || 0;
+
       for (const f of sg.food) {
 
-        const d2 = f.x * f.x + f.y * f.y;
+        const _dx = f.x - _fcx, _dy = f.y - _fcy;
 
-        if (d2 > e2) { const s = edge / Math.sqrt(d2); f.x *= s; f.y *= s; sg._foodDirty = true; }
+        const d2 = _dx * _dx + _dy * _dy;
+
+        if (d2 > e2) {
+
+          // RELOCATE, do not clamp. Scaling an out-of-bounds orb onto the edge circle piles EVERY
+
+          // displaced orb into one dense arc on the trailing side while the rest of the map goes
+
+          // bare — very visible now that the anti-camp push slides the whole ring. Dropping it at a
+
+          // fresh uniform point inside the ring (sqrt for equal-area) keeps the count identical and
+
+          // the spread even. Money orbs stay in play, they just move.
+
+          // MONEY ORBS ARE NEVER TELEPORTED. They are claim tickets on real SOL, so a player has to
+
+          // be able to go and get the money where it dropped. Pull them just inside the edge — they
+
+          // bunch against the border as it sweeps past, which is the readable, expected behaviour
+
+          // and what the relocation above accidentally broke. Only ordinary pebbles get spread.
+
+          if (f.k) {
+
+            const _s = edge / Math.sqrt(d2);
+
+            f.x = _fcx + _dx * _s; f.y = _fcy + _dy * _s;
+
+            sg._foodDirty = true;
+
+            continue;
+
+          }
+
+          const _mvx = sg.cvx || 0, _mvy = sg.cvy || 0;
+
+          let _ra, _rr;
+
+          if (_mvx || _mvy) {
+
+            // MOVING: drop it into the leading half (+/-90 degrees of travel) and out in the outer
+
+            // band, which is the ground the ring has just uncovered. Without this the fresh side
+
+            // stays visibly bare because a uniform scatter only lands a slice of the orbs there.
+
+            const _mAng = Math.atan2(_mvy, _mvx);
+
+            _ra = _mAng + (Math.random() - 0.5) * Math.PI;
+
+            _rr = edge * (0.45 + 0.47 * Math.sqrt(Math.random()));
+
+          } else {
+
+            _ra = Math.random() * Math.PI * 2;
+
+            _rr = Math.sqrt(Math.random()) * edge * 0.92;
+
+          }
+
+          f.x = _fcx + Math.cos(_ra) * _rr; f.y = _fcy + Math.sin(_ra) * _rr;
+
+          sg._foodDirty = true;
+
+        }
 
       }
 
@@ -1558,7 +2123,7 @@ function ssTick(lid, io) {
 
     if (!sn.alive && sn._killedAt && now - sn._killedAt > 3000) {
 
-      sg.snakes.delete(pid);
+      wgNoteExit(lid, sn); sg.snakes.delete(pid);
 
       io.to(lid).emit('leave', { id: pid }); // belt-and-suspenders: make sure clients drop the body
 
@@ -1645,7 +2210,7 @@ function ssTick(lid, io) {
 
     }
 
-    sg.snakes.delete(pid);
+    wgNoteExit(lid, sn); sg.snakes.delete(pid);
 
     if (sg.snakes.size === 0) {
 
@@ -1801,17 +2366,17 @@ function ssTick(lid, io) {
       // circling with their tail hanging outside to dodge circle-kills during the timer.
       if (_cs._cashPX !== undefined) _cs._cashWound = (_cs._cashWound || 0) + Math.hypot(_cs.x - _cs._cashPX, _cs.y - _cs._cashPY);
       _cs._cashPX = _cs.x; _cs._cashPY = _cs.y;
-      const _arc = (_cs.ns || 26) * ssSectionRadius(_cs.ns || 26) * 0.5;
+      const _arc = (_cs.ns || 26) * ssSectionRadius(_cs.ns || 26) * 0.25;  // HALF the body length: timer starts once half the snake is wound into the circle
       _cs._cashW = _arc > 0 ? Math.min(1, (_cs._cashWound || 0) / _arc) : 1;   // wind-in progress 0..1 for the client ring
       if ((_cs._cashWound || 0) >= _arc) { _cs._cashStart = Date.now(); _cs._cashW = 1; }
-    } else if (Date.now() - _cs._cashStart >= 5500) {
+    } else if (Date.now() - _cs._cashStart >= 4000) {
       _cs._cashResolved = 'paid';
-      _cs.alive = false; _cs.path = []; _cs.segs = [];
+      _cs.alive = false; _cs._killedAt = Date.now(); _cs.path = []; _cs.segs = [];
       io.to(lid).emit('ss-cashout-done', { id: _cs.pid });
     }
   }
 
-  // Spectator betting: drive market state machine + resolutions (additive, never blocks the tick).
+  // P2P betting exchange: roster broadcast + outcome settlement (additive, never blocks the tick).
   try { ssWagerTick(lid, sg, io); } catch (_) {}
 
   // 5. Broadcast state to all clients
@@ -1908,7 +2473,9 @@ function ssBroadcastState(sg, lid, io) {
 
   });
 
-  const pkt = { snakes: snakePkts, t: Date.now(), tick: sg.tick || 0, ar: Math.round(sg.arenaR || SS_ARENA_R) };
+  const pkt = { snakes: snakePkts, t: Date.now(), tick: sg.tick || 0, ar: Math.round(sg.arenaR || SS_ARENA_R),
+
+                acx: Math.round(sg.cx || 0), acy: Math.round(sg.cy || 0), cpush: !!sg.campPushing };
 
   const now = Date.now();
 
@@ -1920,7 +2487,15 @@ function ssBroadcastState(sg, lid, io) {
 
       f.ci || 0, Math.round((f.size || 6) * 10) / 10,
 
-      f.k ? 1 : 0, f.w ? Math.round(f.w * 1e6) : 0
+      f.k ? 1 : 0, f.w ? Math.round(f.w * 1e6) : 0,
+
+      // SHED OWNER + NO-EAT DEADLINE. Computed server-side but never transmitted, so the client
+
+      // predictor could not know a pebble was off-limits: it "ate" it, the pebble vanished from the
+
+      // screen, and the server went on refusing it. Sending them makes both sides apply one rule.
+
+      f.o || 0, f.ne || 0
 
     ]);
 
@@ -1971,6 +2546,8 @@ function ssBroadcastStateTo(socket, sg) {
   const pkt = {
 
     snakes: snakePkts, t: Date.now(), tick: sg.tick || 0, ar: Math.round(sg.arenaR || SS_ARENA_R),
+
+    acx: Math.round(sg.cx || 0), acy: Math.round(sg.cy || 0), cpush: !!sg.campPushing,
 
     food: sg.food.map(f => [
 
@@ -2924,6 +3501,7 @@ function ssKill(victim, killer, lid, io, diag) {
   if (victim.cashing && !victim._cashResolved) { victim._cashResolved = 'died'; victim.cashing = false; }
   victim.alive = false;
   victim._killedAt = Date.now();
+  victim._killedBy = (killer && killer.pid) ? String(killer.pid) : null;
   // ESCROW SAFETY: dead-flag the victim on the settlement server the instant they die, so a killed
   // player can NEVER cash out. Closes the double-spend where a stale/racing client settles after death
   // while the SAME $ also drops as food for the killer (root cause of escrow going short). Paid lobbies
@@ -2967,7 +3545,19 @@ function ssKill(victim, killer, lid, io, diag) {
 //   3. Relay wager events from Vercel to spectators over the socket, so the UI is push-driven
 //      with NO client polling.
 // Additive: hooks are ssWagerTick() (once per ssTick) and ssWagerSendTo() (spectator connect).
-const WG_ENABLED    = new Set((process.env.SS_WAGER_LOBBIES || 'ss-test-lobby,ss-paid-lobby-1,ss-paid-lobby-5').split(',').map(s => s.trim()).filter(Boolean));
+const WG_ENABLED    = new Set((process.env.SS_WAGER_LOBBIES || '').split(',').map(s => s.trim()).filter(Boolean));
+// Betting is enabled by the SHAPE of a lobby id, not by a hardcoded list of three of them. The old
+// default was 'ss-test-lobby,ss-paid-lobby-1,ss-paid-lobby-5', so a player in the $0.20 room -- or
+// $0.50, or any custom stake -- got no signed roster at all and the betting panel truthfully reported
+// 'no snakes to bet on yet' while the arena was full of them. Exactly the bug that made custom-stake
+// lobbies unwatchable: a static set cannot keep up with stakes players can invent.
+// Any PAID arena is bettable; free lobbies deliberately are not (nothing is at stake to settle on).
+// SS_WAGER_LOBBIES still works as an explicit ALLOW-list addition if a specific room ever needs it.
+function wgEnabled(lid) {
+  if (!lid) return false;
+  if (WG_ENABLED.has(lid)) return true;
+  return /^ss-paid-lobby-\d+(?:\.\d+)?$/.test(String(lid)) || String(lid) === 'ss-test-lobby';
+}
 const WG_SETTLE_URL = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
 const WG_REGION     = String(process.env.WG_REGION || 'NA').toUpperCase() === 'EU' ? 'EU' : 'NA';
 const WG_ROSTER_MS  = 4000;    // how often the signed roster is rebroadcast
@@ -3011,7 +3601,13 @@ function wgRosterEntry(lid, sn, exp) {
   const ipHash = wgIpByPid.get(String(sn.pid)) || '';
   return {
     pid: sn.pid, name, color: sn.color || '#39FF14', usd: sn.usd || 0, ipHash, exp,
-    sig: wgHmac('snake:' + WG_REGION + ':' + lid + ':' + sn.pid + ':' + name + ':' + ipHash + ':' + exp),
+    // NAME IS NOT SIGNED. This proof only establishes "this pid is a live snake in this arena";
+    // the display name is cosmetic and MUTABLE. Binding it meant that the moment a player renamed
+    // (or their name reset to the default 'SNAKE' mid-session) every signature they held stopped
+    // verifying - their snake silently failed validation, a duel's opponent never got recorded, and
+    // the wager could never settle. api/settle.js accepts this nameless form and still accepts the
+    // old name-bound one during rollout.
+    sig: wgHmac('snake:' + WG_REGION + ':' + lid + ':' + sn.pid + ':' + ipHash + ':' + exp),
   };
 }
 // Everything currently on this arena's book (open + matched). Sent WITH the roster so a client that
@@ -3047,7 +3643,7 @@ function wgPostSettle(w, winningSide) {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
     body: JSON.stringify({ action: 'wager-settle', wagerId: w.id, winningSide }),
     signal: AbortSignal.timeout(20000),
-  }).then(r => r.json()).then(d => { if (d && d.ok) w._settled = true; }).catch(() => {});
+  }).then(r => r.json()).then(d => { if (d && d.ok) { w._settled = true; } else { console.error('[wg] settle REFUSED ' + w.id + ' ' + JSON.stringify(d || {}).slice(0, 240)); } }).catch(e => { console.error('[wg] settle POST FAILED ' + w.id + ' ' + ((e && e.message) || e)); });
 }
 function wgPostReturn(w) {
   if (!GAME_SECRET) return;
@@ -3058,7 +3654,7 @@ function wgPostReturn(w) {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
     body: JSON.stringify({ action: 'wager-return', wagerId: w.id }),
     signal: AbortSignal.timeout(20000),
-  }).then(r => r.json()).then(d => { if (d && d.ok) w._settled = true; }).catch(() => {});
+  }).then(r => r.json()).then(d => { if (d && d.ok) { w._settled = true; } else { console.error('[wg] settle REFUSED ' + w.id + ' ' + JSON.stringify(d || {}).slice(0, 240)); } }).catch(e => { console.error('[wg] settle POST FAILED ' + w.id + ' ' + ((e && e.message) || e)); });
 }
 // Pull the authoritative open/live wager set for this arena (backstop after a server restart).
 function wgReconcile(lid) {
@@ -3083,38 +3679,74 @@ function wgTrackFate(lid, sg) {
   for (const sn of sg.snakes.values()) {
     const pid = String(sn.pid || ''); if (!pid) continue;
     if (sn.alive) continue;
-    if (s.fate.has(pid)) continue;
+    // Same rule as wgNoteExit: record the most recent exit, never freeze the first one.
+    var _prevT = s.fate.get(pid); var _atT = sn._killedAt || Date.now();
+    if (_prevT && Number(_prevT.outAt || 0) >= _atT) continue;
     // 'paid' = completed a cash-out (banked the money); anything else = died/forfeited.
-    s.fate.set(pid, { outAt: Date.now(), how: sn._cashResolved === 'paid' ? 'paid' : 'died' });
+    s.fate.set(pid, { outAt: sn._killedAt || Date.now(), how: sn._cashResolved === 'paid' ? 'paid' : 'died', by: sn._killedBy || null });
   }
 }
 // Has this snake left, and how? Returns null while it is still in the arena.
-function wgFateOf(s, sg, pid) {
+function wgNoteExit(lid, sn) {
+  try {
+    if (!sn || !sn.pid) return;
+    if (!wgEnabled(lid)) return;   // don't spin up wager state for free lobbies
+    var _s = wgLobby(lid); var _p = String(sn.pid);
+    // Keep the LATEST exit, not the first. This map is never cleared for the life of the process,
+    // so refusing to overwrite froze a player's EARLIER death in place: a later, real kill was never
+    // recorded, and once stale fates are ignored the wager could never settle at all. A snake can
+    // die, respawn and die again - the most recent exit is the truth.
+    var _prevN = _s.fate.get(_p); var _atN = sn._killedAt || Date.now();
+    if (_prevN && Number(_prevN.outAt || 0) >= _atN) return;
+    _s.fate.set(_p, { outAt: sn._killedAt || Date.now(), how: sn._cashResolved === 'paid' ? 'paid' : 'died', by: sn._killedBy || null });
+  } catch (_) {}
+}
+function wgFateOf(s, sg, pid, sinceTs) {
   const f = s.fate.get(String(pid));
-  if (f) return f;
+  // ⚠ A fate recorded BEFORE this wager was placed must never settle it. s.fate is a per-lobby map
+  // that is never cleared for the life of the process, so a player who died earlier in the session
+  // still had a death on record. The instant a new bet on them was matched, that STALE death
+  // resolved it — 'instantly said bet lost when we didn't even fight or die'. Only exits that happen
+  // after the bet is live count.
+  if (f && (!sinceTs || Number(f.outAt || 0) >= Number(sinceTs))) return f;
+  if (f) return null;   // stale death: treat as undecided, not as an outcome
   const sn = sg.snakes.get(pid);
-  if (!sn) return { outAt: Date.now(), how: 'died' };   // gone entirely counts as out
+  if (!sn) return null;   // UNDECIDED. Never fabricate an exit time: doing so made whoever left FIRST look like they lasted LONGEST.
   return null;
 }
 
 // Decide a wager from live game truth. Returns the winning side, or null if not decided yet.
 function wgDecide(s, sg, w) {
   const now = Date.now();
+  // Only deaths/cash-outs from AFTER this wager went live may decide it.
+  const _since = Number(w.matchedTs || w.createdTs || 0);
   if (w.type === 'cashout') {
-    const f = wgFateOf(s, sg, w.subject);
+    const f = wgFateOf(s, sg, w.subject, _since);
     if (!f) return null;
     return f.how === 'paid' ? 'YES' : 'NO';
   }
   if (w.type === 'survive') {
-    const f = wgFateOf(s, sg, w.subject);
+    const f = wgFateOf(s, sg, w.subject, _since);
     const deadline = Number(w.resolveTs || 0);
     if (f && f.how === 'died' && (!deadline || f.outAt < deadline)) return 'NO';   // died before the bell
     if (f && f.how === 'paid') return 'YES';                                       // banked it = survived
     if (deadline && now >= deadline) return 'YES';                                 // still in at the bell
     return null;
   }
+  if (w.duel) {
+    // A duel is CREATED with subject2 = null (the opponent is whoever accepts) and only filled in at
+    // accept time from reservedSubject2. If that capture ever misses, subject2 stays null and the
+    // killer's id got compared against the string "null" - so a REAL kill never matched and the duel
+    // sat on LIVE forever without paying anyone. In a duel BOTH players back their own snake and a
+    // snake's pid IS their wallet, so creator/acceptor are exact fallbacks.
+    var _dA = w.subject || w.creator, _dB = w.subject2 || w.acceptor;
+    var _fa = wgFateOf(s, sg, _dA, _since), _fb = wgFateOf(s, sg, _dB, _since);
+    if (_dB && _fa && _fa.by && String(_fa.by) === String(_dB)) return 'B';
+    if (_dA && _fb && _fb.by && String(_fb.by) === String(_dA)) return 'A';
+    return null;
+  }
   if (w.type === 'outlast') {
-    const fa = wgFateOf(s, sg, w.subject), fb = wgFateOf(s, sg, w.subject2);
+    const fa = wgFateOf(s, sg, w.subject, _since), fb = wgFateOf(s, sg, w.subject2, _since);
     if (!fa && !fb) return null;
     if (fa && !fb) return 'B';               // A left first, B still in → B outlasted A
     if (fb && !fa) return 'A';
@@ -3126,7 +3758,7 @@ function wgDecide(s, sg, w) {
 
 // ── the tick ─────────────────────────────────────────────────────────────────
 function ssWagerTick(lid, sg, io) {
-  if (!GAME_SECRET || !WG_ENABLED.has(lid) || !sg) return;
+  if (!GAME_SECRET || !wgEnabled(lid) || !sg) return;
   const now = Date.now();
   const s = wgLobby(lid);
 
@@ -3142,10 +3774,8 @@ function ssWagerTick(lid, sg, io) {
       const side = wgDecide(s, sg, w);
       if (side) wgPostSettle(w, side);
     } else if (w.status === 'open' || w.status === 'reserved') {
-      // Nobody took it before the window closed → creator gets 100% back, no fee.
-      // 'reserved' is included on purpose: a claim whose deposit never landed used to leave the
-      // wager stranded here forever (it was handled nowhere), with the creator's stake stuck in
-      // escrow. settle sweeps a lapsed claim back to 'open', and this returns it once closed.
+      // 'reserved' included: a claim whose deposit never landed was handled NOWHERE, so the
+      // creator's stake sat in escrow forever. Nobody took it before the window closed → creator gets 100% back, no fee.
       if (now >= Number(w.lockTs || 0)) wgPostReturn(w);
     } else if (w.status === 'settled' || w.status === 'returned' || w.status === 'cancelled') {
       s.live.delete(id);
@@ -3153,10 +3783,8 @@ function ssWagerTick(lid, sg, io) {
   }
 }
 
-// ── standalone recovery sweep ────────────────────────────────────────────────
-// ssWagerTick only runs while an arena is actually being simulated, so a wager left behind in an
-// EMPTY lobby had nothing to rescue it — its creator's stake would sit in escrow indefinitely. This
-// runs on its own timer regardless of whether anyone is playing.
+// Recovery sweep on its own timer. ssWagerTick only runs while an arena is actually being
+// simulated, so a wager stranded in an EMPTY lobby had nothing to rescue it.
 function wgSweep() {
   if (!GAME_SECRET) return;
   const ts = Date.now();
@@ -3166,9 +3794,7 @@ function wgSweep() {
     body: JSON.stringify({ action: 'wager-sweep' }),
     signal: AbortSignal.timeout(25000),
   }).then(r => r.json()).then(d => {
-    if (d && d.ok && (d.reverted || d.returned)) {
-      console.log('[wg] sweep: reverted=' + d.reverted + ' returned=' + d.returned + ' checked=' + d.checked);
-    }
+    if (d && d.ok && (d.reverted || d.returned)) console.log('[wg] sweep reverted=' + d.reverted + ' returned=' + d.returned);
   }).catch(() => {});
 }
 if (GAME_SECRET) setInterval(wgSweep, 60000);
@@ -3176,11 +3802,13 @@ if (GAME_SECRET) setInterval(wgSweep, 60000);
 // Give a newly-connected spectator the current roster so they can bet immediately.
 function ssWagerSendTo(socket, lid) {
   try {
-    if (!WG_ENABLED.has(lid)) return;
+    if (!wgEnabled(lid)) return;
     const sg = ssGames.get(lid); if (!sg) return;
     wgSendRosterTo(socket, lid, sg);
   } catch (_) {}
 }
+
+
 
 
 function getOrCreateRoom(lobbyId) {
@@ -3555,10 +4183,9 @@ app.use((req, res, next) => {
 
 app.get('/health', (_, res) => res.json({ ok: true, rooms: rooms.size }));
 
-// ── /wager-event — Vercel pushes betting-exchange events here; we relay to spectators ────────────
+// ── /wager-event — Vercel pushes betting-exchange events here; we relay to spectators ────
 // This is what makes the betting UI push-driven (NO client polling). Authenticated with the same
-// GAME_SECRET-HMAC as elim-lock, so only our own /api/settle can publish. Touches no money: it only
-// mirrors an already-committed state change into the socket room and our in-memory live set.
+// GAME_SECRET-HMAC as elim-lock, so only our own /api/settle can publish. Touches no money.
 app.post('/wager-event', express.json({ limit: '64kb' }), (req, res) => {
   try {
     const gp  = (req.headers['x-game-proof'] || '').toString().trim();
@@ -3570,7 +4197,6 @@ app.post('/wager-event', express.json({ limit: '64kb' }), (req, res) => {
     let okAuth = false;
     try { okAuth = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(gp)); } catch (_) {}
     if (!okAuth) return res.status(403).json({ error: 'Forbidden' });
-
     const event = String(body.event || '');
     const wager = body.wager || null;
     if (wager && wager.id) {
@@ -3578,7 +4204,7 @@ app.post('/wager-event', express.json({ limit: '64kb' }), (req, res) => {
       if (event === 'settled' || event === 'returned' || event === 'cancelled') s.live.delete(wager.id);
       else s.live.set(wager.id, Object.assign({}, s.live.get(wager.id) || {}, wager));
     }
-    io.to(lobby).emit('ss-wager', { event, wager });   // every spectator sees it instantly
+    io.to(lobby).emit('ss-wager', { event, wager });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: 'wager-event failed' });
@@ -3586,21 +4212,47 @@ app.post('/wager-event', express.json({ limit: '64kb' }), (req, res) => {
 });
 
 app.get('/counts', (_, res) => {
-
-  const LOBBY_IDS = ['free-lobby', 'ss-free-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-25'];
-
   const counts = {};
-
-  for (const id of LOBBY_IDS) {
-
-    const r = io.sockets.adapter.rooms.get(id);
-
-    counts[id] = r ? r.size : 0;
-
+  const players = {};
+  const ssData = (lid) => {
+    const sg = ssGames.get(lid);
+    if (!sg || !sg.snakes) return { n: 0, names: [] };
+    let n = 0; const names = [];
+    for (const [pid, sn] of sg.snakes) {
+      if (sn && sn.alive && !sn.disconnected && !(typeof pid === 'string' && pid.indexOf('bot-') === 0)) { n++; if (sn.name) names.push(String(sn.name).slice(0, 16)); }
+    }
+    return { n, names };
+  };
+  // PAC ARENA rooms keep players in room.players — the exact analogue of a snake lobby's sg.snakes —
+  // so report the same ALIVE count + names instead of the raw socket count (which also counted
+  // spectators and un-reaped sockets, and carried no names at all).
+  const pacData = (lid) => {
+    const room = rooms.get(lid);
+    if (!room || !room.players) {
+      const r = io.sockets.adapter.rooms.get(lid);
+      return { n: r ? r.size : 0, names: [] };
+    }
+    let n = 0; const names = [];
+    for (const [, p] of room.players) {
+      if (p && p.alive && !p.disconnected) { n++; if (p.name) names.push(String(p.name).slice(0, 16)); }
+    }
+    return { n, names };
+  };
+  const FIXED = ['free-lobby', 'ss-free-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-25'];
+  for (const id of FIXED) {
+    const d = id.indexOf('ss-') === 0 ? ssData(id) : pacData(id);
+    counts[id] = d.n; players[id] = d.names;
   }
-
+  for (const [lid] of ssGames) {
+    if (typeof lid === 'string' && lid.indexOf('ss-paid-lobby-') === 0 && !(lid in counts)) { const d = ssData(lid); counts[lid] = d.n; players[lid] = d.names; }
+  }
+  // Dynamic PAC lobbies (any custom stake) — enumerate the ROOMS map, not socket rooms, so a lobby
+  // reports the same way whether or not anyone is currently connected to its socket room.
+  for (const [rid] of rooms) {
+    if (typeof rid === 'string' && rid.indexOf('paid-lobby-') === 0 && !(rid in counts)) { const d = pacData(rid); counts[rid] = d.n; players[rid] = d.names; }
+  }
+  counts._players = players;
   res.json(counts);
-
 });
 
 
@@ -3633,6 +4285,72 @@ const io = new Server(httpServer, {
 
 io.on('connection', socket => {
 
+
+
+  // ── VOICE-ONLY connection (Blackjack PVP tables) ───────────────────────────────────────────────
+
+  // Blackjack is poll-based HTTP on the platform and owns no socket, so a table opens one here purely
+
+  // to reach the same PCM relay the snake lobbies use. Deliberately its own branch that RETURNS
+
+  // immediately: no game listeners are ever registered on this socket, so — exactly like the
+
+  // spectator branch — there is no code path here that could spawn a snake, move one, or touch money,
+
+  // even from a hand-crafted client. It can only forward audio to its own room.
+
+  if (socket.handshake.auth && socket.handshake.auth.voice === true) {
+
+    const vroom = String(socket.handshake.auth.room || '');
+
+    const vpid  = String(socket.handshake.auth.pid || '');
+
+    const vname = String(socket.handshake.auth.name || '').slice(0, 16);
+
+    // Only blackjack table rooms, and only sane ids — never an arbitrary string that could collide
+
+    // with a real lobby room and leak audio into a game.
+
+    if (!/^bj:[A-Za-z0-9_-]{4,40}$/.test(vroom) || !vpid || vpid.length > 64) { socket.disconnect(); return; }
+
+    socket.isVoiceOnly = true;
+
+    socket.join(vroom);
+
+    io.to(vroom).emit('voice-peer', { pid: vpid, name: vname, joined: true });
+
+    socket.on('voice-audio', (buf) => {
+
+      // Same direct per-socket relay the lobby path uses (avoids room-broadcast edge cases). Size-
+
+      // capped so a modified client cannot use the relay as an amplifier.
+
+      if (!buf || (buf.byteLength || buf.length || 0) > 65536) return;
+
+      const roomSocks = io.sockets.adapter.rooms.get(vroom);
+
+      if (!roomSocks) return;
+
+      roomSocks.forEach(sid => {
+
+        if (sid === socket.id) return;
+
+        const s = io.sockets.sockets.get(sid);
+
+        if (s) s.emit('voice-audio', { from: vpid, buf });
+
+      });
+
+    });
+
+    socket.on('disconnect', () => { io.to(vroom).emit('voice-peer', { pid: vpid, name: vname, joined: false }); });
+
+    console.log(`[${vroom}] voice-only peer ${vpid.slice(0, 8)} connected`);
+
+    return;
+
+  }
+
   // ── Read-only spectator connection (Discord "watch live" links etc.) ─────────────
 
   // Deliberately handled as its own branch, completely separate from the real player-join
@@ -3657,7 +4375,13 @@ io.on('connection', socket => {
 
     const watchLobbyId = socket.handshake.auth.lobbyId;
 
-    if (!watchLobbyId || !LOBBY_IDS.has(watchLobbyId)) { socket.disconnect(); return; }
+    if (!isSpectatableLobby(watchLobbyId)) {
+      // Tell the client WHY instead of dropping the socket silently — a bare disconnect is
+      // indistinguishable from a network fault and shows up as "connection lost, reconnecting".
+      socket.emit('ss-notice', 'That arena is no longer live');
+      socket.disconnect();
+      return;
+    }
 
     socket.isSpectator = true;
 
@@ -3715,7 +4439,62 @@ io.on('connection', socket => {
 
     console.log(`[${watchLobbyId}] spectator connected (read-only, no token)`);
 
-    socket.on('disconnect', () => {}); // nothing to clean up — no player/snake state was ever created
+    // ── Spectator chat + voice ───────────────────────────────
+    // Watching is the social half of this game and it was silent: no listeners were registered here
+    // at all, so a spectator could neither type nor talk. These two are safe to add because neither
+    // touches game or money state — everything else stays unregistered, so the branch keeps the
+    // property that makes it trustworthy: there is still no code path from a watching socket to a
+    // snake, an input, or a payout.
+    const specName = String((socket.handshake.auth && socket.handshake.auth.name) || 'WATCHER')
+      .replace(/[^A-Za-z0-9_\- ]/g, '').trim().slice(0, 16) || 'WATCHER';
+    // Namespaced id: can never collide with a real wallet pid, so a client keying by id cannot be
+    // tricked into treating a watcher as a player.
+    const specId = '__spec__' + Math.random().toString(36).slice(2, 10);
+
+    // Rate limit. A watcher needs no token and costs nothing to create, so this is the one place an
+    // anonymous socket can generate load and nuisance for everyone in the room.
+    let specLast = 0, specBurst = 0;
+    socket.on('chat', ({ text }) => {
+      if (typeof text !== 'string') return;
+      const t = text.trim().slice(0, 100);
+      if (!t) return;
+      const now = Date.now();
+      if (now - specLast < 1200) { if (++specBurst > 3) return; } else { specBurst = 0; }
+      specLast = now;
+      // spec:true is NOT decoration — a watcher's name is self-asserted and unverified, so the client
+      // must be able to show it apart from a real player's line. Without it anyone could type as
+      // somebody who is actually staking money in the room.
+      io.to(watchLobbyId).emit('chat', { id: specId, name: specName, text: t, spec: true });
+    });
+
+    // Voice: the same relay the players' path uses, so a watcher is just another peer in the room.
+    socket.on('voice-ready', () => {
+      socket.to(watchLobbyId).emit('voice-ready', { from: specId, spec: true });
+    });
+    socket.on('voice-signal', ({ toPid, type, sdp, candidate }) => {
+      socket.to(watchLobbyId).emit('voice-signal', { from: specId, toPid, type, sdp, candidate });
+    });
+    socket.on('voice-audio', (buf) => {
+      // Size-capped so the relay cannot be used as an amplifier by a modified client — same cap as
+      // the blackjack voice-only path.
+      if (!buf || (buf.byteLength || buf.length || 0) > 65536) return;
+      const roomSocks = io.sockets.adapter.rooms.get(watchLobbyId);
+      if (!roomSocks) return;
+      roomSocks.forEach(sid => {
+        if (sid === socket.id) return;
+        const s = io.sockets.sockets.get(sid);
+        if (s) s.emit('voice-audio', { from: specId, buf, spec: true });
+      });
+    });
+
+    // NO "is now watching" announcement. Socket.io reconnects, and an unstable spectator link
+    // would republish it on every cycle — the reconnect storms already seen here run to hundreds of
+    // cycles, which would bury a live arena's chat in joins. Presence belongs in the spectator
+    // count, which is already broadcast; chat is for what people actually say.
+
+    socket.on('disconnect', () => {
+      io.to(watchLobbyId).emit('voice-peer', { pid: specId, name: specName, joined: false, spec: true });
+    }); // no player/snake state was ever created — nothing else to clean up
 
     return;
 
@@ -4075,7 +4854,7 @@ io.on('connection', socket => {
 
     const _csn = _csg && _csg.snakes.get(pid);
 
-    if (_csn) { _csn.alive = false; _csn._cashedOut = true; }
+    if (_csn) { _csn.alive = false; _csn._cashedOut = true; _csn._killedAt = Date.now(); }
 
     const { sig, ts, wagerLamports } = data || {};
 
@@ -4153,7 +4932,7 @@ io.on('connection', socket => {
 
     const _sn = _sg && _sg.snakes.get(pid);
 
-    if (_sn && _sn.alive) { _sn.alive = false; _sn._cashedOut = true; _sn.path = []; _sn.segs = []; }
+    if (_sn && _sn.alive) { _sn.alive = false; _sn._cashedOut = true; _sn._killedAt = Date.now(); _sn.path = []; _sn.segs = []; } wgNoteExit(lobbyId, _sn);
 
     const _pl = room && room.players.get(pid);
 
@@ -4333,9 +5112,17 @@ io.on('connection', socket => {
     // not fatal; they use the non-fatal 'ss-notice' channel, which just shows a toast.
     if (botN >= SS_MAX_BOTS) { socket.emit('ss-notice', 'Bot limit reached (' + SS_MAX_BOTS + ')'); return; }
 
-    let a = Math.random() * Math.PI * 2, r = SS_ARENA_R * (0.2 + Math.random() * 0.35);
+    // Bots go through the same live-arena finder as players. The old origin-relative draw could
 
-    let bx = Math.cos(a) * r, by = Math.sin(a) * r;
+    // drop one straight into a border that had shrunk or been pushed off-centre, and a bot that
+
+    // dies on spawn just looks like the SPAWN button is broken.
+
+    let a = Math.random() * Math.PI * 2;
+
+    let bx, by;
+
+    { const _bs = ssFindSafeSpawn(sg); bx = _bs[0]; by = _bs[1]; }
 
     // Test lobby: spawn the bot to the SIDE of the requester — visible but NOT in their forward path,
 
@@ -4353,7 +5140,11 @@ io.on('connection', socket => {
 
         const R2 = (sg.arenaR || SS_ARENA_R) - 120; // keep inside the border — flip to the other side if needed
 
-        if (bx * bx + by * by > R2 * R2) { bx = me.x - Math.cos(side) * off; by = me.y - Math.sin(side) * off; }
+        const _rx = bx - (sg.cx || 0), _ry = by - (sg.cy || 0);
+
+
+
+        if (_rx * _rx + _ry * _ry > R2 * R2) { bx = me.x - Math.cos(side) * off; by = me.y - Math.sin(side) * off; }
 
         a = Math.random() * Math.PI * 2;
 
@@ -4415,7 +5206,43 @@ io.on('connection', socket => {
    } catch (e) { console.warn('[ss-clear-bots] ' + (e && e.message)); }
   });
 
-  socket.on('ss-tune', () => { /* LOCKED: hardcoded tuning; ignore all ss-tune, incl. DevTools cheats */ });
+  // ── OWNER-ONLY LIVE COMBAT TUNING (ed25519-verified) ────────────────────────────────────────
+  // Applies to the LIVE lobby so the owner can feel each change while playing. Auth is a signature
+  // from the owner's wallet, NOT a client flag: the previous panel trusted localStorage ss_owner,
+  // which any player could set in DevTools to push collision constants that decide real-money
+  // kills. Values are clamped, so a fat-fingered slider can't make the arena unplayable.
+  socket.on('ss-tune', (d) => {
+    try {
+      if (!lobbyId.startsWith('ss-') || !d || typeof d !== 'object') return;
+      const t = d.tuning && typeof d.tuning === 'object' ? d.tuning : null;
+      if (!t) return;
+      if (!ssOwnerVerify(lobbyId, t, d.ts, d.sig)) { socket.emit('ss-notice', 'Tuning rejected: not signed by the owner'); return; }
+      const next = ssClampTuning(t, SS_TUNING_DEFAULT);
+      // GLOBAL: one adjustment retunes every arena on this node, so the owner doesn't have to repeat
+      // it per lobby — and the free lobby's circle bots, being normal snakes in sg.snakes, are
+      // hit-tested with exactly these values too.
+      SS_TUNING_DEFAULT = next;
+      ssSaveTuning(next);
+      let n = 0;
+      for (const [lid, g] of ssGames) {
+        if (!lid.startsWith('ss-')) continue;
+        g.tuning = { ...next };
+        io.to(lid).emit('ss-tuning', next);   // everyone renders the hitboxes the server is using
+        n++;
+      }
+      socket.emit('ss-tuning', next);
+      console.log(`[${lobbyId}] OWNER TUNING (${n} lobbies) -> ${JSON.stringify(next)}`);
+    } catch (e) { console.warn('[ss-tune] ' + (e && e.message)); }
+  });
+
+  // The panel must open showing the values the server is ACTUALLY running, never a stale local copy.
+  socket.on('ss-tuning-get', () => {
+    try {
+      if (!lobbyId.startsWith('ss-')) return;
+      const sg = ssGames.get(lobbyId);
+      socket.emit('ss-tuning', (sg && sg.tuning) || SS_TUNING_DEFAULT);
+    } catch (_) {}
+  });
 
 
 
@@ -4818,6 +5645,8 @@ app.get('/ss-replay/:id', (req, res) => {
 });
 
 
+
+ssLoadSavedTuning();   // now that every constant it depends on exists
 
 httpServer.listen(PORT, () => {
 
