@@ -2665,7 +2665,10 @@ function signSettleMsg(action,playerAddress,wagerLamports){
 // gets in instead of the player being told to "try again" after already paying.
 async function _redeemDeposit(lamps,sig,roomId,playerName,alreadyConfirmed){
   let lastErr=null;
-  const tries=alreadyConfirmed?2:4;   // unconfirmed client-side ⇒ give the server more chances
+  // Each attempt is now long (the server searches the chain for up to ~40s), so two is the right
+  // number — four would be over three minutes of waiting. The patience moved to where it belongs:
+  // inside one request that is actually looking, rather than repeated requests that each give up early.
+  const tries=alreadyConfirmed?2:2;
   for(let i=0;i<tries;i++){
     if(i>0){ lg('mm-log','Still verifying deposit… ('+(i+1)+'/'+tries+')','lwarn'); await new Promise(r=>setTimeout(r,2500)); }
     try{
@@ -2722,7 +2725,17 @@ async function recordWager(walletAddress,wagerLamports,txSig,lobbyId,playerName)
    * for a deposit already on record, so no retry can charge twice or create a second entry.
    */
   const ac = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-  const killer = ac ? setTimeout(() => { try { ac.abort(); } catch (_) {} }, 13000) : null;
+  /*
+   * 50s, not 13. The 13s abort was KILLING A HEALTHY REQUEST: /api/join is proxied to
+   * pac-arena.vercel.app and is allowed 60s, of which it now spends up to ~40 searching the chain for
+   * the deposit. Aborting at 13 guaranteed we hung up on it while it was still doing exactly the work
+   * we needed, then retried from scratch and hung up again — which is what the minutes-long "loading"
+   * screen actually was.
+   *
+   * The timeout still exists so a genuinely dead request cannot hang forever; it just sits past the
+   * server's own budget instead of inside it.
+   */
+  const killer = ac ? setTimeout(() => { try { ac.abort(); } catch (_) {} }, 50000) : null;
   let r, d;
   try {
     r = await fetch('/api/join', { method: 'POST', signal: ac ? ac.signal : undefined,

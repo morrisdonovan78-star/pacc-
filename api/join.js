@@ -238,10 +238,17 @@ function verifyPlayerSig(sig, ts, action, playerAddress, wagerLamports) {
 
 // Confirms txSig paid at least wagerLamports to ESCROW_PUBKEY from walletAddress.
 async function verifyWagerTx(txSig, walletAddress, wagerLamports) {
-  for (let attempt = 0; attempt < 6; attempt++) {
-    // Short early waits (a confirmed tx is usually indexed within a couple of seconds), then longer
-    // ones. The old flat 1500ms x4 gave up after ~6s, which is inside the window where public RPCs
-    // are still catching up — that is why a real, paid deposit reported "not confirmed".
+  /*
+   * BUDGET, not a fixed attempt count. The player's money is already gone by the time we are called,
+   * so giving up early does not protect anyone — it just produces "charged and not let in".
+   *
+   * Six attempts spanned about ten seconds against a 20s function ceiling, so two thirds of the
+   * available time went unused while a lagging public RPC was still catching up. The ceiling is now
+   * 60s and this searches for up to ~40 of them, leaving comfortable headroom for the rest of the
+   * handler. Short waits first, because a healthy tx is usually indexed within a second or two.
+   */
+  const deadline = Date.now() + 40000;
+  for (let attempt = 0; attempt < 24 && Date.now() < deadline; attempt++) {
     if (attempt > 0) await sleep(attempt <= 2 ? 900 : 2200);
     try {
       const tx = await rpcCallFound('getTransaction', [txSig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]);

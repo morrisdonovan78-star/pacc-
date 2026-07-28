@@ -5,7 +5,7 @@
     "api/rpc.js":        { "regions": ["iad1"], "maxDuration": 15 },
     "api/balance.js":    { "regions": ["iad1"], "maxDuration": 10 },
     "api/settle.js":     { "regions": ["iad1"], "maxDuration": 60 },
-    "api/join.js":       { "regions": ["iad1"], "maxDuration": 20 },
+    "api/join.js":       { "regions": ["iad1"], "maxDuration": 60 },
     "api/verify-entry.js":  { "regions": ["iad1"], "maxDuration": 5  },
     "api/leaderboard.js":   { "regions": ["iad1"], "maxDuration": 10 },
     "api/ably-token.js": { "regions": ["iad1"], "maxDuration": 5  },
