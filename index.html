@@ -1417,10 +1417,11 @@ async function useFoundWallet(storageKey){
 
 // Stamp this account's CURRENT wallet so the leaderboard/friends resolve to it, never a stale old
 // wallet (matches slither-snakes.html). Fire-and-forget on every login.
+let _accountWallets=[];
 function _linkAccountWallet(){
   if(!_jwt||!ST.address)return;
   try{ fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'link',jwt:_jwt,address:ST.address})}).catch(()=>{}); }catch(_){}
+    body:JSON.stringify({action:'link',jwt:_jwt,address:ST.address,addresses:Array.from(new Set([ST.address].concat(_accountWallets||[]).filter(Boolean)))})}).catch(()=>{}); }catch(_){}
 }
 async function finishLogin(kp){
   _keypair=kp;
@@ -1455,6 +1456,12 @@ async function finishLogin(kp){
 // to the chosen lobby (or spectate).
 async function finishLoginBridge(info){
   ST.email=info.email||''; ST.address=info.address; _jwt=info.token||'';
+  // REGISTER THE ACCOUNT'S WALLETS — this path never did, and it is how platform players arrive.
+  // A wallet with no `a2c:` key is invisible to the identity system, so the leaderboard, the profile
+  // card and Send cannot resolve to it, and the player can be shown an empty wallet as their receive
+  // address. Every other login path already links; only the bridge was missing the call.
+  try{ _accountWallets=Array.isArray(info.addresses)?info.addresses.filter(Boolean):[]; }catch(_){ _accountWallets=[]; }
+  try{ _linkAccountWallet(); }catch(_){}
   _keypair={ publicKey:new solanaWeb3.PublicKey(info.address) };
   ST.conn=makeConnection();
   await fetchPrice();
