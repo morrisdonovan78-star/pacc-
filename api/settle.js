@@ -1935,6 +1935,51 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, closed: out, lamportsMoved: 0 });
     }
 
+    /* ══ KART ARENA — ENTRY FEES AND PAYOUT ═══════════════════════════════════════════════════════
+     * Two actions, split by WHO is allowed to call them, because they need different trust:
+     *
+     *   kart-entry   the PLAYER pays. Wallet-signed (the gate below), and the deposit is verified
+     *                ON CHAIN before anything is issued. Returns an HMAC ticket.
+     *   kart-settle  the KART SERVER pays out. GAME_SECRET-HMAC, never reachable from a browser.
+     *
+     * The ticket is the join between them. The kart server has no wallet, no RPC and no escrow key —
+     * it must not, since it is a game process on a box that also runs untrusted physics. So it never
+     * decides that someone paid; it is HANDED proof, signed with a secret a client does not have, and
+     * checks the signature. A player cannot mint one, and a compromised kart server cannot move money
+     * (kart-settle only pays addresses that are in the race it is settling, capped by the pot).
+     */
+    if (action === 'kart-settle') {
+      const raceId = String(body.raceId || '').slice(0, 80);
+      const winners = Array.isArray(body.winners) ? body.winners.slice(0, 8) : [];
+      const potLamports = Math.floor(Number(body.potLamports) || 0);
+      if (!raceId || !winners.length || potLamports <= 0) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'raceId, winners and potLamports required' }); }
+      if (!verifyGameProof(req, 'kart-settle:' + raceId + ':' + potLamports + ':' + (req.headers['x-game-ts'] || ''))) {
+        clearTimeout(guard); done = true; return res.status(403).json({ error: 'bad proof' });
+      }
+      // ONE PAYOUT PER RACE, permanently. A race id can never be settled twice however many times the
+      // kart server retries or restarts.
+      const lk = await kvSetNX('kartpaid:' + raceId, String(Date.now()));
+      if (!lk) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+
+      // 10% to the house, the rest split evenly among the winners — ties split, as specified. Dust
+      // from the division rides with the fee so escrow stays exact to the lamport.
+      const fee = Math.floor(potLamports * 0.10);
+      const share = Math.floor((potLamports - fee) / winners.length);
+      const esc2 = getEscrow();
+      const paid = [];
+      for (const w of winners) {
+        const to = String((w && w.address) || w || '');
+        if (!to) continue;
+        const r = await wgPayWinnerAndFee(esc2, to, share, Math.floor(fee / winners.length), 'kart:' + raceId);
+        if (!r.ok) betAlert('KART payout FAILED ' + raceId + ' -> ' + to.slice(0, 8) + ' : ' + (r.reason || ''));
+        paid.push({ address: to, lamports: share, ok: !!r.ok, sig: r.sig || null, reason: r.reason || null });
+      }
+      // The pot has left the building either way; keeping it as liability would block later payouts.
+      await kvHincrby(BET_LEDGER, 'betLiability', -potLamports).catch(() => {});
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, raceId, feeLamports: fee, paid });
+    }
+
     // ── Wallet signature auth — required for all fund-moving actions ─────────
     // The player signs the request with their Solana private key.
     // Only the real wallet owner can produce a valid signature.
@@ -1950,6 +1995,54 @@ module.exports = async function handler(req, res) {
         return res.status(403).json({ error: 'Invalid wallet signature — cashout must originate from the game client' });
       }
     }
+
+    // kart-entry sits AFTER the signature gate deliberately: the caller must prove with their wallet
+    // key that they are the address the ticket will be issued to. The on-chain check alone is not
+    // enough — it proves a deposit happened, not that the person asking is the one who made it.
+    if (action === 'kart-entry') {
+      const lobbyId = String(body.lobbyId || '').slice(0, 40);
+      const cents   = Math.round(Number(body.stakeCents) || 0);
+      const txSig   = String(body.txSig || '').slice(0, 128);
+      const addr    = String(playerAddress || '');
+      if (!lobbyId || !txSig || !addr) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'lobbyId, txSig and playerAddress required' }); }
+      if (!(cents >= 10 && cents <= 50000)) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'stake out of range' }); }
+
+      // ONE ENTRY PER DEPOSIT. Taken before the chain is even consulted, so two racers cannot both
+      // present the same txSig and both get a ticket — the second caller loses the race for this key
+      // and is told so, rather than being quietly issued a duplicate entry off one payment.
+      const txLock = await kvSetNX('karttx:' + txSig, addr + ':' + lobbyId, 6 * 60 * 60);
+      if (!txLock) { clearTimeout(guard); done = true; return res.status(409).json({ error: 'that deposit has already been used' }); }
+
+      const price = await solUsdQuick();
+      if (!(price > 0)) { await kvDel('karttx:' + txSig).catch(() => {}); clearTimeout(guard); done = true;
+        return res.status(503).json({ error: 'no SOL price right now — try again', retry: true }); }
+      // Round DOWN what we demand, so a cent of price drift between quote and payment cannot reject a
+      // deposit the player made in good faith.
+      const wantLamports = Math.floor((cents / 100) / price * 1e9 * 0.97);
+      const esc = getEscrow();
+      try {
+        await verifyBetDepositTx(txSig, addr, wantLamports, esc.pubkeyB58);
+      } catch (e) {
+        // Release the lock: an unconfirmed deposit must be retryable with the SAME signature, or a
+        // player whose RPC was merely slow would be permanently unable to use the money they sent.
+        await kvDel('karttx:' + txSig).catch(() => {});
+        clearTimeout(guard); done = true;
+        return res.status(400).json({ error: String((e && e.message) || 'deposit not verified'), retry: true });
+      }
+
+      // The stake is now escrow money owed back out to this race — it belongs in the same liability
+      // the solvency gate protects, exactly like a bet stake.
+      const paidLamports = wantLamports;
+      await kvHincrby(BET_LEDGER, 'betLiability', paidLamports).catch(() => {});
+      await kvSetPerm('kartentry:' + lobbyId + ':' + addr, JSON.stringify({ cents, lamports: paidLamports, txSig, ts: Date.now() })).catch(() => {});
+
+      const tts = Date.now();
+      const ticket = [lobbyId, addr, String(cents), String(paidLamports), String(tts)].join('|');
+      const tsig = crypto.createHmac('sha256', GAME_SECRET).update('kart-entry:' + ticket).digest('hex');
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, ticket, tsig, lamports: paidLamports });
+    }
+
 
     // ── ref-balance: read-only view of a referrer's accrued earnings (unsigned) ───────────────────
     if (action === 'ref-balance') {
