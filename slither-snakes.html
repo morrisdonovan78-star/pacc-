@@ -2836,6 +2836,14 @@ async function finishLogin(kp){
 // No local keypair is created, stored or synced.
 async function finishLoginBridge(info){
   ST.email=info.email||''; ST.address=info.address; _jwt=info.token||'';
+  // REGISTER THE ACCOUNT'S WALLETS. This path never did, and it is the path almost everyone arrives
+  // by — entering from the platform adopts the shared Privy wallet but, until now, told the identity
+  // system nothing about it. A wallet with no `a2c:` key is invisible: the leaderboard, the profile
+  // card and Send cannot resolve to it, so a player could be shown an empty wallet as their receive
+  // address while the wallet they actually play on stayed unknown. The bridge has carried a `token`
+  // all along, so the only thing missing was the call.
+  try{ _accountWallets=Array.isArray(info.addresses)?info.addresses.filter(Boolean):[]; }catch(_){ _accountWallets=[]; }
+  try{ _linkAccountWallet(); }catch(_){}
   // The exact room the Live Matches card was showing, straight from the game server's own /counts —
   // so we join THAT room rather than rebuilding its name from a parsed number. Validated per-stake
   // inside lobbyIdFor(); a bad value simply falls back to the canonical id.
@@ -3391,10 +3399,16 @@ async function _saveWalletToAccount(kp,opts){
 }
 // Stamp this account's CURRENT wallet so the leaderboard/friends always resolve to it (never a stale
 // old wallet). Fire-and-forget on every login. Complements _saveWalletToAccount (which stores the key).
+// Every wallet this client knows belongs to the account. `c2a` is a single slot re-stamped on every
+// login with whichever wallet was presented, so an account carrying the old Privy hydration duplicate
+// can have money resolve to the empty one. Registering the FULL set means a payer can pick the funded
+// wallet instead of being stuck with whichever was stamped last.
+let _accountWallets=[];
 function _linkAccountWallet(){
   if(!_jwt||!ST.address)return;
+  const addresses=Array.from(new Set([ST.address].concat(_accountWallets||[]).filter(Boolean)));
   try{ fetch('/api/leaderboard',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'link',jwt:_jwt,address:ST.address})}).catch(()=>{}); }catch(_){}
+    body:JSON.stringify({action:'link',jwt:_jwt,address:ST.address,addresses})}).catch(()=>{}); }catch(_){}
   // Same moment, same identity: pull this account's settings (preferred server, graphics, binds…)
   // and push anything that was changed while logged out. Called from BOTH login and session
   // restore, so settings follow the player across refreshes, logouts and devices.
