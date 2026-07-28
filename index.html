@@ -622,10 +622,10 @@ body{touch-action:manipulation;}
   </div>
   <!-- Mute toggle — top-right corner, always accessible during gameplay -->
   <button id="mute-btn" onclick="toggleMute()" title="Toggle game audio"
-    style="position:fixed;top:6px;right:10px;z-index:200;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.2);border-radius:6px;color:var(--y);font-size:16px;width:34px;height:34px;cursor:pointer;display:none;align-items:center;justify-content:center;padding:0;touch-action:manipulation;">🔊</button>
+    style="position:fixed;top:6px;left:10px;z-index:200;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.2);border-radius:6px;color:var(--y);font-size:16px;width:34px;height:34px;cursor:pointer;display:none;align-items:center;justify-content:center;padding:0;touch-action:manipulation;">🔊</button>
   <!-- Voice chat toggle — below mute button -->
   <button id="voice-btn" onclick="voiceToggle()" title="Voice chat — M to mute/unmute"
-    style="position:fixed;top:46px;right:10px;z-index:200;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.2);border-radius:6px;color:var(--y);font-size:16px;width:34px;height:34px;cursor:pointer;display:none;align-items:center;justify-content:center;padding:0;touch-action:manipulation;">🎙️</button>
+    style="position:fixed;top:46px;left:10px;z-index:200;background:rgba(7,7,15,0.85);border:1px solid rgba(255,215,0,0.2);border-radius:6px;color:var(--y);font-size:16px;width:34px;height:34px;cursor:pointer;display:none;align-items:center;justify-content:center;padding:0;touch-action:manipulation;">🎙️</button>
   <!-- Voice speaking indicator — bottom-left, shows who's talking -->
   <div id="voice-speakers" style="position:fixed;bottom:16px;left:12px;z-index:200;display:none;flex-direction:column;gap:4px;pointer-events:none;"></div>
   <!-- In-game keybind strip — bottom-center, adapts to keyboard vs controller -->
@@ -3495,8 +3495,8 @@ function updateScoreboard(){
   if(sig===_lastSbSig){ _voiceUpdateProximity(); return; }
   _lastSbSig=sig;
   // PULP-style leaderboard: Total Pot on top, ranked players, a per-player mute, a proximity toggle.
-  let h='<div style="text-align:center;color:#9aa;font-family:\'Press Start 2P\',monospace;font-size:6px;letter-spacing:1px;">TOTAL POT</div>'
-    +'<div style="text-align:center;color:#39FF14;font-family:\'Press Start 2P\',monospace;font-size:14px;margin:1px 0 7px;">'+(usd>0?'$'+pot:'FREE')+'</div>';
+  let h='<div style="text-align:center;color:#9aa;font-family:Orbitron,sans-serif;font-size:9px;letter-spacing:2px;">TOTAL POT</div>'
+    +'<div style="text-align:center;color:#39FF14;font-family:Orbitron,sans-serif;font-size:19px;font-weight:900;margin-bottom:8px;">'+(usd>0?'$'+pot:'FREE')+'</div>';
   sorted.slice(0,6).forEach((p,i)=>{
     const me=p.id===myPid, nm=me?'YOU':('P'+(p.num+1)), muted=_mutedPeers.has(p.id);
     const muteBtn=me?'':'<button onclick="togglePeerMute(\''+p.id+'\')" title="Mute this player" style="background:none;border:none;cursor:pointer;font-size:11px;line-height:1;padding:0 0 0 4px;color:'+(muted?'#FF4444':'#888')+';">'+(muted?'🔇':'🔊')+'</button>';
@@ -5611,30 +5611,30 @@ function draw(){
   }
 
   /*
-   * Ping + FPS, TOP-right. They used to sit bottom-right, directly on top of the action buttons — a
-   * diagnostic readout covering controls the player actually presses, which is exactly backwards.
-   * Top-right is clear: the scoreboard is centred and nothing else lives up there. Smaller and dimmer
-   * too, because this is a thing you glance at when something feels wrong, not part of the game.
+   * Ping + FPS, BOTTOM-LEFT — the only corner nothing else wants. Bottom-right is the power-up and
+   * cash-out buttons (it was drawn straight over them), top-right is where the eye goes for score, and
+   * top-left now holds the audio toggles. Small and dim on purpose: this is a thing you glance at when
+   * something feels wrong, not part of the game.
    */
   {
     ctx.save();
-    ctx.font='bold 12px monospace'; ctx.textAlign='right'; ctx.textBaseline='top';
-    ctx.globalAlpha=0.82;
-    const px2=canvas.width-10;
-    let py2=10;
+    ctx.font='bold 12px monospace'; ctx.textAlign='left'; ctx.textBaseline='bottom';
+    ctx.globalAlpha=0.78;
+    const px2=10;
+    let py2=canvas.height-10;
     if(_sio&&_sio.connected&&_ping>0){
       const pCol=_ping<60?'#39FF14':_ping<120?'#FFD700':'#FF4444';
       const pTxt=_ping+' ms';
       const pw=ctx.measureText(pTxt).width;
-      ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(px2-pw-6,py2-3,pw+12,19);
+      ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(px2-6,py2-16,pw+12,19);
       ctx.fillStyle=pCol; ctx.fillText(pTxt,px2,py2);
-      py2+=22;
+      py2-=22;
     }
     if(_fpsVal>0){
       const fCol=_fpsVal>=55?'#39FF14':_fpsVal>=30?'#FFD700':'#FF4444';
       const fTxt=_fpsVal+' fps';
       const fw=ctx.measureText(fTxt).width;
-      ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(px2-fw-6,py2-3,fw+12,19);
+      ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(px2-6,py2-16,fw+12,19);
       ctx.fillStyle=fCol; ctx.fillText(fTxt,px2,py2);
     }
     ctx.restore();
