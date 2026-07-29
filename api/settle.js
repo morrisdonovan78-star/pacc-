@@ -3043,9 +3043,16 @@ module.exports = async function handler(req, res) {
           if (REQUIRE_CASH_PROOF) {
             await kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
             betAlert('CASHOUT REFUSED — no valid game-server proof. player=' + playerAddress.slice(0, 8) +
-                     ' game=' + game + ' claimed=' + wagerLamportsRaw);
+                     ' game=' + game + ' claimed=' + wagerLamportsRaw + '. If this player is on a CACHED ' +
+                     'page they must RELOAD; if it happens to everyone, unset CASHOUT_REQUIRE_PROOF.');
             clearTimeout(guard); done = true;
-            return res.status(503).json({ error: 'Cash-out could not be verified with the game server — your wager is safe, press Cash Out again.', retry: true });
+            /* Tell them to RELOAD, not to retry. By far the likeliest reason a cash-out reaches here is a
+             * page cached from before the proof client shipped: it never listens for `ss-cash-proof`, so
+             * it has nothing to send and pressing Cash Out again produces the identical refusal forever.
+             * The wager is restored above, so reloading costs them nothing and actually fixes it. */
+            return res.status(503).json({
+              error: 'Cash-out could not be verified with the game server. Your wager is SAFE and still on record — please RELOAD the page (Ctrl+Shift+R), rejoin, and cash out again.',
+              reload: true, retry: true });
           }
           wagerLamports = wagerLamportsRaw > kvWager
             ? Math.min(wagerLamportsRaw, kvWager * 20)
