@@ -107,12 +107,28 @@ Helper `srv.py` (paramiko read_bytes/write_bytes/run) — recreate in scratchpad
 
 ## ❌ NOT DONE
 
-### 1. Bet-creation UI — the big one
-Nobody can open a bet. `/bets` correctly says bets are created inside a live arena; that in-arena flow
-**does not exist** for snake or kart. Markets, `verifySnakeSig`, the `beat` market, settlement and the
-take-side UI all exist. Read `memory/project_p2p_betting_exchange.md` and
-`project_kart_betting_and_paid.md` first. Even money, **8% on winnings only**, unmatched refunded in
-full, and the self-bet check must be used.
+### 1. Bet-creation UI — SNAKE IS DONE, KART IS THE GAP
+⚠️ The previous handoff said this did not exist anywhere. That was WRONG — check before rebuilding.
+
+**Snake: fully built and shipped.** The F8 panel has `+ NEW`, market type, subject picker, side,
+duration and stake; `_wgCreate()` takes the escrow deposit and POSTs `wager-create`. There are also
+chat commands that build the same `_wg.form`. `/bets` reading "no open bets" is accurate, not broken —
+nobody has opened one.
+
+**Kart: backend wired, client panel missing.** The kart server already emits a signed `k-wager-roster`
+(kart-server.js ~line 234) and `settleKartWagers(lb)` runs at `endRace`; the `beat` market, the
+exchange canon and the `/bets` take-side all exist. What is missing is only the in-race UI to CREATE
+one, plus one piece of plumbing:
+
+  ⚠️ Kart cannot sign its own deposit. The snake client holds a keypair and calls `_wgDeposit()`
+  directly; kart runs in an iframe and pays through the parent bridge (`KART_PAY` → hub → Privy).
+  A bet needs the same treatment — a new bridge message kind for a wager deposit, handled in
+  `pulp-platform/app/play/kart/page.jsx` next to the existing `KART_PAY` branch. Do that first;
+  the panel is straightforward once a deposit can be taken.
+
+Rules that must hold either way: even money, **8% on winnings only**, unmatched refunded in full, and
+`wgRigCheck` must be used — backing your own racer to WIN is allowed, taking the side that pays when a
+racer you control LOSES is refused.
 
 ### 2. Custom login screen (now unblocked)
 Owner enabled Google in Privy (leave OAuth Client ID/secret blank — Privy's shared creds work). They
