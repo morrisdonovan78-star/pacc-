@@ -1843,6 +1843,33 @@ function togglePerf(){ _perf.on=!_perf.on;
 }
 let _fps=0,_fpsFrames=0,_fpsLast=0;
 let _myUsd=0; // my current in-round value (USD) — entry wager now; grows with wager-food winnings later
+/* _myLam is the SAME value in LAMPORTS, straight from the game server's authoritative ledger, and it
+ * is the figure a cash-out is actually paid from. _myUsd is only ever that figure priced at the live
+ * SOL rate for DISPLAY — which is why the $ over your head now moves with SOL while the SOL you are
+ * owed does not. It cannot: the server pays back the lamports that entered escrow for this round plus
+ * the lamports you took off players who died holding them, so the price never touches the payout. */
+let _myLam=0;
+let _cashProof=null; // the game server's signed cash-out claim (ss-cash-proof); replayable on retry
+
+/* Adopt the server's value figure. Prefers lamports (authoritative); falls back to the server's USD
+ * figure only where there is no lamport ledger at all — free and practice lobbies — so this can never
+ * invent a paid figure. Shared by BOTH state paths (direct server state and host-relayed). */
+function _adoptValue(sd,own){
+  const _fx=()=>{const _oh=own&&own.path&&own.path[0];if(_oh)_spawnMoneyFx(_oh.x,_oh.y);};
+  if(sd.lam!=null&&sd.lam>0){
+    if(sd.lam>_myLam)_fx();
+    _myLam=sd.lam;
+    if(ST.solPrice>0)_myUsd=(_myLam/1e9)*ST.solPrice;
+    return;
+  }
+  if(sd.usd!=null){ if(sd.usd>_myUsd+0.0001)_fx(); _myUsd=sd.usd; }
+}
+
+/* Keep the live price current so the $ over your head genuinely moves with SOL mid-round — _adoptValue
+ * re-prices from _myLam on every state packet, so a fresher price shows up immediately. DISPLAY ONLY:
+ * a stale or failed price can no longer change what anyone is paid, which is precisely what makes it
+ * safe to poll. Gated on _myLam so it never runs in menus, free lobbies or practice. */
+setInterval(()=>{ if(_myLam>0)fetchPrice().catch(()=>{}); },60000);
 let _moneyFx=[]; // floating $ pickup effects when collecting wager food
 let _lastDrawTs=0,_guestPredTs=0,_hostPredTs=0;
 let _lastSentAngle=-999,_lastSentBoost=false;
@@ -2801,11 +2828,21 @@ async function settle(){
   if(ST.lobbyUsd===0) return null;                       // free lobby: nothing to pay
   const _payLobby = pkRoomId || _lastRoomId || lobbyIdFor(ST.lobbyUsd);
   try{
-    // Refresh price right before cashout so lamport conversion is exact
-    await fetchPrice().catch(()=>{});
-    // Accumulated in-game value (initial wager + kill-food winnings); fall back to initial wager if no price
+    /* HOW MUCH? Two sources, and only one of them is honest.
+     *
+     * The game server's signed proof (_cashProof) is the authoritative carried total in LAMPORTS:
+     * the deposit escrow actually received plus the lamports taken off players who died holding
+     * them. When we have it we ask for exactly that, so the figure we sign matches the figure the
+     * server pays and the SOL price never enters the payout at all.
+     *
+     * Without a proof we fall back to the old conversion — our own USD figure divided by the live
+     * price — which is a number this browser chose, and /api/settle therefore still caps it at 20x
+     * the deposit. That path exists so a stale client or an unpatched node can still get paid rather
+     * than being stranded with money in escrow; it is not the intended one. */
+    await fetchPrice().catch(()=>{});   // display/fallback only — never used when a proof is present
+    const _cp=(_cashProof&&_cashProof.lam>0)?_cashProof:null;
     const accSol=(_myUsd>0&&ST.solPrice>0)?_myUsd/ST.solPrice:ST.wagerSol;
-    const lamps=Math.max(Math.floor(accSol*solanaWeb3.LAMPORTS_PER_SOL),1);
+    const lamps=_cp?_cp.lam:Math.max(Math.floor(accSol*solanaWeb3.LAMPORTS_PER_SOL),1);
     if(!_keypair)throw new Error('No wallet loaded');
     // ts in seconds — api/settle.js verifyPlayerSig checks Math.floor(Date.now()/1000)
     const ts=Math.floor(Date.now()/1000);
@@ -2822,7 +2859,12 @@ async function settle(){
       if(attempt>0){ await new Promise(r=>setTimeout(r,1500*attempt)); }
       try{
         const r=await fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json','x-settle-sig':_ssig,'x-settle-ts':String(ts)},
-          body:JSON.stringify({playerAddress:ST.address,wagerLamports:lamps,lobbyId:_payLobby,action:'cashout',gameToken:ST.entryToken||null})});
+          body:JSON.stringify({playerAddress:ST.address,wagerLamports:lamps,lobbyId:_payLobby,action:'cashout',gameToken:ST.entryToken||null,
+            // The proof is passed through verbatim, INCLUDING the lobby the server signed — settle
+            // rebuilds the exact canonical string from these fields, so sending our own idea of the
+            // lobby id (_payLobby can fall back to a guess) would break an otherwise valid proof.
+            cashProof:_cp?_cp.proof:null,cashTs:_cp?_cp.ts:0,cashBase:_cp?_cp.base:0,
+            cashLamports:_cp?_cp.lam:0,cashLobby:_cp?_cp.lobby:null})});
         const d=await r.json().catch(()=>({}));
         if(r.ok){ addToast('✓ Winnings secured!','#39FF14'); return d; }
         // "already cashed out / no wager on record" means a previous attempt already paid — done.
@@ -4300,6 +4342,16 @@ async function pkConnect(roomId,gameToken,spectate){
 
     // Server's authoritative 6s cash-out timer finished for a player. If it's US, the snake was already
     // removed server-side with NO food drop, so run the signed payout via the normal cashout end-game.
+    /* The game server's SIGNED cash-out total, sent on our own private channel just before
+     * ss-cashout-done. /api/settle pays THIS figure and ignores whatever we ask for, which is what
+     * lets the 20x fraud cap on cash-outs go away: the number is no longer ours to choose. Stashed
+     * rather than used immediately because settle() may retry, and the same proof is replayable until
+     * SOL actually leaves escrow. Never overwrite a stored proof with a later, smaller one. */
+    _sio.on('ss-cash-proof',(d)=>{
+      if(!d||!d.proof||!(d.lam>0))return;
+      _cashProof=d;
+    });
+
     _sio.on('ss-cashout-done',(d)=>{
       if(!d||d.id!==myPid||_localDead)return;
       endSnakeGame('cashout',null);
@@ -4430,10 +4482,7 @@ async function pkConnect(roomId,gameToken,spectate){
               own._srvSnap={x:sd.x,y:sd.y,angle:sd.angle,boost:!!sd.boost,pktT:pktT};
             }
             if(sd.ns)own.numSections=sd.ns;
-            if(sd.usd!=null){
-              if(sd.usd>_myUsd+0.0001){const _oh=own.path&&own.path[0];if(_oh)_spawnMoneyFx(_oh.x,_oh.y);}
-              _myUsd=sd.usd;
-            }
+            _adoptValue(sd,own);
             if(sd.cashMs!=null)_myCashMs=sd.cashMs; // server-authoritative cash-out elapsed (0 until wound in)
             if(sd.cashW!=null)_myCashW=sd.cashW;   // server-authoritative wind-in progress (1 = curled, timer running)
           }
@@ -5840,7 +5889,11 @@ function initSnakeGame(players){
     setTimeout(()=>{if(_firstRemoteSync){_firstRemoteSync=false;_hideSyncOverlay();}},1500);
   }
   _hostPid=isHost&&_isPractice?myPid:null; _lastSsTs=Date.now();
-  _myUsd=ST.lobbyUsd||0; // start at entry wager value
+  _myUsd=ST.lobbyUsd||0; // start at entry wager value (placeholder until the server's first packet)
+  // Clear LAST round's ledger and proof. A stale proof here would be a signed claim from a previous,
+  // possibly richer game being presented against this round's deposit — settle would reject it on the
+  // base/freshness checks, but it must never be offered in the first place.
+  _myLam=0; _cashProof=null;
 }
 
 function addSnakePlayer(id,color,name){
@@ -6414,7 +6467,7 @@ function applyRemoteState(d){
         const own=SG.snakes.get(myPid);
         if(own&&sd.ns)own.numSections=sd.ns;
         if(own&&sd.score!=null)own.score=sd.score; // keep hud-score in sync for guests
-        if(sd.usd!=null){ if(sd.usd>_myUsd+0.0001){const _oh=own&&own.path&&own.path[0]; if(_oh)_spawnMoneyFx(_oh.x,_oh.y);} _myUsd=sd.usd; } // host is authoritative for my value
+        _adoptValue(sd,own); // host/server is authoritative for my value — lamports first, see _adoptValue
         if(_firstRemoteSync){
           if(own&&sd.segs&&sd.segs.length>0){
             const head={x:sd.segs[0][0],y:sd.segs[0][1]};
@@ -7080,7 +7133,9 @@ function _toggleClip(){
   _renderSettings();
 }
 function _toggleWinClip(){
-  // Default ON — store the OFF state as ss_winclip_off so a fresh player gets win-clips automatically.
+  // Default OFF (owner: cash-outs must not be recorded automatically). '0' is the opt-IN value, so a
+  // fresh player — key unset — gets no auto win-clip. The comment here used to say "Default ON", which
+  // is the opposite of both the stored default (ss_winclip_off def:'1') and _wclipEnabled().
   if(_wclipEnabled()){ ssSetSetting('ss_winclip_off','1'); _wclipTeardown(); }
   else{ ssSetSetting('ss_winclip_off','0'); }
   _renderSettings();

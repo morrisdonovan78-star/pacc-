@@ -3,6 +3,11 @@
 const nacl    = require('tweetnacl');
 const crypto  = require('crypto');
 const GAME_SECRET = (process.env.GAME_SECRET || '').trim();
+// Flip to '1' once BOTH game nodes are confirmed minting cash-out proofs. Until then a cashout with no
+// valid proof falls back to the old client-claimed-and-capped figure, so a stale cached client can
+// still get paid instead of being stranded with its money in escrow. With it set, an unproven cashout
+// is refused outright and the wager is left on record to retry — see the cashout path.
+const REQUIRE_CASH_PROOF = (process.env.CASHOUT_REQUIRE_PROOF || '') === '1';
 const { kvPing, kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvZrevrange, kvHincrby,
         kvLpush, kvLtrim, kvLrange, kvHget, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
 // Pure pari-mutuel engine (spectator betting). All money math lives here so it is unit-tested
@@ -61,21 +66,69 @@ const CREATOR_FEE_PCT = 0.10;
 // windows, in a PAID lobby, accrue to the event board (evtk:<id> hash, field = killer wallet).
 // Kills come only from the GAME_SECRET-authed elim-lock below, so the board can't be client-inflated.
 // KEEP THE WINDOWS IN SYNC with the 'bounty' entries of window.SNAKE_EVENTS in slither-snakes.html.
-const KILL_EVENTS = [
-  { id: 'bounty-2026-07-25', start: Date.UTC(2026, 6, 25, 18, 0, 0), end: Date.UTC(2026, 6, 25, 20, 0, 0) }, // 2h: 2–4 PM ET
-];
-function activeKillEvent(now) { now = now || Date.now(); return KILL_EVENTS.find(e => now >= e.start && now < e.end) || null; }
-// Free Entry Grind windows — mirror api/join.js GRIND_EVENTS. 10 paid $5 games in a window → 1 credit.
+/* RECURRING WEEKLY, not a hand-maintained list. Bounty Hour is Saturday 2–4 PM ET every week, with
+ * the Free Entry Grind in the hour straight after (4–5 PM ET).
+ *
+ * These used to be arrays with exactly ONE entry in them. The moment Jul 25 2026 passed, the
+ * homescreen board froze on "This event has ended — see you at the next one" — permanently, because
+ * there was no next entry — while EventCard.jsx cheerfully counted down to the coming Saturday. Two
+ * components telling players different things about the same event, and a list nobody would remember
+ * to top up. Generating the windows makes going stale impossible.
+ *
+ * Occurrence ids stay 'bounty-YYYY-MM-DD' / 'grind-YYYY-MM-DD', unchanged, because they key the
+ * payout idempotency locks (evtk:<id>, per-place NX) and the already-settled Jul 25 event must keep
+ * resolving to the same id it was paid under.
+ *
+ * SATURDAY_ANCHOR is the same instant as RECRUIT_ANCHOR below — one weekly deadline across the whole
+ * platform. Fixed 7-day arithmetic, so during EST these shift to 1–3 PM ET; see the note there. */
+const SATURDAY_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0);   // Sat Jul 25 2026 14:00 ET
+const WEEK_MS_EV      = 7 * 24 * 3600 * 1000;
+
+// The Saturday-2PM instant for the week containing `now` (may be in the future within that week).
+function evOccurrence(now, kind, durMs, offsetMs) {
+  const i = Math.floor((now - SATURDAY_ANCHOR) / WEEK_MS_EV);
+  const start = SATURDAY_ANCHOR + i * WEEK_MS_EV + (offsetMs || 0);
+  const day = new Date(start).toISOString().slice(0, 10);
+  return { id: kind + '-' + day, start, end: start + durMs };
+}
+// Every occurrence from `back` weeks ago through `fwd` weeks ahead, oldest first — the generated
+// stand-in for what the arrays used to hold, so "most recent past event" lookups still work.
+function evSeries(now, kind, durMs, offsetMs, back, fwd) {
+  const out = [];
+  for (let k = -back; k <= fwd; k++) out.push(evOccurrence(now + k * WEEK_MS_EV, kind, durMs, offsetMs));
+  return out;
+}
+const KILL_EVENTS_DUR  = 2 * 3600 * 1000;   // 2h: 2–4 PM ET
+const GRIND_EVENT_DUR  = 1 * 3600 * 1000;   // 1h: 4–5 PM ET, straight after Bounty
+const GRIND_OFFSET_MS  = 2 * 3600 * 1000;   // starts when Bounty ends
+// Kept as a function-backed view so a long-lived serverless instance can never serve a stale window.
+function killEvents(now) { return evSeries(now || Date.now(), 'bounty', KILL_EVENTS_DUR, 0, 12, 2); }
+function activeKillEvent(now) { now = now || Date.now();
+  const e = evOccurrence(now, 'bounty', KILL_EVENTS_DUR, 0);
+  return (now >= e.start && now < e.end) ? e : null; }
+// Free Entry Grind windows — mirror api/join.js. 10 paid $5 games in a window → 1 credit.
 const GRIND_TARGET = 10;
-const GRIND_EVENTS = [
-  { id: 'grind-2026-07-25', start: Date.UTC(2026, 6, 25, 20, 0, 0), end: Date.UTC(2026, 6, 25, 21, 0, 0) }, // 4–5 PM ET, after Bounty
-];
-function activeGrindEvent(now) { now = now || Date.now(); return GRIND_EVENTS.find(e => now >= e.start && now < e.end) || null; }
+function activeGrindEvent(now) { now = now || Date.now();
+  const e = evOccurrence(now, 'grind', GRIND_EVENT_DUR, GRIND_OFFSET_MS);
+  return (now >= e.start && now < e.end) ? e : null; }
 
 // ── Recruiter of the Week — rolling 7-day contest. weekId buckets all recruit counts so a new week
-// starts clean automatically. Anchor = Thu Jul 23 2026 00:00 America/Detroit (04:00 UTC, EDT).
+// starts clean automatically.
+//
+// Anchor = SATURDAY Jul 25 2026 14:00 America/New_York (18:00 UTC, EDT), so every week ends Saturday
+// 2:00 PM ET — the same slot the Bounty Hour runs in, which is the point: one weekly deadline players
+// can remember. It was previously anchored to Thursday Jul 23 00:00 ET, so the homepage counted down
+// to Thursday midnight while the profile page told players "runs to Saturday 2pm ET" — the two
+// disagreed by two and a half days and the copy was the honest one. Shifting the anchor by exactly
+// 2d14h leaves the CURRENT week id unchanged (both anchors put today in rw0), so no recruit counts
+// already banked under recruit:rw0 are lost.
+//
+// Fixed 7-day arithmetic, so this lands at 1:00 PM ET during EST rather than 2:00 PM. Same
+// simplification the Bounty Hour makes (see EventCard.jsx) and deliberate: a stable, monotonic week
+// index is worth more here than an hour of DST accuracy, because `recruit:<weekId>` keys are written
+// by api/join.js and must never renumber under a live contest.
 // KEEP RECRUIT_ANCHOR in sync with join.js (qualification counting writes recruit:<weekId>).
-const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 23, 4, 0, 0);
+const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 25, 18, 0, 0);
 const RECRUIT_WEEK_MS = 7 * 24 * 3600 * 1000;
 function recruitWeek(now) { now = now || Date.now();
   const i = Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS);
@@ -299,6 +352,74 @@ async function postWinToDiscord(grossLamports, name, sig) {
     });
   } catch (_) { /* social proof is best-effort; never let it matter */ }
 }
+/* ── Discord BET SLIPS ────────────────────────────────────────────────────────────────────────────
+ * A settled P2P wager posted as a real slip: the market, both sides, the stake, the payout, and an
+ * on-chain link to the transaction that paid it. Public channel, not a DM — this is the sportsbook
+ * equivalent of a winning ticket photo, and it is the cheapest advertising the betting exchange has.
+ *
+ * Channel: DISCORD_SLIPS_WEBHOOK if set, otherwise it rides along in the existing wall-of-winners
+ * channel (DISCORD_WINS_WEBHOOK) so it works with NO new configuration. Set the dedicated var to split
+ * them apart. Unset both and the feature is silently off, exactly like postWinToDiscord.
+ *
+ * Best-effort throughout, and called only AFTER the payout has landed: every failure is swallowed, so
+ * a Discord outage can never affect a settlement or the API response. */
+const DISCORD_SLIPS_WEBHOOK = (process.env.DISCORD_SLIPS_WEBHOOK || '').trim();
+async function postBetSlipToDiscord(w) {
+  const url = DISCORD_SLIPS_WEBHOOK || DISCORD_WINS_WEBHOOK;
+  if (!url || !w) return;
+  try {
+    const t = P2P.getBetType(w.type);
+    const lam = n => Math.max(0, Math.floor(Number(n) || 0));
+    const price = await solUsdQuick();
+    const money = (n) => {
+      const sol = lam(n) / 1e9;
+      return (price ? '$' + (sol * price).toFixed(2) + '  ' : '') + '(' + sol.toFixed(4) + ' SOL)';
+    };
+    const takerSide = P2P.opposingSide(w.type, w.side);
+    const sideLabel = (s) => { try { return t ? String(t.label(s, w)) : String(s); } catch (_) { return String(s); } };
+    const nm = (n, addr) => (n && String(n).trim())
+      ? String(n).trim().slice(0, 20)
+      : (addr ? String(addr).slice(0, 4) + '…' + String(addr).slice(-4) : 'player');
+
+    const creatorName  = nm(w.creatorName, w.creator);
+    const acceptorName = nm(w.acceptorName, w.acceptor);
+    const creatorWon   = w.winner && w.creator && String(w.winner) === String(w.creator);
+    const winnerName   = creatorWon ? creatorName : acceptorName;
+    const winnerSide   = creatorWon ? w.side : takerSide;
+    const loserName    = creatorWon ? acceptorName : creatorName;
+
+    // The slip. Stake/To-return/Profit is the DraftKings shape — the three numbers a bettor checks.
+    const profit = lam(w.payout) - lam(w.stakeLamports);
+    const body = {
+      username: 'SNAKE POT · Bet Slips',
+      embeds: [{
+        title: '🎟️  Bet settled — congrats ' + winnerName + '!',
+        description: (t ? '**' + t.question(w) + '**\n' : '') +
+                     '`' + sideLabel(winnerSide) + '` ✅  beat  `' + sideLabel(creatorWon ? takerSide : w.side) + '` ❌\n' +
+                     '\n' + winnerName + ' takes it off ' + loserName + '.',
+        color: 0x39FF14,
+        fields: [
+          { name: 'Stake',     value: money(w.stakeLamports), inline: true },
+          { name: 'Returned',  value: money(w.payout),        inline: true },
+          { name: 'Profit',    value: (profit >= 0 ? '+' : '−') + money(Math.abs(profit)), inline: true },
+          { name: 'Market',    value: (t && t.id ? t.id : String(w.type || 'bet')) + (w.duel ? ' · duel' : ''), inline: true },
+          { name: 'Arena',     value: String(w.region || 'NA') + ' · ' + String(w.lobby || '—'), inline: true },
+          { name: 'Fee',       value: money(w.fee), inline: true },
+        ],
+        footer: { text: 'Slip ' + String(w.id || '').slice(0, 18) + ' · even money, 8% on winnings' },
+        timestamp: new Date(w.settledTs || Date.now()).toISOString(),
+      }],
+    };
+    // The on-chain receipt is what makes the slip believable, so link it when we have one.
+    if (w.payoutTx) {
+      body.embeds[0].description += '\n\n[✅ View the payout on-chain](https://explorer.solana.com/tx/' +
+                                    w.payoutTx + ')  •  [🎲 Place a bet](https://snakepot.com/bets)';
+    }
+    await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                       body: JSON.stringify(body), signal: AbortSignal.timeout(3000) });
+  } catch (_) { /* a slip is advertising; it must never matter to the money */ }
+}
+
 const TX_FEE          = 5000;  // exact Solana base fee (5000 lamports × 1 signature, no priority fees)
 // Solana requires a system account's balance to be either exactly 0 OR >= RENT_MIN.
 // It must NEVER sit between 0 and RENT_MIN — that triggers InsufficientFundsForRent.
@@ -1140,8 +1261,17 @@ module.exports = async function handler(req, res) {
       const now = Date.now();
       let ev = activeKillEvent(now), state = 'live';
       if (!ev) {                                    // no live event → keep showing the LAST event's final
-        const past = KILL_EVENTS.filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
-        if (past) { ev = past; state = 'ended'; }    // board on the homescreen until the NEXT event runs
+        const past = killEvents(now).filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
+        if (past) { ev = past; state = 'ended'; }    // board on the homescreen for a day afterwards
+        /* Then switch to counting down to the NEXT Saturday. Since the events recur weekly, an "ended"
+         * board would otherwise sit on the homepage for six straight days telling players they missed
+         * something — which is the opposite of what you want a homepage to say. The 24h hold is
+         * deliberate: the auto-settle below only fires while state === 'ended', so the winners are
+         * long since paid before the board rolls forward. */
+        if (past && (now - past.end) >= 24 * 3600 * 1000) {
+          const next = killEvents(now).filter(e => e.start > now).sort((a, b) => a.start - b.start)[0];
+          if (next) { ev = next; state = 'upcoming'; }
+        }
       }
       // Auto-settle: once a bounty window has ended, pay the winners from the float — idempotent
       // (per-place NX locks) and solvency-guarded, so only the first post-event reader does the work
@@ -1259,7 +1389,7 @@ module.exports = async function handler(req, res) {
     // ── event-settle: compute (dryRun, anyone) or fire (real, admin-only) a Bounty-Hour payout ─────
     if (action === 'event-settle') {
       const now = Date.now();
-      const ev = activeKillEvent(now) || KILL_EVENTS.filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
+      const ev = activeKillEvent(now) || killEvents(now).filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
       clearTimeout(guard); done = true;
       if (!ev) return res.status(200).json({ error: 'no event' });
       if (body.dryRun === false) {   // REAL payout — admin secret required
@@ -1422,11 +1552,14 @@ module.exports = async function handler(req, res) {
       // (kvSetPerm, no TTL) so it genuinely never disappears; cleared when nothing is left unclaimed.
       // Validate BEFORE coercing: `Number(x) || 0` would turn junk ('a', NaN, undefined) into a
       // perfectly valid money orb sitting at the map origin. Reject non-finite coords outright.
+      // `lam` rides along with `w`: it is the orb's share of a dead player's stake in lamports, and it
+      // is the figure a cash-out is actually paid from. Dropping it here would strip every parked orb
+      // of its money on the round trip and quietly reduce a returning player's claim to zero.
       const orbs = Array.isArray(body.orbs)
         ? body.orbs.slice(0, 4000)
-            .map(o => (o && typeof o === 'object') ? { x: Number(o.x), y: Number(o.y), w: Number(o.w) } : null)
-            .filter(o => o && Number.isFinite(o.x) && Number.isFinite(o.y) && Number.isFinite(o.w) && o.w > 0)
-            .map(o => ({ x: Math.round(o.x), y: Math.round(o.y), w: o.w }))
+            .map(o => (o && typeof o === 'object') ? { x: Number(o.x), y: Number(o.y), w: Number(o.w), lam: Math.floor(Number(o.lam) || 0) } : null)
+            .filter(o => o && Number.isFinite(o.x) && Number.isFinite(o.y) && Number.isFinite(o.w) && Number.isFinite(o.lam) && o.lam >= 0 && (o.w > 0 || o.lam > 0))
+            .map(o => ({ x: Math.round(o.x), y: Math.round(o.y), w: o.w, lam: o.lam }))
         : [];
       try {
         if (orbs.length) await kvSetPerm(KEY, JSON.stringify({ lid, ts: Date.now(), orbs }));
@@ -1663,6 +1796,10 @@ module.exports = async function handler(req, res) {
         await kvZrem('wglive:' + lk, wid).catch(() => {});
         await kvZrem('wgopen:' + lk, wid).catch(() => {});
         await wgPush(w.region, w.lobby, 'settled', wgPublic(w));
+        // Public bet slip. AWAITED (Vercel can freeze the function the instant the response is sent, so
+        // fire-and-forget here often never runs at all) but fully swallowed inside, and only reached
+        // after the payout has already landed — it cannot affect the money or this response.
+        await postBetSlipToDiscord(w);
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, wager: wgPublic(w), tx: pay.sig });
       } finally { await kvDel('lock:wg:' + wid).catch(() => {}); }
@@ -2168,6 +2305,101 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, raceId, feeLamports: fee, paid });
     }
 
+    // ── stake-read: the game server asks what a player ACTUALLY deposited (GAME_SECRET-HMAC) ──────
+    // Read-only. Moves nothing, signs nothing, names no escrow account.
+    //
+    // This exists because the game server had NO honest source for a player's stake. It seeded the
+    // snake's value from the CLIENT's own join packet (`d.usd` in _server_na.js), which means every
+    // figure downstream of it — the $ over their head, the kill food they drop when they die, the
+    // cash-out total — descended from a number the player's own browser picked. `pw:<addr>` is the
+    // only trustworthy record of a stake: api/join.js writes it ONLY after verifying the deposit
+    // actually landed in escrow on-chain. Handing that figure to the game server is what lets the
+    // game server own the value ledger in LAMPORTS and sign the cash-out amount itself — and that
+    // is what makes the 20x fraud cap on cashout unnecessary.
+    if (action === 'stake-read') {
+      const gp  = (req.headers['x-game-proof'] || '').trim();
+      const gts = Number(req.headers['x-game-ts'] || 0);
+      let authed = false;
+      if (GAME_SECRET && gp && gts && Math.abs(Date.now() - gts) < 300000) {
+        const expected = crypto.createHmac('sha256', GAME_SECRET).update('stake-read:' + gts).digest('hex');
+        try { authed = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(gp)); } catch (_) {}
+      }
+      if (!authed) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
+      const addrs = Array.isArray(body.addresses) ? body.addresses.slice(0, 64).map(a => String(a || '')) : [];
+      const stakes = {};
+      for (const a of addrs) {
+        if (!a || a.length < 32 || a.length > 64) continue;
+        stakes[a] = Math.max(0, Math.floor(Number(await kvGet('pw:' + a)) || 0));
+      }
+      clearTimeout(guard); done = true;
+      return res.status(200).json({ ok: true, stakes });
+    }
+
+    /* ── forfeit: a paid Pac-Man player left and never came back (GAME_SECRET-HMAC) ────────────────
+     * Server-to-server twin of `lose`. `lose` is signed by the PLAYER's wallet, which is exactly what
+     * a vanished player cannot provide — so Pac-Man resolved a disconnect by doing nothing at all: the
+     * player was deleted from the room and their `pw:` record simply expired after 4h. The stake sat
+     * in escrow credited to nobody, which is a genuine contributor to the "why is there extra money in
+     * escrow" confusion.
+     *
+     * FORFEIT TO THE HOUSE, never a refund. Owner's rule, all four games: once the wager is in, it is
+     * locked until cash-out — a disconnect is the player's problem, exactly like dying. Snake already
+     * behaves this way (it sheds the stake as food, same as a death); this gives Pac-Man the
+     * equivalent, since it has no food to shed into. */
+    if (action === 'forfeit') {
+      const gp  = (req.headers['x-game-proof'] || '').trim();
+      const gts = Number(req.headers['x-game-ts'] || 0);
+      const who = String(body.playerAddress || '').trim();
+      let authed = false;
+      if (GAME_SECRET && gp && gts && who && Math.abs(Date.now() - gts) < 300000) {
+        const expected = crypto.createHmac('sha256', GAME_SECRET).update('forfeit:' + who + ':' + gts).digest('hex');
+        try { authed = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(gp)); } catch (_) {}
+      }
+      if (!authed) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
+
+      const fLock = await kvSetNX('lock:ff:' + who, '1', 20);
+      if (!fLock) { clearTimeout(guard); done = true; return res.status(429).json({ error: 'forfeit already in progress' }); }
+      try {
+        // GETDEL: consume the record atomically so a duplicated disconnect callback cannot sweep twice.
+        const stake = Number(await kvGetDel('pw:' + who)) || 0;
+        if (stake <= 0) {   // already resolved by a death, a cash-out, or an earlier forfeit
+          clearTimeout(guard); done = true;
+          return res.status(200).json({ ok: true, amount: 0, already: true });
+        }
+        const escF = getEscrow();
+        try {
+          const { bal, blockhash } = await fetchBalAndHash(escF.pubkeyB58);
+          const avail = bal - TX_FEE;
+          if (avail <= 0) throw new Error('escrow empty');
+          const take = Math.min(stake, avail);
+          const remaining = avail - take;
+          const finalAmt = (remaining > 0 && remaining < RENT_MIN) ? avail : take;
+          // House nets the stake minus this tx's network fee, so escrow's outflow is exactly the
+          // liability being cleared and it never leaks — same self-funding rule as cashout and lose.
+          const houseTake = Math.max(0, finalAmt - TX_FEE);
+          const tx = buildTx(escF, blockhash, [{ to: b58Decode(CREATOR_WALLET), lamports: houseTake }]);
+          const { sig: fsig, confirmed } = await sendAndConfirm(tx);
+          try { await kvDel('krl:' + who); await kvDel('kc:' + who); } catch (_) {}
+          try {
+            await kvHincrby('ph:' + game + ':' + who, 'losses', 1);
+            await kvHincrby('ph:' + game + ':' + who, 'deaths', 1);
+          } catch (_) {}
+          console.log('[settle] FORFEIT ' + who.slice(0, 8) + ' stake=' + stake + ' house=' + houseTake + ' game=' + game);
+          clearTimeout(guard); done = true;
+          return res.status(200).json({ ok: true, amount: houseTake, sig: fsig, confirmed });
+        } catch (e) {
+          /* The sweep did not happen, so nothing left escrow. Do NOT restore `pw:` — the player has
+           * already forfeited and restoring it would make the stake claimable again by a returning
+           * client. The money stays in escrow as unattributed surplus, which the solvency check will
+           * report as free to withdraw. Erring toward surplus, never toward a double claim. */
+          betAlert('FORFEIT sweep failed for ' + who.slice(0, 8) + ' (' + ((e && e.message) || e) +
+                   '). Stake ' + stake + ' stays in escrow as surplus — pw: already cleared, nothing is owed.');
+          clearTimeout(guard); done = true;
+          return res.status(200).json({ ok: true, amount: 0, swept: false });
+        }
+      } finally { await kvDel('lock:ff:' + who).catch(() => {}); }
+    }
+
     // ── Wallet signature auth — required for all fund-moving actions ─────────
     // The player signs the request with their Solana private key.
     // Only the real wallet owner can produce a valid signature.
@@ -2651,13 +2883,94 @@ module.exports = async function handler(req, res) {
           clearTimeout(guard); done = true;
           return res.status(403).json({ error: 'Cannot cashout — you were eliminated' });
         }
-        // Use client-signed accumulated amount (initial wager + kill-food winnings).
-        // kvWager confirms the player has an active deposit; wagerLamportsRaw is the signed total they claim.
-        // Cap at 20× initial to guard against fraudulent inflation; avail caps the actual transfer.
-        const wagerLamports = wagerLamportsRaw > kvWager
-          ? Math.min(wagerLamportsRaw, kvWager * 20)
-          : kvWager;
-        console.log('[settle] cashout kv=' + kvWager + ' signed=' + wagerLamportsRaw + ' using=' + wagerLamports);
+        /* How much do we owe? There are two answers, and only one of them is honest.
+         *
+         * `wagerLamportsRaw` is the figure the PLAYER's client claims. It is signed by their wallet,
+         * but a wallet signature proves *identity*, not *honesty* — the player chooses what they
+         * sign, so a modified client can claim any number it likes. That is why this path used to
+         * clamp to `kvWager * 20`: the cap was the only thing standing between a forged claim and
+         * the whole escrow balance. It was also wrong for honest players, because carried money is
+         * real (you eat other players' dropped food), so a legitimate 30x run got truncated.
+         *
+         * `cashProof` is the figure the GAME SERVER attests to, HMAC'd with GAME_SECRET over
+         * cashout:<addr>:<lobby>:<base>:<carried>:<ts>. The game server owns the value ledger in
+         * lamports — seeded from the on-chain deposit via stake-read, grown only by kill food it
+         * spawned itself — so it cannot be talked into a number by a browser. Same trust model as
+         * the kill proofs and elim-lock already running through this file.
+         *
+         * With a proof we pay the server's figure EXACTLY and no cap applies, which is the point:
+         * the cap only ever existed to bound a forgeable claim. Without one we fall back to the old
+         * capped path so a stale cached client (or a node that has not taken the patch yet) can
+         * still cash out rather than being stranded — but it is logged, and CASHOUT_REQUIRE_PROOF=1
+         * turns the fallback off once both nodes are confirmed minting proofs.
+         */
+        const cpProof = typeof body.cashProof === 'string' ? body.cashProof : '';
+        const cpTs    = Number(body.cashTs) || 0;
+        const cpBase  = Math.floor(Number(body.cashBase) || 0);
+        const cpLam   = Math.floor(Number(body.cashLamports) || 0);
+        // The lobby the GAME SERVER signed, echoed back by the client untouched. Deliberately not
+        // `lobbyId`: the client's own idea of its lobby falls back to a guess when the socket has
+        // already torn down, and that guess would fail an otherwise valid proof. Nothing is trusted
+        // by taking it from here — a wrong value simply makes the HMAC not match.
+        const cpLobby = String(body.cashLobby || '');
+        let   proofOk = false;
+
+        if (cpProof && cpProof.length === 64 && cpTs && cpLam > 0 && GAME_SECRET) {
+          const cpAge = Date.now() - cpTs;
+          // 120s, not the 300s used elsewhere: a proof is minted the instant the 4s cash-out circle
+          // completes and is spent seconds later. A tight window is what stops a proof from a
+          // previous, richer round being replayed against a fresh cheap deposit.
+          if (cpAge >= 0 && cpAge < 120000) {
+            const canon = 'cashout:' + playerAddress + ':' + cpLobby + ':' + cpBase + ':' + cpLam + ':' + cpTs;
+            const want  = crypto.createHmac('sha256', GAME_SECRET).update(canon).digest('hex');
+            try { proofOk = crypto.timingSafeEqual(Buffer.from(want), Buffer.from(cpProof)); } catch (_) {}
+            // Bind the proof to THIS deposit. The base the game server read out of `pw:` at join
+            // must still be the `pw:` we just consumed, so a proof cannot be carried across rounds.
+            if (proofOk && cpBase !== kvWager) {
+              console.warn('[settle] cashout proof base mismatch signed=' + cpBase + ' kv=' + kvWager + ' — refusing proof, falling back');
+              proofOk = false;
+            }
+            // Spent proofs stay spent. Checked (not set) here so the client's own retry loop can
+            // re-present the same proof after a failed payout — `cpd:` is only written once SOL has
+            // actually left escrow, below.
+            if (proofOk && await kvGet('cpd:' + cpProof)) {
+              console.warn('[settle] cashout proof REPLAY refused player=' + playerAddress.slice(0, 8));
+              clearTimeout(guard); done = true;
+              await kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
+              return res.status(403).json({ error: 'That cash-out was already paid' });
+            }
+          } else {
+            console.warn('[settle] cashout proof stale age=' + cpAge + 'ms — falling back');
+          }
+        }
+
+        let wagerLamports;
+        if (proofOk) {
+          // Never pay less than the deposit we hold, even if the ledger says so — same principle as
+          // the underfunded refusal below: a suspect figure must not quietly shortchange a player.
+          if (cpLam < kvWager) {
+            console.warn('[settle] cashout proof BELOW deposit signed=' + cpLam + ' kv=' + kvWager + ' — paying deposit');
+            betAlert('CASHOUT proof below deposit — signed ' + cpLam + ' kv ' + kvWager +
+                     ' player=' + playerAddress.slice(0, 8) + ' game=' + game);
+            wagerLamports = kvWager;
+          } else {
+            wagerLamports = cpLam;   // authoritative, uncapped
+          }
+        } else {
+          if (REQUIRE_CASH_PROOF) {
+            await kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
+            betAlert('CASHOUT REFUSED — no valid game-server proof. player=' + playerAddress.slice(0, 8) +
+                     ' game=' + game + ' claimed=' + wagerLamportsRaw);
+            clearTimeout(guard); done = true;
+            return res.status(503).json({ error: 'Cash-out could not be verified with the game server — your wager is safe, press Cash Out again.', retry: true });
+          }
+          wagerLamports = wagerLamportsRaw > kvWager
+            ? Math.min(wagerLamportsRaw, kvWager * 20)
+            : kvWager;
+        }
+        console.log('[settle] cashout kv=' + kvWager + ' claimed=' + wagerLamportsRaw +
+                    ' proof=' + (proofOk ? cpLam : 'none') + ' using=' + wagerLamports +
+                    (proofOk ? ' [authoritative]' : ' [CLIENT-CLAIMED, capped]'));
 
         let sig, playerCut, creatorCut, txConfirmed = false;
         try {
@@ -2697,6 +3010,10 @@ module.exports = async function handler(req, res) {
             // Awaited (not fire-and-forget) — Vercel can freeze the function the instant the
             // response is sent, so an un-awaited background write may never finish.
             try{ await kvDel('krl:'+playerAddress); }catch(_){}
+            // SOL has left escrow — burn the proof so it can never be presented again. Written only
+            // now, never before: the client retries a failed payout with the SAME proof, and burning
+            // it up-front would turn a transient RPC failure into a permanently unclaimable wager.
+            if (proofOk) { try{ await kvSet('cpd:' + cpProof, '1', 86400); }catch(_){} }
             try{
               const pk='ph:'+game+':'+playerAddress;
               // Leaderboard "earned" is the gross cashout total (wager + winnings) the player
@@ -2940,3 +3257,6 @@ module.exports = async function handler(req, res) {
 
 // Exported for unit testing the Discord win-post payload in isolation (scripts/test-winpost.js).
 module.exports.postWinToDiscord = postWinToDiscord;
+// Exported so the slip's field names and label rendering can be checked offline. The real call site
+// swallows every error, which would otherwise hide a typo'd field forever.
+module.exports.postBetSlipToDiscord = postBetSlipToDiscord;

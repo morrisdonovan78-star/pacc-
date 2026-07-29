@@ -78,18 +78,30 @@ const normalizeCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '
 // cumulative PAID wager crosses this threshold (real money at risk = the anti-alt wall). Rolling
 // 7-day weeks bucket the counts. KEEP RECRUIT_ANCHOR in sync with api/settle.js recruitWeek().
 const RECRUIT_QUALIFY_LAMPORTS = 60000000;            // ~0.06 SOL (~$9-10) of real wagering
-const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 23, 4, 0, 0); // Thu Jul 23 2026 00:00 America/Detroit
+// Sat Jul 25 2026 14:00 America/New_York (18:00 UTC) — weeks end Saturday 2pm ET. See the long note
+// in api/settle.js before changing this; the two MUST match or counts land in a different bucket than
+// the board reads.
+const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 25, 18, 0, 0);
 const RECRUIT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 function recruitWeekId(now) { now = now || Date.now(); return 'rw' + Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS); }
 
 // ── Free Entry Grind — play GRIND_TARGET paid $5 games inside a grind window → earn one free $5
 // credit (credit:<wallet>). KEEP these windows in sync with the 'grind' entries in the client
 // SNAKE_EVENTS + api/settle.js. $5 lobby id is ss-paid-lobby-5.
+// RECURRING WEEKLY: Saturday 4–5 PM ET, the hour straight after Bounty Hour. This was a one-entry
+// array that expired on Jul 25 2026 — after which no grind window was ever active again and the credit
+// could not be earned at all. Generated to match api/settle.js; occurrence ids are unchanged
+// ('grind-YYYY-MM-DD') because they key the per-window progress counters.
 const GRIND_TARGET = 10;
-const GRIND_EVENTS = [
-  { id: 'grind-2026-07-25', start: Date.UTC(2026, 6, 25, 20, 0, 0), end: Date.UTC(2026, 6, 25, 21, 0, 0) }, // 4–5 PM ET
-];
-function activeGrindEvent(now) { now = now || Date.now(); return GRIND_EVENTS.find(e => now >= e.start && now < e.end) || null; }
+const SATURDAY_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0);   // Sat Jul 25 2026 14:00 ET — same instant as RECRUIT_ANCHOR
+const GRIND_WEEK_MS   = 7 * 24 * 3600 * 1000;
+function activeGrindEvent(now) {
+  now = now || Date.now();
+  const i = Math.floor((now - SATURDAY_ANCHOR) / GRIND_WEEK_MS);
+  const start = SATURDAY_ANCHOR + i * GRIND_WEEK_MS + 2 * 3600 * 1000;   // Bounty is 2–4, grind is 4–5
+  const e = { id: 'grind-' + new Date(start).toISOString().slice(0, 10), start, end: start + 3600 * 1000 };
+  return (now >= e.start && now < e.end) ? e : null;
+}
 
 // First-touch bind + per-join accrual. Fully wrapped by the caller's try/catch AND its own — the
 // referral program must NEVER be able to fail a legitimate paid join.

@@ -1033,7 +1033,9 @@ function ssAngleDiff(a, b) {
 
 
 
-function ssMakeFood(x, y, k, w, o, ne) {
+// `lam` is the orb's share of a dead player's stake in LAMPORTS — the authoritative money figure.
+// `w` is the same value in USD and exists only so the client can draw it; see the lamport ledger note.
+function ssMakeFood(x, y, k, w, o, ne, lam) {
 
   if (x == null) {
 
@@ -1051,7 +1053,7 @@ function ssMakeFood(x, y, k, w, o, ne) {
 
   return { x, y, ci: Math.floor(Math.random() * 20), size: _sz,
 
-           k: k || 0, w: w || 0, o: o || null, ne: ne || 0 };
+           k: k || 0, w: w || 0, o: o || null, ne: ne || 0, lam: lam || 0 };
 
 }
 
@@ -1157,6 +1159,15 @@ function ssSpawnKillFood(sg, sn) {
 
   const wPerOrb = (sn.usd || 0) / orbs;
 
+  // The same drop in lamports — the figure that actually decides what the eater can cash out.
+  // Split with the remainder pushed onto the first orb so the orbs sum to EXACTLY what the snake
+  // carried: plain integer division would destroy up to orbs-1 lamports of a dead player's stake on
+  // every single kill, and that money would sit in escrow claimable by nobody (the "gold food just
+  // disappeared" failure, one lamport at a time). Zeroed on the snake below so it can never drop twice.
+  const carriedLam = ssLamCarried(sn);
+  const lamPerOrb  = Math.floor(carriedLam / orbs);
+  const lamExtra   = carriedLam - lamPerOrb * orbs;
+
   const EDGE = (sg.arenaR || SS_ARENA_R) - 30; // clamp to the CURRENT (possibly shrunk) border
 
   const bodyLen = Math.max(1, Math.min(path.length, (sn.ns || SS_MIN_NS) * SS_SEG_STEP));
@@ -1185,9 +1196,14 @@ function ssSpawnKillFood(sg, sn) {
 
     if (d > EDGE) { const s = EDGE / d; x = _kcx + _kdx * s; y = _kcy + _kdy * s; }
 
-    sg.food.push(ssMakeFood(x, y, 1, wPerOrb));
+    sg.food.push(ssMakeFood(x, y, 1, wPerOrb, null, 0, lamPerOrb + (c === 0 ? lamExtra : 0)));
 
   }
+
+  // The stake is on the floor now. Clear the ledger so a second call (ghost-kill timeout racing a
+  // real kill, a disconnect shed after a death) cannot mint the same money a second time.
+  sn._lamFood = 0; sn._lamBase = 0; sn._lamAuth = false;
+  _stakeLam.delete(sn.pid);
 
 }
 
@@ -1210,6 +1226,91 @@ function ssFoodAuth(lid) {
   return { ts, proof: crypto.createHmac('sha256', GAME_SECRET).update('food:' + lid + ':' + ts).digest('hex') };
 }
 
+// ── Authoritative LAMPORT ledger (paid lobbies) ───────────────────────────────────────────────────
+// The value a snake carries used to originate in the player's own browser — `d.usd` on their first
+// ssin (see ssHandleInput) — so nothing this server said about money was really this server's
+// opinion, and /api/settle had to defend itself with a 20x cap on any cash-out claim. Two fields,
+// kept apart on purpose:
+//   _lamBase  the deposit api/join.js verified ON-CHAIN, read out of `pw:` via the stake-read action
+//   _lamFood  lamports picked up as gold food — orbs spawned and priced by THIS process, never by a client
+// carried = _lamBase + _lamFood, and that total is what the cash-out proof signs.
+//
+// LAMPORTS, not USD, because the payout is in SOL: a player is owed exactly the SOL they put in plus
+// the SOL they took off other players, and no exchange-rate move between joining and cashing out can
+// change that — which is also what keeps escrow able to cover every payout it owes. The client turns
+// this into USD at the live price for display, so the figure over a snake's head still floats with SOL.
+const _stakeLam = new Map();   // pid → authoritative deposit in lamports (KV `pw:`)
+
+function ssStakeAuth() {
+  const ts = Date.now();
+  return { ts, proof: crypto.createHmac('sha256', GAME_SECRET).update('stake-read:' + ts).digest('hex') };
+}
+
+// Fire-and-forget by design. This is NEVER awaited in the connection handler: awaiting there would
+// delay registering the socket's own event listeners, and a client's first packets would be dropped.
+function ssFetchStake(pid) {
+  if (!GAME_SECRET || !pid || String(pid).indexOf('bot-') === 0) return;
+  const { ts, proof } = ssStakeAuth();
+  const url = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
+    body: JSON.stringify({ action: 'stake-read', addresses: [pid] }),
+    signal: AbortSignal.timeout(8000),
+  }).then(r => r.json()).then(d => {
+    const lam = (d && d.stakes) ? Math.floor(Number(d.stakes[pid]) || 0) : 0;
+    if (lam > 0) { _stakeLam.set(pid, lam); console.log('[stake] ' + String(pid).slice(0, 8) + ' = ' + lam + ' lamports'); }
+    else console.warn('[stake] NO deposit on record for ' + String(pid).slice(0, 8) + ' — cash-out will fall back to the capped path');
+  }).catch(e => console.warn('[stake] read failed for ' + String(pid).slice(0, 8) + ': ' + (e && e.message)));
+}
+
+/* Forfeit a vanished paid player's stake to the house. Fire-and-forget: the sweep is escrow-internal
+ * bookkeeping, nobody is waiting on it, and /api/settle is idempotent (it GETDELs `pw:`), so a repeat
+ * call costs nothing. Bots and free lobbies have no stake to forfeit. */
+function ssForfeitStake(pid, lid) {
+  if (!GAME_SECRET || !pid || String(pid).indexOf('bot-') === 0) return;
+  const ts = Date.now();
+  const proof = crypto.createHmac('sha256', GAME_SECRET).update('forfeit:' + pid + ':' + ts).digest('hex');
+  const url = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-game-proof': proof, 'x-game-ts': String(ts) },
+    body: JSON.stringify({ action: 'forfeit', playerAddress: pid, lobbyId: lid }),
+    signal: AbortSignal.timeout(15000),
+  }).then(r => r.json()).then(d => {
+    if (d && d.already) console.log(`[${lid}] forfeit ${String(pid).slice(0, 8)}: nothing owed (already resolved)`);
+    else if (d && d.ok) console.log(`[${lid}] forfeit ${String(pid).slice(0, 8)}: swept ${d.amount || 0} to house`);
+    else console.warn(`[${lid}] forfeit ${String(pid).slice(0, 8)} refused: ${(d && d.error) || 'unknown'}`);
+  }).catch(e => console.warn(`[${lid}] forfeit call failed for ${String(pid).slice(0, 8)}: ${e && e.message}`));
+}
+
+// Adopt the authoritative deposit the moment it arrives. Because food winnings are banked separately
+// in _lamFood, this can happen before OR after the snake has eaten anything and the total is the same
+// either way — which is what makes the fire-and-forget fetch above safe.
+function ssLamCarried(sn) {
+  if (!sn) return 0;
+  if (!sn._lamAuth) {
+    const base = _stakeLam.get(sn.pid);
+    if (base > 0) { sn._lamBase = base; sn._lamAuth = true; }
+  }
+  return sn._lamAuth ? Math.max(0, Math.floor((sn._lamBase || 0) + (sn._lamFood || 0))) : 0;
+}
+
+// Sign the cash-out total so /api/settle can pay it without trusting the player's browser. Returns
+// null when the ledger is not authoritative (free lobby, bot, or the stake read never landed) — the
+// caller then mints no proof and settle falls back to its old capped path rather than refusing a
+// payout. Same HMAC trust model as the kill proofs and elim-lock.
+function ssCashProof(sn, lid) {
+  if (!GAME_SECRET || !sn) return null;
+  const carried = ssLamCarried(sn);
+  if (!sn._lamAuth || !(carried > 0)) return null;
+  const ts = Date.now();
+  const base = Math.floor(sn._lamBase || 0);
+  const canon = 'cashout:' + sn.pid + ':' + lid + ':' + base + ':' + carried + ':' + ts;
+  return { lam: carried, base, lobby: lid, ts,
+           proof: crypto.createHmac('sha256', GAME_SECRET).update(canon).digest('hex') };
+}
+
 // Low-level: hand an explicit orb list to the store. Sending [] CLEARS the lobby's park, which is
 // correct — it means nothing is left unclaimed here.
 function ssParkOrbs(lid, orbs) {
@@ -1229,8 +1330,11 @@ function ssParkOrbs(lid, orbs) {
 function ssParkFood(lid, sg) {
   if (!ssIsPaidLobby(lid) || !GAME_SECRET || !sg) return;
   const orbs = (sg.food || [])
-    .filter(f => f && f.k && (Number(f.w) || 0) > 0)   // money orbs only; pebbles are worthless
-    .map(f => ({ x: f.x, y: f.y, w: f.w }));
+    // Money orbs only; pebbles are worthless. An orb counts as money if EITHER figure is set — `lam`
+    // is the one that decides a payout, so an orb carrying lamports must never be dropped from the
+    // park just because its display value rounded to nothing.
+    .filter(f => f && f.k && ((Number(f.w) || 0) > 0 || (Number(f.lam) || 0) > 0))
+    .map(f => ({ x: f.x, y: f.y, w: f.w, lam: Math.floor(Number(f.lam) || 0) }));
   ssParkOrbs(lid, orbs);
 }
 
@@ -1265,10 +1369,11 @@ function ssRestoreParkedFood(lid, sg) {
         for (const o of orbs) {
           let x = Number(o.x) || 0, y = Number(o.y) || 0;
           const w = Number(o.w) || 0;
-          if (!(w > 0) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+          const lam = Math.floor(Number(o.lam) || 0);
+          if (!(w > 0 || lam > 0) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
           const d = Math.sqrt(x * x + y * y);
           if (d > EDGE && d > 0) { const s = EDGE / d; x *= s; y *= s; }
-          g.food.push(ssMakeFood(x, y, 1, w));
+          g.food.push(ssMakeFood(x, y, 1, w, null, 0, lam));
         }
         g._foodDirty = true;
         console.log(`[${lid}] restored ${orbs.length} parked gold orbs`);
@@ -2315,6 +2420,11 @@ function ssTick(lid, io) {
 
         if (f.w) sn.usd = (sn.usd || 0) + f.w;
 
+        // Banked apart from the deposit (_lamBase) so it survives the stake read landing late — see
+        // ssLamCarried. This is the ONLY way a snake's lamport total can grow, and every lamport of
+        // it came off a snake that died holding it.
+        if (f.lam) sn._lamFood = (sn._lamFood || 0) + f.lam;
+
         sg.food.splice(i, 1);
 
         sg._foodDirty = true;
@@ -2386,7 +2496,20 @@ function ssTick(lid, io) {
       if ((_cs._cashWound || 0) >= _arc) { _cs._cashStart = Date.now(); _cs._cashW = 1; }
     } else if (Date.now() - _cs._cashStart >= 4000) {
       _cs._cashResolved = 'paid';
+      // Sign the authoritative carried total BEFORE the snake is torn down, and send it ONLY to its
+      // owner's private channel. /api/settle pays this figure and ignores whatever the client asks
+      // for, which is what removes the need for a fraud cap on the claim. No proof (free lobby, bot,
+      // or the stake read never landed) is not an error: settle then falls back to the old capped
+      // client claim, so a cash-out is never blocked by this — it is only ever made honest by it.
+      const _cp = ssCashProof(_cs, lid);
+      if (_cp) io.to('p:' + _cs.pid).emit('ss-cash-proof', _cp);
+      else if (ssIsPaidLobby(lid)) console.warn(`[${lid}] NO cash proof for ${String(_cs.pid).slice(0, 8)} — settle will use the capped client claim`);
       _cs.alive = false; _cs._killedAt = Date.now(); _cs.path = []; _cs.segs = [];
+      // Ledger consumed. The proof is the claim now, so this snake's money must not also drop as food
+      // or be signed a second time. The client may re-present the SAME proof if the payout fails —
+      // settle burns it only once SOL has actually moved.
+      _cs._lamFood = 0; _cs._lamBase = 0; _cs._lamAuth = false;
+      _stakeLam.delete(_cs.pid);
       io.to(lid).emit('ss-cashout-done', { id: _cs.pid });
     }
   }
@@ -2460,7 +2583,7 @@ function ssBroadcastState(sg, lid, io) {
 
       angle: sn.angle, ns: sn.ns, boost: sn.boost, circle: !!sn.circling,
 
-      score: sn.score || 0, usd: sn.usd || 0, cash: sn.cashing ? 1 : 0, cashMs: (sn.cashing && sn._cashStart) ? (Date.now() - sn._cashStart) : 0, cashW: sn.cashing ? (sn._cashW || 0) : 0,
+      score: sn.score || 0, usd: sn.usd || 0, lam: ssLamCarried(sn), cash: sn.cashing ? 1 : 0, cashMs: (sn.cashing && sn._cashStart) ? (Date.now() - sn._cashStart) : 0, cashW: sn.cashing ? (sn._cashW || 0) : 0,
 
       color: sn.color, name: sn.name,
 
@@ -2552,7 +2675,7 @@ function ssBroadcastStateTo(socket, sg) {
 
       angle: sn.angle, ns: sn.ns, boost: sn.boost, circle: !!sn.circling,
 
-      score: sn.score || 0, usd: sn.usd || 0, cash: sn.cashing ? 1 : 0, cashMs: (sn.cashing && sn._cashStart) ? (Date.now() - sn._cashStart) : 0, cashW: sn.cashing ? (sn._cashW || 0) : 0, color: sn.color, name: sn.name
+      score: sn.score || 0, usd: sn.usd || 0, lam: ssLamCarried(sn), cash: sn.cashing ? 1 : 0, cashMs: (sn.cashing && sn._cashStart) ? (Date.now() - sn._cashStart) : 0, cashW: sn.cashing ? (sn._cashW || 0) : 0, color: sn.color, name: sn.name
 
     });
 
@@ -3565,6 +3688,14 @@ function ssKill(victim, killer, lid, io, diag) {
   if (killer && killer.cashing && !killer._cashResolved && killer.alive) {
     killer.usd = (Number(killer.usd) || 0) + (Number(victim.usd) || 0);
     victim.usd = 0;
+    // The same transfer on the authoritative ledger. Banked into the killer's _lamFood — the same
+    // bucket eaten gold food goes into — because from the money's point of view this IS the victim's
+    // stake being collected, just handed over directly instead of via orbs on the floor. The victim's
+    // ledger is cleared in the same breath, so the total across both snakes is unchanged.
+    const _vLam = ssLamCarried(victim);
+    if (_vLam > 0) killer._lamFood = (killer._lamFood || 0) + _vLam;
+    victim._lamFood = 0; victim._lamBase = 0; victim._lamAuth = false;
+    _stakeLam.delete(victim.pid);
     _cashTransfer = true;
   }
   if (sg) {
@@ -4679,6 +4810,16 @@ io.on('connection', socket => {
 
   socket.join(lobbyId);
 
+  // Private per-player channel. The cash-out proof is worth money, so it is sent HERE and not to the
+  // lobby room — `ss-cashout-done` is broadcast to everyone, and a proof riding along with it would
+  // hand every spectator a signed claim on someone else's stake.
+  socket.join('p:' + pid);
+
+  // Ask /api/settle what this player actually deposited, so the value ledger is seeded from the
+  // on-chain record instead of from whatever their client claims on its first ssin. Deliberately not
+  // awaited — see ssFetchStake.
+  if (isPaid) ssFetchStake(pid);
+
 
 
   // Reconnect: if pid already in room, just update socketId and keep all game state
@@ -5471,6 +5612,18 @@ io.on('connection', socket => {
           if (!isSsLobby) io.to(lobbyId).emit('leave', { id: pid });
 
           console.log(`[${lobbyId}] ${name} removed after ${graceMs/1000}s grace`);
+
+          /* PAID PAC-MAN: resolve the wager instead of abandoning it. Deleting the player used to be
+           * the whole story — their `pw:` record just expired after 4h and the stake sat in escrow
+           * credited to nobody, which is real money going quietly unaccounted for.
+           *
+           * FORFEIT TO THE HOUSE, never a refund: once the wager is in it is locked until cash-out, and
+           * a disconnect is not the operator's problem. Snake already does this by shedding the stake as
+           * food; Pac-Man has no food to shed into, so it sweeps. Idempotent — /api/settle GETDELs the
+           * record, so a player who already died or cashed out forfeits nothing.
+           *
+           * SS lobbies are excluded: ssTick's own grace expiry owns that path and already forfeits. */
+          if (!isSsLobby && isPaid) ssForfeitStake(pid, lobbyId);
 
           if (room.players.size === 0) {
 
