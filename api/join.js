@@ -6,7 +6,7 @@
 
 const nacl   = require('tweetnacl');
 const crypto = require('crypto');
-const { kvGet, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvHincrby, kvIncrby, kvHget, kvHset } = require('../lib/kv');
+const { kvGet, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvHincrby, kvIncrby, kvHget, kvHset, kvLpush, kvLtrim } = require('../lib/kv');
 
 // Game token — HMAC-signed proof of payment for the Socket.io game server.
 // Format matches server.js makeGameToken() so the server can validate it.
@@ -538,11 +538,28 @@ module.exports = async function handler(req, res) {
           }
         }
       }
-      await kvHincrby(statsPk,'wagered',lamps);
+      const wagTot=await kvHincrby(statsPk,'wagered',lamps);
       await kvHincrby(statsPk,'games',1);
       // Keep sorted set score in sync (score = current earned lamports)
       const earned=await kvHget(statsPk,'earned');
       await kvZadd('lb:'+game+':earned',Number(earned)||0,walletAddress);
+      /*
+       * PROFIT-CHART POINT FOR THE ENTRY ITSELF — this is the half that was missing.
+       *
+       * Only payouts were ever recorded, so the profile sparkline could physically only slope up:
+       * money going OUT of the player's pocket produced no point at all. Recording the entry (with
+       * cumulative wagered) is what lets the chart dip when they pay in and rise when they cash out,
+       * which is what makes it a real net-profit line rather than a gross-payouts line.
+       *
+       * A death needs no point of its own: the dip already happened here, at the entry, and never
+       * being followed by a cashout IS the loss. That also avoids trusting a client-reported loss
+       * amount, which is not verifiable server-side.
+       */
+      try{
+        const hk='ph:'+game+':hist:'+walletAddress;
+        await kvLpush(hk,JSON.stringify({t:Date.now(),e:Number(earned)||0,w:Number(wagTot)||0,ty:'join',a:lamps}));
+        await kvLtrim(hk,0,199);
+      }catch(_){}
       // Global counters
       await kvHincrby('ph:'+game+':global','totalWagered',lamps);
       await kvHincrby('ph:'+game+':global','gamesPlayed',1);

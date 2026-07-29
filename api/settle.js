@@ -10,11 +10,31 @@ const { kvPing, kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZre
 const BET = require('../lib/betting');
 const PAYOUT = require('../lib/eventpayout');   // pure winner/amount planning (unit-tested offline)
 
-// Appends a timestamped earnings snapshot (for the player-profile chart) and caps the
-// list at 200 points so it can't grow unbounded for long-lived accounts.
-async function pushEarningsPoint(game, address, earned) {
+/*
+ * Appends a timestamped point to the player-profile chart history, capped at 200 points.
+ *
+ * ⚠️ `e` ALONE CANNOT DRAW A PROFIT CHART. It is CUMULATIVE GROSS PAYOUTS, which only ever rises —
+ * so a player who lost money still got a line sloping cheerfully upward. The chart needs
+ * cumulative WAGERED too, because net = e - w, and that is the number that dips when someone loses.
+ *
+ * Records now carry:
+ *   e  cumulative earned (gross payouts)   — as before
+ *   w  cumulative wagered                  — NEW; net profit is e - w
+ *   ty event type ('join' | 'cashout' | 'kill')
+ *   a  THIS event's amount, for the hover tooltip
+ *
+ * Pre-existing records have no `w`; the chart deliberately ignores those rather than mixing scales
+ * (see PlayerCard.jsx) — there is no way to reconstruct historical wagered-at-time-T after the fact.
+ */
+async function pushEarningsPoint(game, address, earned, meta) {
   const key = 'ph:' + game + ':hist:' + address;
-  await kvLpush(key, JSON.stringify({ t: Date.now(), e: Number(earned) || 0 }));
+  const rec = { t: Date.now(), e: Number(earned) || 0 };
+  if (meta) {
+    if (meta.wagered != null) rec.w  = Number(meta.wagered) || 0;
+    if (meta.type)            rec.ty = String(meta.type).slice(0, 12);
+    if (meta.amount != null)  rec.a  = Number(meta.amount) || 0;
+  }
+  await kvLpush(key, JSON.stringify(rec));
   await kvLtrim(key, 0, 199);
 }
 
@@ -2690,7 +2710,8 @@ module.exports = async function handler(req, res) {
               await kvHincrby(pk,'wins',1);
               await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
               await kvHincrby('ph:'+game+':global','totalEarned',payout);
-              await pushEarningsPoint(game,playerAddress,newEarned);
+              const _wagTot=await kvHget(pk,'wagered');
+              await pushEarningsPoint(game,playerAddress,newEarned,{wagered:Number(_wagTot)||0,type:'cashout',amount:payout});
             }catch(_){}
             // Announce the win to Discord — awaited (Vercel can freeze the function the moment the
             // response is sent) but fully guarded, so it never affects the payout or the response.
@@ -2847,7 +2868,8 @@ module.exports = async function handler(req, res) {
             // Gross reward (pre-fee), same reasoning as the cashout path above.
             const newEarned=await kvHincrby(pk,'earned',total||0);
             await kvZadd('lb:'+game+':earned',Number(newEarned)||0,playerAddress);
-            await pushEarningsPoint(game,playerAddress,newEarned);
+            const _wagTotK=await kvHget(pk,'wagered');
+            await pushEarningsPoint(game,playerAddress,newEarned,{wagered:Number(_wagTotK)||0,type:'kill',amount:total||0});
             // (Victim's death is now recorded by the victim's own 'stat-loss' call — the single
             // source of truth — so we deliberately DON'T bump it here anymore, to avoid counting
             // the same death twice.)

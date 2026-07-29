@@ -1149,7 +1149,8 @@ body.mctl #voice-speakers{left:150px;}
   <canvas id="gc"></canvas>
   <div id="game-hud">
     <div class="gi"><span class="gl">LENGTH</span><span class="gv hg" id="hud-len">0</span></div>
-    <div class="gi"><span class="gl">POT</span><span class="gv hc" id="hud-pot">FREE</span></div>
+    <!-- POT removed from this top-center HUD: the top-right #leaderboard already shows TOTAL POT,
+         and it reads better there. Two pot readouts on screen at once was just noise. -->
     <div class="gi"><span class="gl">PING</span><span class="gv" id="hud-ping" style="color:var(--g)">--</span></div>
     <div class="gi"><span class="gl">FPS</span><span class="gv" id="hud-fps" style="color:var(--g)">--</span></div>
   </div>
@@ -7144,7 +7145,11 @@ function launchSnakeGame(){
     // readout. Clearing the inline value hands control back to the stylesheet; the mobile controls
     // in this list are re-governed by _showMobileCtl() a few lines below either way.
     _specOnly.forEach(id=>{ const el=document.getElementById(id); if(el)el.style.display=''; });
-    document.getElementById('hud-pot').textContent=ST.lobbyUsd===0?'FREE':'$'+(ST.lobbyUsd*2);
+    // #hud-pot no longer exists (pot lives in the top-right leaderboard). Guarded rather than deleted
+    // outright so a stale cached copy of this page can't throw on null here — this runs on every
+    // spectate exit, and a TypeError would take the whole HUD restore down with it.
+    const _hp=document.getElementById('hud-pot');
+    if(_hp)_hp.textContent=ST.lobbyUsd===0?'FREE':'$'+(ST.lobbyUsd*2);
   }
 
   document.addEventListener('mousemove',onMouseMove);
