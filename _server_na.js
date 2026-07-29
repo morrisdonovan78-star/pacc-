@@ -5514,19 +5514,81 @@ io.on('connection', socket => {
 
 const _ADMIN_SECRET = (process.env.ADMIN_SECRET || '').trim();
 
+/*
+
+ * These routes read every player's wallet address and can kick, warn, broadcast to, and force-end
+
+ * a live PAID lobby. This check used to read the header and then call next() unconditionally, so
+
+ * all of that was reachable by anyone who knew the path. The likely reason it was left that way:
+
+ * ADMIN_SECRET was never set on these boxes, so enforcing it as written would have locked the
+
+ * panel out entirely.
+
+ *
+
+ * The proof is therefore a GAME_SECRET HMAC -- the same server-to-server trust /wager-event and
+
+ * elim-lock already run on. Both this process and the Vercel function already hold GAME_SECRET,
+
+ * so nothing has to be created, copied or rotated. The PATH is signed along with the timestamp,
+
+ * so a captured /admin/status proof cannot be replayed against /admin/kick.
+
+ *
+
+ * ADMIN_SECRET still works if it is ever set, which keeps a hand-run curl possible. Fails CLOSED:
+
+ * with neither secret configured there is no admin access, rather than open access.
+
+ */
+
 function requireAdmin(req, res, next) {
 
   const s = (req.headers['x-admin-secret'] || req.query.secret || '').trim();
 
-  next();
+  if (_ADMIN_SECRET && s.length === _ADMIN_SECRET.length) {
+
+    try { if (crypto.timingSafeEqual(Buffer.from(s), Buffer.from(_ADMIN_SECRET))) return next(); } catch (_) {}
+
+  }
+
+  const proof = (req.headers['x-admin-proof'] || '').toString().trim();
+
+  const ats   = Number(req.headers['x-admin-ts'] || 0);
+
+  if (GAME_SECRET && proof && ats && Math.abs(Date.now() - ats) <= 300000) {
+
+    const expected = crypto.createHmac('sha256', GAME_SECRET).update('admin:' + req.path + ':' + ats).digest('hex');
+
+    try { if (crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(proof))) return next(); } catch (_) {}
+
+  }
+
+  console.warn('[admin] DENIED ' + req.method + ' ' + req.path + ' proof=' + (proof ? 'yes' : 'no') + ' skewMs=' + (ats ? Math.abs(Date.now() - ats) : 'n/a'));
+
+  return res.status(403).json({ error: 'Forbidden' });
 
 }
 
 app.get('/admin/status', requireAdmin, (req, res) => {
 
-  const LOBBY_IDS = ['free-lobby','ss-free-lobby','ss-paid-lobby-1','ss-paid-lobby-5','paid-lobby-1','paid-lobby-5','paid-lobby-25'];
+  // A hardcoded list can only ever report the lobbies that existed when it was written, so every
 
-  const rooms = {};
+  // custom-stake room players actually open was missing while the fixed ids were drawn empty.
+
+  // The live maps are the truth; BASE_IDS stays only as a floor so a quiet site still has shape.
+
+  const BASE_IDS = ['free-lobby','ss-free-lobby','ss-paid-lobby-1','ss-paid-lobby-5','paid-lobby-1','paid-lobby-5','paid-lobby-25'];
+
+  const LOBBY_IDS = [...new Set([...BASE_IDS, ...ssGames.keys(), ...rooms.keys()])];
+
+  // Named roomsOut, not rooms: a `const rooms` here would shadow the module-level PAC map above
+
+  // for the entire function body, making the .keys() call one line up a TDZ ReferenceError.
+
+  const roomsOut = {};
 
   const inLobby = new Set();
 
@@ -5538,7 +5600,7 @@ app.get('/admin/status', requireAdmin, (req, res) => {
 
     if (room) for (const sid of room) { const sk = io.sockets.sockets.get(sid); if (sk) { players.push({ socketId: sid, walletAddress: sk.walletAddress||null, playerName: sk.playerName||null }); inLobby.add(sid); } }
 
-    rooms[lid] = players;
+    roomsOut[lid] = players;
 
   }
 
@@ -5546,7 +5608,7 @@ app.get('/admin/status', requireAdmin, (req, res) => {
 
   for (const [sid, sk] of io.sockets.sockets) { if (!inLobby.has(sid)) others.push({ socketId: sid, walletAddress: sk.walletAddress||null, playerName: sk.playerName||null }); }
 
-  res.json({ rooms, others, timestamp: Date.now() });
+  res.json({ rooms: roomsOut, others, timestamp: Date.now() });
 
 });
 
