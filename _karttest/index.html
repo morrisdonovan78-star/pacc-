@@ -903,7 +903,12 @@ const CTRL_ROWS = [
   ['Boost',      'SPACE',      'RB'],
   ['Attack',     'Q',          'Y'],
   ['Defend',     'E',          'A'],
-  ['Mirror',     ', . ; ’',  '—'],
+  // Split out so each key says what it does. One row reading ", . ; '" tells you keys exist and
+  // nothing about which does what, and the mirror is the one control people actually want to adjust.
+  ['Mirror angle', ', .', '—'],
+  ['Mirror place', ';',   '—'],
+  ['Mirror size',  "'",   '—'],
+  ['Mirror on/off','K',   '—'],
   ['Lobby',      'L',          'Start'],
   ['Leave',      '—',        'hold B'],
 ];
