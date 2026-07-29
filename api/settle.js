@@ -2750,11 +2750,23 @@ module.exports = async function handler(req, res) {
       // Immediately block victim cashout: set dead flag + atomically remove their wager.
       // This runs BEFORE the TX so even if the cashout request is in-flight right now,
       // it will hit the dead check or find no wager record and be refused.
+      // kvGetDel returns the victim's REAL recorded stake at the exact moment of death — this is the
+      // authoritative reward basis. Two players joining a persistent lobby minutes or hours apart can
+      // deposit different LAMPORT amounts for the "same" USD entry as SOL's price moves between them,
+      // so the killer's OWN pw: (used here previously) is the wrong number whenever it differs from
+      // what THIS SPECIFIC victim actually staked. The client-reported wagerLamports is untrusted (a
+      // modified client could claim any figure), so it is logged for comparison only, never paid.
+      let victimStakeLamports = 0;
       if (vaBody && vaBody !== playerAddress && vaBody.length > 20) {
-        await Promise.all([
+        const [, delVal] = await Promise.all([
           kvSet('dead:' + vaBody, '1', 600),
           kvGetDel('pw:' + vaBody),
-        ]).catch(() => {});
+        ]).catch(() => [null, null]);
+        victimStakeLamports = Number(delVal) || 0;
+      }
+      if (victimStakeLamports !== Number(body.wagerLamports)) {
+        console.warn('[settle] kill amount mismatch — victim pw:=' + victimStakeLamports +
+                      ' client claimed=' + body.wagerLamports + ' killer=' + playerAddress.slice(0, 8));
       }
 
       // Retry once on on-chain fail — concurrent kills can race on the shared escrow balance
@@ -2765,23 +2777,29 @@ module.exports = async function handler(req, res) {
         console.log('[settle] kill attempt=' + attempt + ' bal=' + killBal + ' blockhash=' + killHash.slice(0,8) + '… killer=' + playerAddress.slice(0,8) + '… wager=' + body.wagerLamports);
         const killAvail = killBal - TX_FEE;
         if (killAvail <= 0) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Escrow empty' }); }
-        // Kill reward capped by killer's KV-recorded wager — prevents anyone without an active deposit from draining escrow
+        // Must have an active deposit to claim kill rewards at all (prevents a wallet with no stake in
+        // the game from draining escrow), but the AMOUNT paid is the victim's own stake, not the
+        // killer's — see victimStakeLamports above.
         const kvKillWager = Number(await kvGet('pw:' + playerAddress)) || 0;
         if (kvKillWager <= 0) {
           clearTimeout(guard); done = true;
           return res.status(403).json({ error: 'No active wager on record — must join with a deposit before claiming kill rewards' });
         }
+        if (victimStakeLamports <= 0) {
+          clearTimeout(guard); done = true;
+          return res.status(403).json({ error: 'Victim had no recorded wager — nothing to claim' });
+        }
         // REFUSE rather than silently pay less than owed (same reasoning as cashout above). Release the
         // kill-proof claim so a retry with the same proof (still within its 5-minute freshness window)
         // can collect the FULL reward once escrow recovers, instead of burning the proof on a shortfall.
-        if (kvKillWager > killAvail) {
+        if (victimStakeLamports > killAvail) {
           await kvDel('kpu:' + kpBody).catch(() => {});
-          betAlert('KILL REWARD UNDERFUNDED — owed ' + kvKillWager + ' but escrow only has ' + killAvail +
+          betAlert('KILL REWARD UNDERFUNDED — owed ' + victimStakeLamports + ' but escrow only has ' + killAvail +
                    ' spendable. killer=' + playerAddress.slice(0, 8));
           clearTimeout(guard); done = true;
           return res.status(503).json({ error: 'Escrow temporarily low — kill reward held, try again', retry: true });
         }
-        let total = kvKillWager;
+        let total = victimStakeLamports;
         const killRemaining = killAvail - total;
         if (killRemaining > 0 && killRemaining < RENT_MIN) { total = killAvail; }
         const killRake = Math.floor(total * CREATOR_FEE_PCT);
