@@ -2298,6 +2298,29 @@ async function joinLobby(usd){
   stopLobbyCountPoll();
   go('scr-mm');
   try{
+    /*
+     * ASK BEFORE CHARGING. Ported from the snake client, where this was the fix for "it took my
+     * dollar and sent me home". The deposit below is instant and irreversible; the thing that turns
+     * it into a seat is /api/join. Doing them in that order means every outage there - the project
+     * throttled for exceeding its compute allowance, a bad deploy, a missing GAME_SECRET - lands as
+     * charged-and-not-let-in. The probe touches no chain and no storage, so it cannot itself be the
+     * thing that fails, and NOT CHARGED is said out loud because a join dying right after a wallet
+     * prompt looks identical to one that took the money.
+     */
+    lg('mm-log','Checking servers…','lhi');
+    {
+      let _pf=null;
+      try{
+        const _pfr=await fetch('/api/join',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({preflight:true,lobbyId:lobbyIdForPac(usd)}),signal:AbortSignal.timeout(9000)});
+        if(_pfr.ok)_pf=await _pfr.json().catch(()=>null);
+      }catch(_){}
+      if(!_pf||!_pf.ready){
+        lg('mm-log','Servers unavailable — nothing was charged','lerr');
+        addToast('⚠️ Game servers are not accepting joins right now — you were NOT charged. Try again shortly.','#FFD700',7000);
+        throw new Error('Game servers unavailable — you were NOT charged');
+      }
+    }
     lg('mm-log','Creating escrow…','lhi');
     ST.hasEscrow=false;
     const escPubkey=new solanaWeb3.PublicKey(ESCROW_PUBKEY);
