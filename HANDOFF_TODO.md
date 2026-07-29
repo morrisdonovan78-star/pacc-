@@ -170,7 +170,8 @@ clipboard fixed everywhere · CDN caching + visibility-gated polling · kart mir
 1. **One paid kart race** — confirm a payout actually lands. The kvSetNX fix is unproven in the wild.
 2. **One $1 paid join** and **one bet on `/bets`** — both untested with real money.
 3. **Reshare referral links** — `GAFQAY` for LUCKMAN; the old codes are dead.
-4. **$0.40 owed** — four kart races that charged and never paid.
+4. ~~$0.40 owed for four unpaid kart races~~ — **the owner refunded this themselves on 2026-07-29.**
+   Settled; do not raise it again.
 5. **Vercel Pro or wait for reset** — over on Fluid Active CPU.
 6. **The $7 on `CVW1EsXZ…PRAk` is NOT on any server** (65 accounts, 18 embedded wallets, 0 old-game
    wallets, no match). Only in the original browser's `localStorage` (`ss_kp_*` / `pa_kp_*`). Don't
