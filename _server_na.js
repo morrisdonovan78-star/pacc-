@@ -26,7 +26,7 @@ function ssOwnerKey() {
 }
 // Canonical JSON over a FIXED key order — both sides must hash byte-identical text.
 function ssTuneCanon(t) {
-  const k = ['grazePx', 'grazeHead', 'bodyScale', 'grazeReach', 'circDeg', 'faceDeg', 'n2nScale', 'rule'];
+  const k = ['grazePx', 'grazeHead', 'bodyScale', 'grazeReach', 'circDeg', 'faceDeg', 'n2nScale', 'grazeScaleK', 'rule'];
   return JSON.stringify(k.map((x) => (t[x] === undefined || t[x] === null ? null : t[x])));
 }
 function ssOwnerVerify(lobbyId, tuning, ts, sigB64) {
@@ -44,7 +44,15 @@ function ssOwnerVerify(lobbyId, tuning, ts, sigB64) {
 // The tuning NEW lobbies start from. Owner changes update this (and every live lobby) and are saved to
 // disk, so a pm2 restart doesn't silently snap the whole game back to the shipped constants.
 const SS_TUNING_FILE = '/opt/pac-arena/ss-tuning.json';
-let SS_TUNING_DEFAULT = { n2nScale: 0.30, bodyScale: 0.75, grazePx: 3.3, grazeHead: 1.20, grazeReach: 1.00, circDeg: 360, faceDeg: 21, rule: 'biggest_wins' };
+// Two base-radius snakes (ssSectionRadius(0)=8 each). The anchor where graze scaling is a no-op.
+// Two snakes at the STARTING length (INIT_SECTIONS = 30 -> ssSectionRadius = 24.17 each).
+// This is the size every player begins at, so it is the only sane place for scaling to be a
+// no-op. It was 16 (two ns=0 snakes) - a size that NEVER occurs in play, so the 'unchanged'
+// anchor was unreachable and every real size measured as a departure from it.
+const SS_GRAZE_REF_REACH = 48.34;
+// Runtime hitbox changes are refused outright while this is true - see the ss-tune handler.
+const SS_TUNE_LOCKED = true;
+let SS_TUNING_DEFAULT = { n2nScale: 0.30, bodyScale: 0.75, grazePx: 3.3, grazeHead: 1.20, grazeReach: 1.00, grazeScaleK: 0.75, circDeg: 360, faceDeg: 21, rule: 'biggest_wins' };
 // Load the owner's saved tuning. This USED to run right here as a bare try-block, and it threw on
 // every single boot: `fs` is declared ~270 lines below and ssClampTuning falls back to SS_CAMP_*_D
 // constants declared ~950 lines below, and a hoisted `const` is not initialised until its line runs.
@@ -79,6 +87,13 @@ function ssClampTuning(t, cur) {
     grazePx:    num(t.grazePx,    0.00, 20.0, c.grazePx    != null ? c.grazePx    : 3.3),
     grazeHead:  num(t.grazeHead,  0.50, 2.50, c.grazeHead  != null ? c.grazeHead  : 1.20),
     grazeReach: num(t.grazeReach, 0.20, 2.00, c.grazeReach != null ? c.grazeReach : 1.00),
+    // 0 = flat px (old behaviour), 1 = identical feel at every size. 0.75 keeps a small edge
+    // for smaller snakes while removing the 2.6x gap. See the collision site for the arithmetic.
+    // NEGATIVE k is allowed and useful: it makes the graze margin SHRINK as snakes grow. Because
+    // killDist grows with size, a smaller absolute margin on a big snake is a smaller RELATIVE
+    // change - which is what lets the skim depth fall away with size while the difficulty stays
+    // flat. k>0 does the opposite (constant relative depth, difficulty varies); k=0 is flat px.
+    grazeScaleK: num(t.grazeScaleK, -2.00, 1.50, c.grazeScaleK != null ? c.grazeScaleK : 0.75),
     circDeg:    Math.round(num(t.circDeg, 90, 720, c.circDeg != null ? c.circDeg : 360)),
     faceDeg:    Math.round(num(t.faceDeg,  1,  90, c.faceDeg != null ? c.faceDeg : 21)),
     rule:       (['biggest_wins', 'smallest_wins', 'random', 'both_die'].indexOf(t.rule) >= 0) ? t.rule : (c.rule || 'biggest_wins'),
@@ -3331,6 +3346,8 @@ function ssCheckCollisionsNose(sg, lid, io) {
 
   const grazeReach = T.grazeReach != null ? T.grazeReach : 1.0;
 
+  const grazeScaleK = T.grazeScaleK != null ? T.grazeScaleK : 0.75;
+
   const DBG = !!T.dbg;   // owner DEBUG toggle — gates ALL per-substep instrumentation. Default OFF so normal play has
 
                          // ZERO logging / full-scan overhead (the verbose logs were lagging the shared node → paid ping).
@@ -3361,11 +3378,36 @@ function ssCheckCollisionsNose(sg, lid, io) {
 
       const skimOn = aCirc || !!D.circleActive;
 
-      const margin = skimOn ? skimMargin : 0;
-
       const RaEff  = RaBase * (skimOn ? grazeHead : 1);        // grazer head hitbox scale (graze only)
 
       const Rd = R(D), RdEff = Rd * (skimOn ? grazeBody : 1);   // target body/trail radius scale (graze only)
+
+      /*
+       * GRAZE FORGIVENESS MUST SCALE WITH THE SNAKES, OR IT ONLY EXISTS FOR SMALL ONES.
+       *
+       * The kill test is `distance < (Ra + Rd) - margin`, so `margin` is how far you may sink into
+       * a body and live. Both radii grow with length (ssSectionRadius: 8 + (ns*5)^0.6*0.8) while
+       * margin was a FLAT pixel count -- so the forgiveness you actually feel, margin/reach,
+       * collapsed as you grew:
+       *     two base snakes  reach 16.0  ->  3.35/16.0 = 21%
+       *     two size-20      reach 41.4  ->  3.35/41.4 =  8%
+       * A 2.6x difference in feel for the identical input. That is the whole reason grazing felt
+       * easy at size 10 and stiff at 20+; it is arithmetic, not tuning taste.
+       *
+       * Scaling margin by reach^k restores it. k is a BLEND, not a switch:
+       *     k=0  the old behaviour (absolute px, big snakes punished)
+       *     k=1  perfectly identical feel at every size
+       *     k=0.75 (default) nearly equal, with a small edge still left to smaller snakes --
+       *          21% -> 16.5% instead of 21% -> 8%, so being small is still slightly kinder,
+       *          which is the reward for the risk of being small.
+       *
+       * Anchored at SS_GRAZE_REF_REACH (two base-radius snakes), so the multiplier is exactly 1
+       * there: the smallest-size feel -- the one that was already liked -- is UNCHANGED, and only
+       * the fall-off away from it is corrected. Nothing gets harder than it is today.
+       */
+      const margin = skimOn
+        ? skimMargin * Math.pow(Math.max(1, RaBase + Rd) / SS_GRAZE_REF_REACH, grazeScaleK)
+        : 0;
 
       const reach = RaEff + RdEff, dpath = D.path;
 
@@ -3559,7 +3601,11 @@ function wgEnabled(lid) {
   return /^ss-paid-lobby-\d+(?:\.\d+)?$/.test(String(lid)) || String(lid) === 'ss-test-lobby';
 }
 const WG_SETTLE_URL = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
-const WG_REGION     = String(process.env.WG_REGION || 'NA').toUpperCase() === 'EU' ? 'EU' : 'NA';
+// Falls back to REGION, which is what ecosystem.config.js actually sets. WG_REGION was never
+// defined on either box, so the EU node silently signed every roster as 'NA' - and region is part
+// of the signed canon, so EU wagers were recorded against the wrong region. Consistent enough to
+// verify (both ends said NA) but wrong for anything that routes settlement by region.
+const WG_REGION     = String(process.env.WG_REGION || process.env.REGION || 'NA').toUpperCase() === 'EU' ? 'EU' : 'NA';
 const WG_ROSTER_MS  = 4000;    // how often the signed roster is rebroadcast
 const WG_ROSTER_TTL = 180000;  // how long a signed roster entry stays valid
 const WG_RECON_MS   = 20000;   // backstop re-sync of live wagers (survives a server restart)
@@ -4208,6 +4254,41 @@ app.post('/wager-event', express.json({ limit: '64kb' }), (req, res) => {
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: 'wager-event failed' });
+  }
+});
+
+/*
+ * SIGNED BETTABLE ROSTER OVER HTTP.
+ *
+ * The roster was only ever pushed over the game socket (ss-wager-roster), so the only place a bet
+ * could be CREATED was inside a live arena with a socket already open. The hub's /bets page has no
+ * socket, which is why it could list and take bets but never open one.
+ *
+ * This is the same data and the same signatures wgRosterEntry already builds - nothing new is
+ * trusted and nothing new is signable. The signature still binds (region, lobby, pid, ipHash, exp),
+ * so a roster fetched here can only ever create a wager on a snake that really is live in that
+ * arena, and it still expires.
+ *
+ * Public read: it discloses who is currently racing for money, which the spectator view and the
+ * lobby counts already show.
+ */
+app.get('/wager-roster', (_, res) => {
+  try {
+    const exp = Date.now() + WG_ROSTER_TTL;   // same TTL the socket push uses - one expiry rule, not two
+    const arenas = [];
+    for (const [lid, sg] of ssGames) {
+      if (!lid.startsWith('ss-')) continue;
+      const snakes = wgBettableSnakes(sg);
+      if (!snakes.length) continue;
+      arenas.push({
+        lobby: lid,
+        region: WG_REGION,
+        subjects: snakes.map((sn) => wgRosterEntry(lid, sn, exp)),
+      });
+    }
+    res.json({ ok: true, region: WG_REGION, exp, arenas });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: (e && e.message) || 'roster failed' });
   }
 });
 
@@ -5216,6 +5297,17 @@ io.on('connection', socket => {
       if (!lobbyId.startsWith('ss-') || !d || typeof d !== 'object') return;
       const t = d.tuning && typeof d.tuning === 'object' ? d.tuning : null;
       if (!t) return;
+      /*
+       * HITBOXES ARE LOCKED. The values in ss-tuning.json are the ones the game is meant to run,
+       * arrived at deliberately, and nothing may change them at runtime - not a modified client,
+       * not a replayed owner signature, not the owner. Combat feel is not something to be
+       * adjustable mid-session by anyone, because a hitbox that can move is a hitbox nobody in a
+       * paid lobby can trust.
+       *
+       * TO UNLOCK: set SS_TUNE_LOCKED to false and restart. The owner-signature check below is
+       * untouched and still governs everything once unlocked.
+       */
+      if (SS_TUNE_LOCKED) { socket.emit('ss-notice', 'Hitbox tuning is locked'); return; }
       if (!ssOwnerVerify(lobbyId, t, d.ts, d.sig)) { socket.emit('ss-notice', 'Tuning rejected: not signed by the owner'); return; }
       const next = ssClampTuning(t, SS_TUNING_DEFAULT);
       // GLOBAL: one adjustment retunes every arena on this node, so the owner doesn't have to repeat
