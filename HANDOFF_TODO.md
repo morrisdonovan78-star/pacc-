@@ -29,6 +29,36 @@ Rebuild `srv.py` in scratchpad (paramiko `read_bytes` / `write_bytes` / `run`); 
 
 ---
 
+## 🚨 UNVERIFIED — FIXED IN CODE, NEVER PROVEN WITH REAL MONEY
+
+**Read this before you trust anything in the SHIPPED list.** The owner is a solo operator and could
+not test these alone — they need other players and planned to test **2026-07-30 with others**. Until
+they report back, treat every item here as *believed fixed, not known fixed*.
+
+- **Kart payouts.** The `kvSetNX` bug suppressed every payout since launch. The fix is one line and
+  the code path is proven, but **no payout has been observed landing on chain.** If the owner says
+  they raced and were not paid, start here — do NOT assume it works.
+- **Paid joins** (snake, Pac-Man, blackjack). Preflight-before-charging, the deposit-reuse rule and
+  the 8/8 unit tests all pass, but **no real $1 join has been made.**
+- **Bet creation on `/bets`.** Live, takes a deposit, **never used.**
+- **Kart entry charging.** After the charge-loop incident this was rebuilt so only a human press can
+  spend. One person can partly test it; the multi-racer paths (ready window with 2+, pot split, ties)
+  need others.
+- **Spectator chat / voice**, snake and Pac-Man. Verified with synthetic sockets, **never with two
+  real humans.**
+- **Mid-race disconnects.** Instrumented only. Needs a real drop to produce the log line.
+
+**How to help when they do test:** ask for the exact time and lobby, then read
+`/root/.pm2/logs/kart-arena-out.log` and `pac-arena-out.log` on BOTH nodes, and check the escrow's
+on-chain history (`2SYFfCsSmKr8qwK1AfWd36JtAc1BCaRaSSxyECKUJjBb`) for the matching payout. Charges are
+easy to see; payouts are the thing that has been silently missing.
+
+⚠️ **Do not ship more changes to the paid path while it is untested.** Three separate money incidents
+happened in one session, and the one that cost the owner real SOL came from fixing a real bug without
+accounting for how the client behaved. Get one clean end-to-end test first.
+
+---
+
 ## ⚠️ TRAPS THAT COST REAL HOURS
 
 1. **snakepot.com serves its OWN copy of every game** from `pulp-platform/public/game/*.html`, not
