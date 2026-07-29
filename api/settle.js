@@ -792,6 +792,13 @@ async function wgLoad(id) {
 }
 async function wgSave(w) { await kvSet('wg:' + w.id, JSON.stringify(w), WG_TTL); return w; }
 
+// Owner's explicit call: a wager that fails to pay out ONCE stops being touched automatically, forever
+// — never retried by the game server's tick, never retried by wager-sweep. Reason: the owner refunds
+// failures by hand, and an automatic retry succeeding LATER (after they already paid manually) would
+// double-pay the same player. One real attempt, then a permanent stop, is safer than silent retries.
+async function wgIsHeld(id) { return !!(await kvGet('wgheld:' + id)); }
+async function wgSetHeld(id, reason) { await kvSetPerm('wgheld:' + id, String(reason || 'payout failed').slice(0, 200)).catch(() => {}); }
+
 // The game server signs each bettable snake so a client cannot invent a subject that could never
 // settle. Mirrors the elim-lock trust model: HMAC over region+lobby+pid+name+ipHash+expiry.
 // ipHash lets us catch a player betting on their own snake from a second account (see wgSelfBetCheck).
@@ -1453,6 +1460,7 @@ module.exports = async function handler(req, res) {
         }
         // 2) unmatched and closed → refund the creator in full
         if (w.status === P2P.STATUS.OPEN && now >= Number(w.lockTs || 0)) {
+          if (await wgIsHeld(w.id)) continue;   // failed once already — owner handles it, never auto-retry
           const lock = await kvSetNX('lock:wg:' + w.id, '1', 45);
           if (!lock) continue;
           try {
@@ -1470,7 +1478,13 @@ module.exports = async function handler(req, res) {
             }
             const amt = P2P.returnAmount(cur.stakeLamports);
             const pay = await wgPayOne(esc, cur.creator, amt, 'wager-sweep-return');
-            if (!pay.ok) { await kvDel('wgpaid:' + w.id).catch(() => {}); continue; }
+            if (!pay.ok) {
+              await kvDel('wgpaid:' + w.id).catch(() => {});
+              await wgSetHeld(w.id, 'wager-sweep-return failed: ' + (pay.reason || 'unknown'));
+              betAlert('wager ' + w.id + ' HELD after a failed sweep-return (' + (pay.reason || 'unknown') +
+                       ') — will NOT auto-retry. Refund the creator by hand if this was real, then leave it.');
+              continue;
+            }
             await kvHincrby(BET_LEDGER, 'betLiability', -amt).catch(() => {});
             await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
             cur.status = P2P.STATUS.RETURNED; cur.payoutTx = pay.sig; cur.settledTs = Date.now(); cur.fee = 0;
@@ -1496,6 +1510,7 @@ module.exports = async function handler(req, res) {
         //      the first transfer resumes without paying the same person twice.
         if (w.status === P2P.STATUS.MATCHED && w.acceptor &&
             now - Number(w.matchedTs || w.createdTs || 0) >= WG_VOID_AFTER_MS) {
+          if (await wgIsHeld(w.id)) continue;   // failed once already — owner handles it, never auto-retry
           const lock = await kvSetNX('lock:wg:' + w.id, '1', 45);
           if (!lock) continue;
           try {
@@ -1514,7 +1529,13 @@ module.exports = async function handler(req, res) {
               await kvHincrby(BET_LEDGER, 'betLiability', -amt).catch(() => {});
               await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
             }
-            if (!paidBoth) { await kvDel('wgpaid:' + w.id).catch(() => {}); continue; }  // retry next sweep
+            if (!paidBoth) {
+              await kvDel('wgpaid:' + w.id).catch(() => {});
+              await wgSetHeld(w.id, 'wager-void-refund failed for ' + w.id);
+              betAlert('wager ' + w.id + ' HELD after a failed VOID refund — will NOT auto-retry. ' +
+                       'Refund both sides by hand if this was real, then leave it.');
+              continue;
+            }
             cur.status = P2P.STATUS.RETURNED; cur.voided = true; cur.fee = 0;
             cur.payoutTx = txs[0] || null; cur.settledTs = Date.now();
             await wgSave(cur);
@@ -1563,6 +1584,10 @@ module.exports = async function handler(req, res) {
           clearTimeout(guard); done = true;
           return res.status(200).json({ ok: true, already: true, wager: wgPublic(w) });
         }
+        if (await wgIsHeld(wid)) {   // failed once already — owner handles it manually, never auto-retry
+          clearTimeout(guard); done = true;
+          return res.status(200).json({ ok: false, held: true, error: 'held for manual review — refund by hand if needed, will not auto-retry' });
+        }
         const r = P2P.resolveWager(w, winningSide);
         if (!r) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'wager is not settleable' }); }
         // Single-pay marker claimed BEFORE the transfer — a crash mid-send can never double-pay.
@@ -1573,9 +1598,12 @@ module.exports = async function handler(req, res) {
         // Winner is paid and the 8% is swept to the fee wallet in the SAME transaction.
         const pay = await wgPayWinnerAndFee(esc, r.winner, r.payout, r.fee, 'wager-settle');
         if (!pay.ok) {
-          await kvDel('wgpaid:' + wid).catch(() => {});   // release so a funded retry can pay
+          await kvDel('wgpaid:' + wid).catch(() => {});
+          await wgSetHeld(wid, 'wager-settle failed: ' + (pay.reason || 'unknown'));
+          betAlert('wager ' + wid + ' HELD after a failed settle (' + (pay.reason || 'unknown') +
+                   ') — will NOT auto-retry. Refund the winner by hand if this was real, then leave it.');
           clearTimeout(guard); done = true;
-          return res.status(503).json({ error: 'payout held: ' + (pay.reason || 'unknown'), retry: true });
+          return res.status(503).json({ error: 'payout held: ' + (pay.reason || 'unknown'), held: true });
         }
         // The whole pot leaves bet liability. accruedFee is NOT incremented any more: the fee has
         // physically left escrow to the fee wallet, so tracking it as a balance still sitting here
@@ -1861,6 +1889,10 @@ module.exports = async function handler(req, res) {
         const w = await wgLoad(wid);
         if (!w) { clearTimeout(guard); done = true; return res.status(404).json({ error: 'wager not found' }); }
         if (w.status === P2P.STATUS.RETURNED) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+        if (await wgIsHeld(wid)) {   // failed once already — owner handles it manually, never auto-retry
+          clearTimeout(guard); done = true;
+          return res.status(200).json({ ok: false, held: true, error: 'held for manual review — refund by hand if needed, will not auto-retry' });
+        }
         /*
          * REVIVE A LAPSED RESERVATION FIRST — otherwise this is a dead end holding real money.
          *
@@ -1892,8 +1924,11 @@ module.exports = async function handler(req, res) {
         const pay = await wgPayOne(esc, w.creator, amt, 'wager-return');
         if (!pay.ok) {
           await kvDel('wgpaid:' + wid).catch(() => {});
+          await wgSetHeld(wid, 'wager-return failed: ' + (pay.reason || 'unknown'));
+          betAlert('wager ' + wid + ' HELD after a failed return (' + (pay.reason || 'unknown') +
+                   ') — will NOT auto-retry. Refund the creator by hand if this was real, then leave it.');
           clearTimeout(guard); done = true;
-          return res.status(503).json({ error: 'refund held: ' + (pay.reason || 'unknown'), retry: true });
+          return res.status(503).json({ error: 'refund held: ' + (pay.reason || 'unknown'), held: true });
         }
         await kvHincrby(BET_LEDGER, 'betLiability', -amt).catch(() => {});
         await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
@@ -2585,7 +2620,16 @@ module.exports = async function handler(req, res) {
           console.log('[settle] cashout attempt=' + attempt + ' bal=' + bal + ' blockhash=' + blockhash.slice(0,8) + '… player=' + playerAddress.slice(0,8) + '…');
           const avail = bal - TX_FEE;
           if (avail <= 0) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'Escrow balance too low to cashout — try again shortly' }); }
-          let payout = wagerLamports > 0 ? Math.min(wagerLamports, avail) : avail;
+          // REFUSE rather than silently pay less than owed — escrow being thinner than a player's own
+          // tracked stake means something upstream is wrong (concurrent draw, manual withdrawal, a stuck
+          // payout eating the float); clamping here would send them home shortchanged with zero signal
+          // to anyone. Throwing routes into the catch below, which restores pw: and tells them to retry.
+          if (wagerLamports > 0 && avail < wagerLamports) {
+            betAlert('CASHOUT UNDERFUNDED — owed ' + wagerLamports + ' but escrow only has ' + avail +
+                     ' spendable. player=' + playerAddress.slice(0, 8) + ' game=' + game);
+            throw new Error('escrow underfunded: owed ' + wagerLamports + ' avail ' + avail);
+          }
+          let payout = wagerLamports > 0 ? wagerLamports : avail;
           const remaining = avail - payout;
           if (remaining > 0 && remaining < RENT_MIN) { payout = avail; }
           const rake = Math.floor(payout * CREATOR_FEE_PCT);
@@ -2727,7 +2771,17 @@ module.exports = async function handler(req, res) {
           clearTimeout(guard); done = true;
           return res.status(403).json({ error: 'No active wager on record — must join with a deposit before claiming kill rewards' });
         }
-        let total = Math.min(kvKillWager, killAvail);
+        // REFUSE rather than silently pay less than owed (same reasoning as cashout above). Release the
+        // kill-proof claim so a retry with the same proof (still within its 5-minute freshness window)
+        // can collect the FULL reward once escrow recovers, instead of burning the proof on a shortfall.
+        if (kvKillWager > killAvail) {
+          await kvDel('kpu:' + kpBody).catch(() => {});
+          betAlert('KILL REWARD UNDERFUNDED — owed ' + kvKillWager + ' but escrow only has ' + killAvail +
+                   ' spendable. killer=' + playerAddress.slice(0, 8));
+          clearTimeout(guard); done = true;
+          return res.status(503).json({ error: 'Escrow temporarily low — kill reward held, try again', retry: true });
+        }
+        let total = kvKillWager;
         const killRemaining = killAvail - total;
         if (killRemaining > 0 && killRemaining < RENT_MIN) { total = killAvail; }
         const killRake = Math.floor(total * CREATOR_FEE_PCT);
