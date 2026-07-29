@@ -2502,7 +2502,8 @@ function ssTick(lid, io) {
       // or the stake read never landed) is not an error: settle then falls back to the old capped
       // client claim, so a cash-out is never blocked by this — it is only ever made honest by it.
       const _cp = ssCashProof(_cs, lid);
-      if (_cp) io.to('p:' + _cs.pid).emit('ss-cash-proof', _cp);
+      if (_cp) { io.to('p:' + _cs.pid).emit('ss-cash-proof', _cp);
+        console.log(`[${lid}] cash proof MINTED for ${String(_cs.pid).slice(0, 8)} lam=${_cp.lam} base=${_cp.base} food=${_cp.lam - _cp.base}`); }
       else if (ssIsPaidLobby(lid)) console.warn(`[${lid}] NO cash proof for ${String(_cs.pid).slice(0, 8)} — settle will use the capped client claim`);
       _cs.alive = false; _cs._killedAt = Date.now(); _cs.path = []; _cs.segs = [];
       // Ledger consumed. The proof is the claim now, so this snake's money must not also drop as food
