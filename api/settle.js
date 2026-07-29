@@ -70,7 +70,29 @@ function refCodeFor(seed) {
 // Ensure a wallet has a registered referral code; returns it. Collision-safe (salts on clash).
 async function ensureRefCode(wallet) {
   let code = await kvGet('wref:' + wallet).catch(() => null);
-  if (code) return code;
+  if (code) {
+    /*
+     * HEAL A CODE THAT WAS NEVER ACTUALLY REGISTERED.
+     *
+     * kvSetNX used to send `EX undefined` when called without a ttl, which Redis rejects — so every
+     * refcode: write below FAILED while wref: (a plain SET) succeeded. That left wallets holding a
+     * code that resolves to nothing: the invite link looks fine, and api/join.js reads
+     * kvGet('refcode:<CODE>') as null and refuses the bind. It is why the platform has never recorded
+     * a single qualified recruit.
+     *
+     * Returning the cached code alone would leave those links dead forever, because this branch never
+     * reaches the registration below. So verify the mapping actually exists and write it if it does
+     * not. Only ever claims the code for THIS wallet if nobody else holds it.
+     */
+    const owner = await kvGet('refcode:' + code).catch(() => null);
+    if (owner === wallet) return code;
+    if (!owner) {
+      const claimed = await kvSetNX('refcode:' + code, wallet);
+      if (claimed) { console.log('[ref] healed unregistered code', { code, wallet: String(wallet).slice(0, 8) }); return code; }
+    }
+    // Someone else legitimately holds it — fall through and mint a fresh one for this wallet.
+    console.warn('[ref] cached code held by another wallet, re-minting', { code });
+  }
   code = refCodeFor(wallet);
   let ok = await kvSetNX('refcode:' + code, wallet);
   let tries = 0;
