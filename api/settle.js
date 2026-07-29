@@ -967,6 +967,37 @@ async function wgSave(w) { await kvSet('wg:' + w.id, JSON.stringify(w), WG_TTL);
 async function wgIsHeld(id) { return !!(await kvGet('wgheld:' + id)); }
 async function wgSetHeld(id, reason) { await kvSetPerm('wgheld:' + id, String(reason || 'payout failed').slice(0, 200)).catch(() => {}); }
 
+/*
+ * THE ONE REFUND THAT MUST ALWAYS WORK: returning an UNMATCHED bet slip.
+ *
+ * Owner's rule, stated explicitly: the only time anyone gets money back is a bet slip nobody took the
+ * other side of — in snake AND in kart races, because every bet slip here is player-vs-player, not
+ * player-vs-house. A bet that never matched never became a bet, so the stake is simply still theirs.
+ *
+ * That collided with the blanket "bets never auto-retry" rule (`wgheld:`), which exists so the owner is
+ * never asked to pay twice after an ambiguous payout. A return blocked by that rule is a player's own
+ * unmatched stake locked in escrow permanently — prod was logging exactly this:
+ * `[wg] settle REFUSED … {"error":"refund held: insolvent"}`.
+ *
+ * The two cases are cleanly distinguishable, so they no longer share a policy. wgPayOne refuses on
+ * `'insolvent'` from the solvency gate BEFORE it builds or sends any transaction — nothing left escrow,
+ * so retrying cannot double-pay. Every other failure comes from send/confirm and IS ambiguous.
+ *
+ *   insolvent  -> retryable. Do not hold; the next sweep picks it up once escrow can cover it.
+ *   anything else -> hold, exactly as before. The owner settles it by hand.
+ *
+ * `wgpaid:<id>` (claimed before the transfer) remains the single-pay guard either way.
+ */
+function wgRetryableFail(reason) { return String(reason || '').toLowerCase().includes('insolvent'); }
+
+// True only for a hold that is safe to retry — i.e. one recorded because escrow was momentarily short.
+async function wgHeldRetryable(id) {
+  const r = await kvGet('wgheld:' + id);
+  return !!r && wgRetryableFail(r);
+}
+// Clear a retryable hold so the return can be attempted again. Never call this for a settlement.
+async function wgClearHeld(id) { await kvDel('wgheld:' + id).catch(() => {}); }
+
 // The game server signs each bettable snake so a client cannot invent a subject that could never
 // settle. Mirrors the elim-lock trust model: HMAC over region+lobby+pid+name+ipHash+expiry.
 // ipHash lets us catch a player betting on their own snake from a second account (see wgSelfBetCheck).
@@ -1640,7 +1671,14 @@ module.exports = async function handler(req, res) {
         }
         // 2) unmatched and closed → refund the creator in full
         if (w.status === P2P.STATUS.OPEN && now >= Number(w.lockTs || 0)) {
-          if (await wgIsHeld(w.id)) continue;   // failed once already — owner handles it, never auto-retry
+          /* Returning an unmatched stake is the ONE refund that must always work (see wgRetryableFail).
+           * A hold recorded because escrow was momentarily short is cleared and retried — nothing was
+           * ever sent in that case. A hold from an ambiguous send still blocks, as before. */
+          if (await wgIsHeld(w.id)) {
+            if (!(await wgHeldRetryable(w.id))) continue;
+            await wgClearHeld(w.id);
+            console.log('[wg] retrying held return ' + w.id + ' — previous failure was insolvency, nothing was sent');
+          }
           const lock = await kvSetNX('lock:wg:' + w.id, '1', 45);
           if (!lock) continue;
           try {
@@ -1660,6 +1698,15 @@ module.exports = async function handler(req, res) {
             const pay = await wgPayOne(esc, cur.creator, amt, 'wager-sweep-return');
             if (!pay.ok) {
               await kvDel('wgpaid:' + w.id).catch(() => {});
+              if (wgRetryableFail(pay.reason)) {
+                // Escrow was short and NOTHING was sent. Leave the wager OPEN and unheld so the next
+                // sweep returns it — this stake is the creator's own unmatched money and must not be
+                // stranded just because the wallet was momentarily thin.
+                console.warn('[wg] sweep-return deferred for ' + w.id + ' — insolvent, will retry next sweep');
+                betAlert('unmatched bet ' + w.id + ' could NOT be returned yet (escrow short ' + amt +
+                         ' lamports). Nothing was sent; it retries automatically every 60s.');
+                continue;
+              }
               await wgSetHeld(w.id, 'wager-sweep-return failed: ' + (pay.reason || 'unknown'));
               betAlert('wager ' + w.id + ' HELD after a failed sweep-return (' + (pay.reason || 'unknown') +
                        ') — will NOT auto-retry. Refund the creator by hand if this was real, then leave it.');
@@ -1690,7 +1737,16 @@ module.exports = async function handler(req, res) {
         //      the first transfer resumes without paying the same person twice.
         if (w.status === P2P.STATUS.MATCHED && w.acceptor &&
             now - Number(w.matchedTs || w.createdTs || 0) >= WG_VOID_AFTER_MS) {
-          if (await wgIsHeld(w.id)) continue;   // failed once already — owner handles it, never auto-retry
+          /* A bet that CANNOT SETTLE is the owner's other stated return case ("or doesnt settle it
+           * should be returned to player"), so like the unmatched return it must not be stranded by a
+           * momentarily thin escrow: an insolvency hold is cleared and retried, an ambiguous one is not.
+           * Resuming is safe per-side because of the `wgvoid:<id>:<side>` guards below — a side already
+           * paid is skipped, so only the outstanding one is sent. */
+          if (await wgIsHeld(w.id)) {
+            if (!(await wgHeldRetryable(w.id))) continue;
+            await wgClearHeld(w.id);
+            console.log('[wg] retrying held VOID refund ' + w.id + ' — previous failure was insolvency');
+          }
           const lock = await kvSetNX('lock:wg:' + w.id, '1', 45);
           if (!lock) continue;
           try {
@@ -1699,18 +1755,29 @@ module.exports = async function handler(req, res) {
             const claimed = await kvSetNX('wgpaid:' + w.id, '1', WG_PAY_LOCK_TTL);      // (b)
             if (!claimed) continue;
             const amt = P2P.returnAmount(cur.stakeLamports);
-            let paidBoth = true, txs = [];
+            let paidBoth = true, txs = [], softFail = false;
             for (const [who, side] of [[cur.creator, 'c'], [cur.acceptor, 'a']]) {       // (c)
               const g = await kvSetNX('wgvoid:' + w.id + ':' + side, '1', WG_PAY_LOCK_TTL);
               if (!g) continue;                       // already refunded on an earlier pass
               const pay = await wgPayOne(esc, who, amt, 'wager-void-refund');
-              if (!pay.ok) { await kvDel('wgvoid:' + w.id + ':' + side).catch(() => {}); paidBoth = false; break; }
+              if (!pay.ok) {
+                await kvDel('wgvoid:' + w.id + ':' + side).catch(() => {});
+                paidBoth = false;
+                softFail = wgRetryableFail(pay.reason);   // insolvent = nothing sent = retry next sweep
+                break;
+              }
               txs.push(pay.sig);
               await kvHincrby(BET_LEDGER, 'betLiability', -amt).catch(() => {});
               await kvHincrby(BET_LEDGER, 'accruedFee', -TX_FEE).catch(() => {});
             }
             if (!paidBoth) {
               await kvDel('wgpaid:' + w.id).catch(() => {});
+              if (softFail) {
+                console.warn('[wg] VOID refund deferred for ' + w.id + ' — insolvent, will retry next sweep');
+                betAlert('bet ' + w.id + ' could not settle and its return is waiting on escrow (' + amt +
+                         ' lamports/side). Nothing was sent; it retries automatically every 60s.');
+                continue;
+              }
               await wgSetHeld(w.id, 'wager-void-refund failed for ' + w.id);
               betAlert('wager ' + w.id + ' HELD after a failed VOID refund — will NOT auto-retry. ' +
                        'Refund both sides by hand if this was real, then leave it.');
@@ -2073,9 +2140,17 @@ module.exports = async function handler(req, res) {
         const w = await wgLoad(wid);
         if (!w) { clearTimeout(guard); done = true; return res.status(404).json({ error: 'wager not found' }); }
         if (w.status === P2P.STATUS.RETURNED) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
-        if (await wgIsHeld(wid)) {   // failed once already — owner handles it manually, never auto-retry
-          clearTimeout(guard); done = true;
-          return res.status(200).json({ ok: false, held: true, error: 'held for manual review — refund by hand if needed, will not auto-retry' });
+        /* Returning an unmatched stake is the ONE refund that must always work. An insolvency hold is
+         * cleared and retried — nothing was ever sent in that case — while an ambiguous send failure
+         * still stops here for the owner. (The settle path above keeps the strict rule: a winner payout
+         * that MIGHT have landed must never be retried automatically.) */
+        if (await wgIsHeld(wid)) {
+          if (!(await wgHeldRetryable(wid))) {
+            clearTimeout(guard); done = true;
+            return res.status(200).json({ ok: false, held: true, error: 'held for manual review — refund by hand if needed, will not auto-retry' });
+          }
+          await wgClearHeld(wid);
+          console.log('[wg] retrying held return ' + wid + ' — previous failure was insolvency, nothing was sent');
         }
         /*
          * REVIVE A LAPSED RESERVATION FIRST — otherwise this is a dead end holding real money.
@@ -2108,6 +2183,14 @@ module.exports = async function handler(req, res) {
         const pay = await wgPayOne(esc, w.creator, amt, 'wager-return');
         if (!pay.ok) {
           await kvDel('wgpaid:' + wid).catch(() => {});
+          if (wgRetryableFail(pay.reason)) {
+            // Escrow was short and NOTHING was sent. The wager stays OPEN and UNHELD, so the 60s sweep
+            // returns it as soon as escrow can cover it. This is the creator's own unmatched stake.
+            betAlert('unmatched bet ' + wid + ' could NOT be returned yet (escrow short ' + amt +
+                     ' lamports). Nothing was sent; it retries automatically every 60s.');
+            clearTimeout(guard); done = true;
+            return res.status(503).json({ error: 'escrow is momentarily short — your unmatched stake is safe and will be returned automatically', retry: true });
+          }
           await wgSetHeld(wid, 'wager-return failed: ' + (pay.reason || 'unknown'));
           betAlert('wager ' + wid + ' HELD after a failed return (' + (pay.reason || 'unknown') +
                    ') — will NOT auto-retry. Refund the creator by hand if this was real, then leave it.');
