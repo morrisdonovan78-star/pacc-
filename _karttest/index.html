@@ -1250,15 +1250,18 @@ const DOWN = { ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1, ' ': 1 };
 // `e.shiftKey` on both edges rather than latched. On the Shift keyup itself `e.shiftKey` is already
 // false, so release is exact, and no sequence of other keys can re-latch it.
 function clearKeys() { for (const k in keys) keys[k] = false; }
+// Mirror keys, and the panel toggle, are CONSUMED before anything touches the driving key map.
+// They used to fall through it: keys[e.key] was set for them and keys.shift was recomputed on the
+// same event, so adjusting the glass mid-corner could disturb the car - which is not a trade anyone
+// would make to move a mirror. None of these is a driving input, so none of them belongs in `keys`.
+const MIRROR_KEYS = { ',': ['angle', -1], '.': ['angle', 1], ';': ['pos', 0], "'": ['size', 0], '’': ['size', 0] };
 addEventListener('keydown', (e) => {
+  const mk = MIRROR_KEYS[e.key];
+  if (mk) { e.preventDefault(); mirAdjust(mk[0], mk[1]); return; }
+  if (e.key.toLowerCase() === 'k') { e.preventDefault(); mirAdjust('on'); return; }
   keys[e.key.toLowerCase()] = true;
   keys.shift = e.shiftKey || e.key === 'Shift';
   if (DOWN[e.key]) e.preventDefault();
-  if (e.key === ',') mirAdjust('angle', -1);      // swing the glass toward your left shoulder
-  if (e.key === '.') mirAdjust('angle', 1);       // ...and toward your right
-  if (e.key === ';') mirAdjust('pos');            // centre / left / right
-  if (e.key === "'") mirAdjust('size');           // cycle the size
-  if (e.key.toLowerCase() === 'k') mirAdjust('on');
   if (e.key.toLowerCase() === 'h') { _ctrlsPinned = !_ctrlsPinned; }
   if (e.key.toLowerCase() === 'l') { lobbyEl.classList.contains('on') ? closeLobby() : openLobby(); }
   if (e.key.toLowerCase() === 'r') reset();
