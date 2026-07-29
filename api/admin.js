@@ -92,6 +92,44 @@ const SERVERS = [
   { url: process.env.GAME_SERVER_EU_URL || 'http://136.244.81.138:3001', label: '🇩🇪 FRANKFURT (EU)', key: 'EU' },
 ].filter(s => s.url);
 
+/*
+ * The lobby id IS the stake. `ss-paid-lobby-0.25` is a quarter-dollar snake arena; `paid-lobby-1` is
+ * a $1 PAC ARENA one. Nothing else records which game a room belongs to or what it costs, so the id
+ * has to be parsed rather than looked up — and any list of known ids goes stale the moment a player
+ * opens a custom stake, which is exactly how the panel came to show lobbies nobody was in while
+ * hiding the ones that had people.
+ */
+function parseLobbyId(id) {
+  const s = String(id || '');
+  const stakeOf = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  if (s.indexOf('ss-') === 0) {
+    const rest = s.slice(3);
+    if (rest.indexOf('paid-lobby-') === 0) return { game: 'SNAKE', stakeUsd: stakeOf(rest.slice(11)), free: false };
+    return { game: 'SNAKE', stakeUsd: 0, free: true };
+  }
+  if (s.indexOf('paid-lobby-') === 0) return { game: 'PACMAN', stakeUsd: stakeOf(s.slice(11)), free: false };
+  return { game: 'PACMAN', stakeUsd: 0, free: true };
+}
+
+/*
+ * Proof that an /admin/* call really came from this function.
+ *
+ * ADMIN_SECRET was only ever set HERE, never on the game servers, so the server-side check could not
+ * be switched on without locking the panel out — and it had been left calling next() unconditionally,
+ * which made kick/warn/broadcast/endgame reachable by anyone who knew the URL.
+ *
+ * GAME_SECRET is the one secret both sides already hold (join tokens and elim-lock ride on it), so it
+ * needs no new env var and no rotation. Signing the PATH along with the timestamp means a captured
+ * /admin/status proof cannot be replayed against /admin/kick.
+ */
+function adminProofHeaders(path) {
+  const gs = (process.env.GAME_SECRET || '').trim();
+  if (!gs) return {};
+  const ts = Date.now();
+  const proof = crypto.createHmac('sha256', gs).update('admin:/admin/' + path + ':' + ts).digest('hex');
+  return { 'x-admin-proof': proof, 'x-admin-ts': String(ts) };
+}
+
 async function callAllServers(path, method, body, serverKey) {
   const secret = getSecret();
   const targets = serverKey ? SERVERS.filter(s => s.key === serverKey) : SERVERS;
@@ -99,7 +137,7 @@ async function callAllServers(path, method, body, serverKey) {
     try {
       const r = await fetch(srv.url + '/admin/' + path, {
         method,
-        headers: { 'Content-Type': 'application/json', 'x-admin-secret': secret },
+        headers: { 'Content-Type': 'application/json', 'x-admin-secret': secret, ...adminProofHeaders(path) },
         body: body ? JSON.stringify(body) : undefined,
         signal: AbortSignal.timeout(6000),
       });
@@ -178,6 +216,102 @@ module.exports = async function handler(req, res) {
 
   if (action === 'status') {
     return res.json({ servers: await callAllServers('status', 'GET') });
+  }
+
+  /*
+   * ── live-all: every player, in every game, on every node ──────────────────────────────────────
+   *
+   * The LIVE tab used to render `status` alone, which is one process on one pair of boxes. Kart is a
+   * SEPARATE process on :3002 and blackjack is not a socket game at all — it lives in KV behind the
+   * hub — so two of the four games could never appear no matter how the panel was drawn.
+   *
+   * Everything here is READ-ONLY and fails soft per source: a node that is down costs you its rows,
+   * never the whole panel. `sources` reports what answered so a missing game reads as "that feed is
+   * down" instead of "nobody is playing" — the two look identical otherwise, and that ambiguity is
+   * what makes an empty operations panel untrustworthy.
+   */
+  if (action === 'live-all') {
+    const KART = [
+      { key: 'NA', url: process.env.KART_SERVER_URL    || 'https://us.pac-arena.com' },
+      { key: 'EU', url: process.env.KART_SERVER_EU_URL || 'https://eu.pac-arena.com' },
+    ];
+    const HUB = process.env.HUB_URL || 'https://snakepot.com';
+
+    const groups = [];
+    const sources = [];
+
+    const getJson = async (url, init) => {
+      const r = await fetch(url, { signal: AbortSignal.timeout(7000), cache: 'no-store', ...(init || {}) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    };
+
+    // ── snake + PAC ARENA (socket server, :3001) ──
+    // /admin/status is the right source rather than /counts: it carries socketId and walletAddress,
+    // which is what makes a row actionable (KICK/WARN target one of those two, never a name).
+    const statuses = await callAllServers('status', 'GET');
+    for (const st of statuses) {
+      if (st.error || st.offline) { sources.push({ name: 'arena ' + st.key, ok: false, error: st.error || 'offline' }); continue; }
+      sources.push({ name: 'arena ' + st.key, ok: true });
+      const rooms = st.rooms || {};
+      for (const lobby of Object.keys(rooms)) {
+        const players = Array.isArray(rooms[lobby]) ? rooms[lobby] : [];
+        if (!players.length) continue;              // empty fixed lobbies are noise, not information
+        const meta = parseLobbyId(lobby);
+        groups.push({
+          game: meta.game, region: st.key, lobby, stakeUsd: meta.stakeUsd, free: meta.free,
+          state: null, canModerate: true,
+          players: players.map(p => ({ name: p.playerName || null, address: p.walletAddress || null, socketId: p.socketId || null })),
+        });
+      }
+      const others = Array.isArray(st.others) ? st.others : [];
+      if (others.length) {
+        groups.push({
+          game: 'MENU', region: st.key, lobby: '(not in a lobby)', stakeUsd: null, free: true,
+          state: null, canModerate: true,
+          players: others.map(p => ({ name: p.playerName || null, address: p.walletAddress || null, socketId: p.socketId || null })),
+        });
+      }
+    }
+
+    // ── kart (separate process, :3002, proxied at /kart/) ──
+    await Promise.all(KART.map(async k => {
+      try {
+        const d = await getJson(k.url + '/kart/lobbies');
+        sources.push({ name: 'kart ' + k.key, ok: true });
+        for (const lb of (d.lobbies || [])) {
+          const named = Array.isArray(lb.players) ? lb.players : [];
+          const queued = Array.isArray(lb.queuedNames) ? lb.queuedNames : [];
+          if (!named.length && !queued.length && !lb.racers && !lb.spectators) continue;
+          groups.push({
+            game: 'KART', region: k.key, lobby: lb.id, stakeUsd: lb.stakeUsd != null ? lb.stakeUsd : null,
+            free: !!lb.free, state: lb.state || null, canModerate: false,
+            spectators: lb.spectators || 0, potUsd: (lb.potCents || 0) / 100,
+            players: named.map(p => ({ name: p.name || null, address: null, socketId: null, tag: p.paid ? 'PAID' : (p.ready ? 'READY' : null) }))
+              .concat(queued.map(n => ({ name: n, address: null, socketId: null, tag: 'NEXT RACE' }))),
+          });
+        }
+      } catch (e) { sources.push({ name: 'kart ' + k.key, ok: false, error: e.message }); }
+    }));
+
+    // ── blackjack (no socket server — tables live in KV behind the hub) ──
+    try {
+      const d = await getJson(HUB + '/api/blackjack', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'list' }),
+      });
+      sources.push({ name: 'blackjack', ok: true });
+      for (const t of (d.tables || [])) {
+        groups.push({
+          game: 'BLACKJACK', region: '—', lobby: t.id, stakeUsd: t.free ? 0 : (t.stake != null ? t.stake : null),
+          free: !!t.free, state: t.status || null, canModerate: false,
+          players: (t.names || []).map(n => ({ name: n, address: null, socketId: null })),
+        });
+      }
+    } catch (e) { sources.push({ name: 'blackjack', ok: false, error: e.message }); }
+
+    groups.sort((a, b) => (a.game === b.game ? (b.stakeUsd || 0) - (a.stakeUsd || 0) : a.game.localeCompare(b.game)));
+    const totalPlayers = groups.reduce((n, g) => n + (g.game === 'MENU' ? 0 : g.players.length), 0);
+    return res.json({ groups, sources, totalPlayers, timestamp: Date.now() });
   }
 
   /*

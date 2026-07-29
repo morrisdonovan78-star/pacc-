@@ -249,7 +249,7 @@ function doLogout() {
   _token = ''; _tokenExp = 0;
   localStorage.removeItem('adm_tok');
   localStorage.removeItem('adm_exp');
-  sessionStorage.removeItem('adm_live_cache');
+  sessionStorage.removeItem('adm_live_cache_v2');
   clearInterval(_liveTimer);
   document.getElementById('shell').style.display = 'none';
   document.getElementById('login').style.display = 'flex';
@@ -441,36 +441,57 @@ function renderLive() {
     <div class="card" style="border-color:rgba(255,140,0,.35);margin-bottom:16px;">
       <div class="card-title" style="color:#FF8C00;">📢 BROADCAST TO PLAYERS</div>
       <div style="display:flex;gap:8px;align-items:center;">
-        <select id="bc-lobby" style="width:160px;flex-shrink:0;">
+        <!-- Populated from the live lobby list, not hardcoded: the fixed options offered stakes that
+             may not exist while omitting every custom-stake room players had actually opened. -->
+        <select id="bc-lobby" style="width:190px;flex-shrink:0;">
           <option value="">ALL LOBBIES</option>
-          <option value="free-lobby">FREE LOBBY</option>
-          <option value="paid-lobby-1">$1 LOBBY</option>
-          <option value="paid-lobby-5">$5 LOBBY</option>
-          <option value="paid-lobby-25">$25 LOBBY</option>
         </select>
         <input type="text" id="bc-msg" placeholder="Type message to send to all players…" maxlength="200"
           onkeydown="if(event.key==='Enter')sendBroadcast()" style="flex:1;">
         <button class="btn btn-sm" style="color:#FF8C00;border-color:#FF8C00;flex-shrink:0;" onclick="sendBroadcast()">📢 SEND</button>
       </div>
     </div>
+    <div id="live-filter" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;"></div>
     <div class="refresh-bar">
       <span class="dot-live"></span>
-      <span style="font-size:10px;color:var(--g);">LIVE — updates every 2s</span> &nbsp;
+      <span style="font-size:10px;color:var(--g);">LIVE — updates every 4s</span> &nbsp;
+      <span id="live-sources" style="font-size:9px;color:var(--muted);"></span> &nbsp;
       <button class="btn btn-sm btn-y" onclick="loadLive()">↻ REFRESH NOW</button>
     </div>
     <div id="live-body"><div style="text-align:center;padding:40px;color:var(--muted);">
       <div class="spinner" style="margin:0 auto 12px;"></div>Loading…</div></div>`;
   // Instantly show last-known data from cache so panel never looks blank after refresh
   try {
-    const raw = sessionStorage.getItem('adm_live_cache');
-    if (raw) {
-      const b = document.getElementById('live-body');
-      if (b) b.innerHTML = _buildLiveHtml(JSON.parse(raw));
-    }
+    const raw = sessionStorage.getItem('adm_live_cache_v2');
+    if (raw) _paintLive(JSON.parse(raw));
   } catch (_) {}
   loadLive();
   clearInterval(_liveTimer);
-  _liveTimer = setInterval(loadLive, 2000);
+  // 4s, not 2s: one call now fans out to five upstreams (two arena nodes, two kart nodes, the hub)
+  // and the account is already over its Fluid Active CPU allowance.
+  _liveTimer = setInterval(loadLive, 4000);
+}
+
+// Which game the LIVE tab is showing. The operator asked for "a page for each" — same data, one
+// game at a time, because a single flat list of four games is what made it unreadable.
+let _liveFilter = 'ALL';
+const GAME_META = {
+  SNAKE:     { label: 'SNAKE',     icon: '🐍', color: 'var(--g)'  },
+  PACMAN:    { label: 'PAC ARENA', icon: '👾', color: 'var(--y)'  },
+  KART:      { label: 'KART',      icon: '🏎️', color: 'var(--c)'  },
+  BLACKJACK: { label: 'BLACKJACK', icon: '🃏', color: 'var(--pk)' },
+  MENU:      { label: 'IN MENU',   icon: '💤', color: 'var(--muted)' },
+};
+
+function setLiveFilter(g) {
+  _liveFilter = g;
+  try { const raw = sessionStorage.getItem('adm_live_cache_v2'); if (raw) _paintLive(JSON.parse(raw)); } catch (_) {}
+}
+
+function _stakeLabel(g) {
+  if (g.free || !g.stakeUsd) return 'FREE';
+  const n = Number(g.stakeUsd);
+  return '$' + (n < 1 ? n.toFixed(2) : (n % 1 === 0 ? String(n) : n.toFixed(2)));
 }
 
 function _playerRow(p) {
@@ -493,55 +514,110 @@ function _playerRow(p) {
   </div>`;
 }
 
-function _buildLiveHtml(servers) {
-  if (!servers || !servers.length) return '<div style="color:var(--muted);padding:20px;">No server data.</div>';
-  const LOBBY_LABELS = {'free-lobby':'FREE LOBBY','paid-lobby-1':'$1 LOBBY','paid-lobby-5':'$5 LOBBY','paid-lobby-25':'$25 LOBBY'};
+// A player the mod panel can actually act on. KICK/WARN target a socketId or a wallet, never a name,
+// so a row without either is rendered read-only rather than given buttons that quietly do nothing.
+function _readOnlyRow(p) {
+  const name = String(p.name || 'ANON');
+  const tag  = p.tag ? `<span style="font-size:9px;color:var(--y);border:1px solid var(--y);border-radius:4px;padding:1px 5px;margin-left:6px;">${esc(String(p.tag))}</span>` : '';
+  return `<div class="player-row"><div class="player-info"><div class="player-name">${esc(name)}${tag}</div></div></div>`;
+}
+
+function _buildLiveHtml(data) {
+  const groups  = (data && data.groups)  || [];
+  const shown   = _liveFilter === 'ALL' ? groups : groups.filter(g => g.game === _liveFilter);
+
+  if (!groups.length) return '<div style="color:var(--muted);padding:20px;">Nobody is playing anything right now.</div>';
+  if (!shown.length)  return `<div style="color:var(--muted);padding:20px;">No live ${esc(_liveFilter)} lobbies.</div>`;
+
   let html = '';
-  for (const srv of servers) {
-    const label = String(srv.server || 'Server');
-    if (srv.offline || srv.error) {
-      html += `<div class="card"><div class="card-title"><span class="offline-badge">OFFLINE</span> ${esc(label)}</div><div style="color:var(--r);font-size:11px;">${esc(String(srv.error||'Unreachable'))}</div></div>`;
-      continue;
+  let lastGame = null;
+  for (const g of shown) {
+    const meta = GAME_META[g.game] || { label: g.game, icon: '🎮', color: 'var(--muted)' };
+    if (g.game !== lastGame) {
+      if (lastGame !== null) html += '</div>';
+      html += `<div class="section-title" style="color:${meta.color};margin-top:18px;">${meta.icon} ${esc(meta.label)}</div><div class="lobby-grid">`;
+      lastGame = g.game;
     }
-    const rooms  = srv.rooms  || {};
-    const others = Array.isArray(srv.others) ? srv.others : [];
-    html += `<div class="card"><div class="card-title"><span class="online-badge">ONLINE</span> &nbsp;${esc(label)}</div><div class="lobby-grid">`;
-    for (const lid of Object.keys(LOBBY_LABELS)) {
-      const players = Array.isArray(rooms[lid]) ? rooms[lid] : [];
-      html += `<div class="lobby-card"><div class="lobby-card-header">
-        <div class="lobby-name">${LOBBY_LABELS[lid]}</div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <div class="lobby-count">${players.length} player${players.length===1?'':'s'}</div>
-          ${players.length>0?`<button class="btn btn-xs btn-c" onclick="confirmEndGame('${lid}','${srv.key||''}')">⏹ END</button>`:''}
-        </div></div>`;
-      html += players.length ? players.map(_playerRow).join('') : `<div class="empty-lobby">— Empty —</div>`;
-      html += `</div>`;
+    const n = g.players.length;
+    const region = g.region && g.region !== '—' ? `<span style="font-size:9px;color:var(--muted);">${esc(g.region)}</span>` : '';
+    const state  = g.state ? `<span style="font-size:9px;color:var(--c);margin-left:6px;">${esc(String(g.state).toUpperCase())}</span>` : '';
+    html += `<div class="lobby-card"><div class="lobby-card-header">
+      <div>
+        <div class="lobby-name" style="color:${meta.color};">${esc(_stakeLabel(g))} ${region}${state}</div>
+        <div style="font-size:9px;color:var(--muted);font-family:monospace;margin-top:3px;">${esc(String(g.lobby))}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div class="lobby-count">${n} player${n === 1 ? '' : 's'}${g.spectators ? ' · ' + g.spectators + ' watching' : ''}</div>
+        ${g.canModerate && n > 0 && g.game !== 'MENU' ? `<button class="btn btn-xs btn-c" onclick="confirmEndGame('${esc(String(g.lobby))}','${esc(String(g.region || ''))}')">⏹ END</button>` : ''}
+      </div></div>`;
+    html += n ? g.players.map(p => (g.canModerate && (p.socketId || p.address))
+      ? _playerRow({ socketId: p.socketId, walletAddress: p.address, playerName: p.name })
+      : _readOnlyRow(p)).join('') : '<div class="empty-lobby">— Empty —</div>';
+    if (!g.canModerate && n > 0) {
+      html += `<div style="font-size:9px;color:var(--muted);margin-top:8px;">Read-only — ${g.game === 'KART' ? 'kart runs in its own process and exposes names only' : 'blackjack has no socket to kick'}.</div>`;
     }
-    html += `</div>`;
-    if (others.length) {
-      html += `<div style="margin-top:10px;"><div class="card-title" style="font-size:7px;color:var(--muted);margin-bottom:8px;">⚡ IN GAME (${others.length})</div>`;
-      html += others.map(_playerRow).join('');
-      html += `</div>`;
-    }
-    html += `</div>`;
+    html += '</div>';
   }
-  return html || '<div style="color:var(--muted);padding:20px;">No players connected.</div>';
+  if (lastGame !== null) html += '</div>';
+  return html;
+}
+
+// Paints body + filter chips + source health from one payload, so the cached and the fresh render
+// go through exactly the same path.
+function _paintLive(data) {
+  const body = document.getElementById('live-body');
+  if (body) body.innerHTML = _buildLiveHtml(data);
+
+  const groups = (data && data.groups) || [];
+  const bar = document.getElementById('live-filter');
+  if (bar) {
+    const counts = {};
+    for (const g of groups) counts[g.game] = (counts[g.game] || 0) + g.players.length;
+    const tabs = ['ALL'].concat(Object.keys(GAME_META).filter(k => counts[k]));
+    bar.innerHTML = tabs.map(t => {
+      const m = GAME_META[t];
+      const n = t === 'ALL' ? (data.totalPlayers || 0) : (counts[t] || 0);
+      const on = _liveFilter === t;
+      const col = m ? m.color : 'var(--y)';
+      return `<button class="btn btn-sm" style="color:${col};border-color:${col};${on ? 'background:rgba(255,255,255,.08);' : 'opacity:.55;'}"
+        onclick="setLiveFilter('${t}')">${m ? m.icon + ' ' : ''}${t === 'ALL' ? 'ALL' : esc(m.label)} (${n})</button>`;
+    }).join('');
+  }
+
+  // Broadcast targets follow the live lobbies. Only the arena server can receive a broadcast, so
+  // kart and blackjack rooms are deliberately not offered — listing them would be a button that lies.
+  const sel = document.getElementById('bc-lobby');
+  if (sel) {
+    const keep = sel.value;
+    const opts = groups.filter(g => g.canModerate && g.game !== 'MENU')
+      .map(g => `<option value="${esc(String(g.lobby))}">${esc(_stakeLabel(g))} · ${esc((GAME_META[g.game] || {}).label || g.game)} ${esc(g.region || '')}</option>`);
+    sel.innerHTML = '<option value="">ALL LOBBIES</option>' + opts.join('');
+    if (keep) sel.value = keep;
+  }
+
+  // A source that failed and a source with nobody in it look identical in the rows above. Saying
+  // which feed is down is the difference between "quiet night" and "kart has been offline for an hour".
+  const sEl = document.getElementById('live-sources');
+  if (sEl) {
+    const bad = ((data && data.sources) || []).filter(s => !s.ok);
+    sEl.innerHTML = bad.length
+      ? `<span style="color:var(--r);">⚠ ${bad.map(b => esc(b.name)).join(', ')} unreachable</span>`
+      : `<span style="color:var(--g);">all feeds ok</span>`;
+  }
 }
 
 async function loadLive() {
   if (_liveLoading) return;
   _liveLoading = true;
   try {
-    const data = await api({ action: 'status' });
-    const body = document.getElementById('live-body');
-    if (!body) return;
-    const servers = data.servers || [];
-    try { sessionStorage.setItem('adm_live_cache', JSON.stringify(servers)); } catch (_) {}
-    body.innerHTML = _buildLiveHtml(servers);
+    const data = await api({ action: 'live-all' });
+    if (!document.getElementById('live-body')) return;
+    try { sessionStorage.setItem('adm_live_cache_v2', JSON.stringify(data)); } catch (_) {}
+    _paintLive(data);
   } catch (e) {
     const b = document.getElementById('live-body');
     // Only show reconnecting spinner if there's no cached data already visible
-    if (b && !sessionStorage.getItem('adm_live_cache')) {
+    if (b && !sessionStorage.getItem('adm_live_cache_v2')) {
       b.innerHTML = `<div style="color:var(--y);padding:20px;text-align:center;"><div class="spinner" style="margin:0 auto 10px;"></div>Reconnecting…</div>`;
     }
   } finally {
