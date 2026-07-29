@@ -566,16 +566,43 @@ async function sendAndConfirm(txBytes) {
 const BET_MKT_TTL = 172800;                 // market records / bets live 48h (ample for audit + retries)
 const BET_LEDGER  = 'betledger';            // hash: { betLiability, accruedFee } — atomic HINCRBY
 const ALERT_URL   = process.env.BET_ALERT_WEBHOOK || process.env.DISCORD_WEBHOOK || '';
+const DM_BOT_TOKEN    = (process.env.DM_BOT_TOKEN || '').trim();
+const OWNER_DISCORD_ID = (process.env.OWNER_DISCORD_ID || '').trim();
+let _ownerDmChannelId = null; // cached after the first successful lookup — avoids a create-channel call every alert
+
+// Sends a Discord DM to the owner ONLY (not a channel) via the bot REST API. Two calls: open/reuse the
+// DM channel, then post into it. Discord's create-channel endpoint is idempotent per recipient, so a
+// cold cache just costs one extra call, never a duplicate channel.
+async function ownerDm(msg) {
+  if (!DM_BOT_TOKEN || !OWNER_DISCORD_ID) return;
+  try {
+    if (!_ownerDmChannelId) {
+      const r = await fetch('https://discord.com/api/v10/users/@me/channels', {
+        method: 'POST', headers: { 'Authorization': 'Bot ' + DM_BOT_TOKEN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipient_id: OWNER_DISCORD_ID }), signal: AbortSignal.timeout(4000),
+      });
+      const j = await r.json().catch(() => null);
+      if (j && j.id) _ownerDmChannelId = j.id; else return;
+    }
+    await fetch('https://discord.com/api/v10/channels/' + _ownerDmChannelId + '/messages', {
+      method: 'POST', headers: { 'Authorization': 'Bot ' + DM_BOT_TOKEN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: msg }), signal: AbortSignal.timeout(4000),
+    });
+  } catch (_) {}
+}
 
 // Loud, non-blocking alert whenever the invariant refuses a payout (the backstop tripped) or an
 // accounting anomaly is seen. Never throws.
 function betAlert(msg) {
   console.error('[BET-ALERT] ' + msg);
-  if (!ALERT_URL) return;
-  try {
-    fetch(ALERT_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: '⚠️ SNAKE POT betting: ' + msg }), signal: AbortSignal.timeout(4000) }).catch(() => {});
-  } catch (_) {}
+  const text = '⚠️ SNAKE POT betting: ' + msg;
+  if (ALERT_URL) {
+    try {
+      fetch(ALERT_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: text }), signal: AbortSignal.timeout(4000) }).catch(() => {});
+    } catch (_) {}
+  }
+  ownerDm(text).catch(() => {});
 }
 
 // The two logical ledgers, read as integers (default 0). One hash → one round-trip.
