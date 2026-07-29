@@ -2426,13 +2426,23 @@ function netConnect(cb) {
    * file never sees, and the kart server checks that signature. The worst a tampered game can do is
    * fail to get a ticket.
    */
+  /*
+   * MONEY NEVER MOVES WITHOUT A CLICK.
+   *
+   * This used to charge the moment the server asked - postMessage KART_PAY straight out of the event
+   * handler. Combined with the client auto-readying after a race, that was a loop: race ends, client
+   * auto-readies, server sees no paid entry and asks, client pays. Four real charges in nine minutes,
+   * none of them requested by the player.
+   *
+   * The server may ASK. Only a human press may spend. `_needPay` arms the READY button and nothing
+   * else happens until it is pressed - so a bug on either side can, at worst, show a prompt.
+   */
   s.on('k-need-pay', (d) => {
     if (!EMBED) { netNote('Paid races need the Snake Pot site — open it from snakepot.com'); unarmReady(); return; }
     if (_payPending) return;                        // one entry request at a time, ever
-    _payPending = true;
-    netNote('Taking your $' + ((d.stakeCents || 0) / 100).toFixed(2).replace(/\.00$/, '') + ' entry…');
-    try { window.parent.postMessage({ __kart: 1, kind: 'KART_PAY', lobbyId: d.lobbyId, stakeCents: d.stakeCents }, '*'); }
-    catch (_) { _payPending = false; netNote('Could not reach the wallet.'); unarmReady(); }
+    _needPay = { lobbyId: d.lobbyId, stakeCents: d.stakeCents };
+    unarmReady();
+    netNote('Press READY to pay your $' + ((d.stakeCents || 0) / 100).toFixed(2).replace(/\.00$/, '') + ' entry');
   });
   s.on('k-queued', (d) => { NET.queued = !!(d && d.queued); renderLobbyPanel(); });
   s.on('k-track', () => netNote('New daily circuit — reload to race it'));
@@ -2841,8 +2851,20 @@ window.addEventListener('message', (ev) => {
   }
 });
 
+let _needPay = null;
 document.getElementById('btnReady').onclick = (e) => {
   if (!NET.sock) return;
+  // An entry is owed: THIS press is the authorisation to spend, and the only one.
+  if (_needPay) {
+    if (_payPending) return;
+    const np = _needPay; _needPay = null; _payPending = true;
+    e.target.classList.add('armed');
+    e.target.textContent = 'PAYING…';
+    netNote('Taking your $' + ((np.stakeCents || 0) / 100).toFixed(2).replace(/\.00$/, '') + ' entry…');
+    try { window.parent.postMessage({ __kart: 1, kind: 'KART_PAY', lobbyId: np.lobbyId, stakeCents: np.stakeCents }, '*'); }
+    catch (_) { _payPending = false; netNote('Could not reach the wallet.'); unarmReady(); }
+    return;
+  }
   /*
    * READY IS A COMMITMENT, NOT A TOGGLE. In a paid race readying takes the entry fee and puts you on
    * the grid, so the others are now waiting on a field that must stop changing — a button that could
