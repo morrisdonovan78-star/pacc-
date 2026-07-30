@@ -130,9 +130,9 @@ function ssClampTuning(t, cur) {
 
 // Defaults (all live-tunable from the COMBAT TUNING panel).
 
-const SS_CAMP_SEC_D     = 15;    // seconds of continuous circling before the map starts pushing
+const SS_CAMP_SEC_D     = 10;    // seconds of continuous circling before the map starts pushing
 
-const SS_CAMP_PUSH_D    = 509;   // px/sec the push STARTS at (owner: 485 +5%)
+const SS_CAMP_PUSH_D    = 523;   // px/sec the push STARTS at (owner: 485 +5%)
 
 const SS_CAMP_ACCEL_D   = 0.0034; // +0.34%/s: reaches the +10% ceiling at ~29s, i.e. only once the border has travelled all the way across to where they were sitting
 
@@ -142,13 +142,18 @@ const SS_CAMP_MAXOFF_D  = 3000;  // px cap on how far the centre may travel from
 
 const SS_CAMP_EASE_D    = 260;   // px/sec the centre drifts back once nobody is camping
 
-const SS_CAMP_ESCSEC_D  = 5;     // seconds of genuine travel needed to call off the push
+const SS_CAMP_ESCSEC_D  = 6;     // seconds of genuine travel needed to call off the push
 
 const SS_CAMP_ESCDIST_D = 600;   // ...and how far they must actually get from the camp spot
 
 const SS_CAMP_SHRINK_D    = 0.020;  // arena radius fraction/sec the ring closes while anyone camps
 
-const SS_CAMP_SHRINKMAX_D = 0.45;   // ...never past this fraction, so the arena cannot collapse
+const SS_CAMP_SHRINKMAX_D = 0.32;   // ...never past this fraction, so the arena cannot collapse
+
+// Extra pebbles a PAID lobby holds at all times, on top of SS_FOOD_TARGET.
+const SS_FOOD_PAID_BONUS = 15;
+// Fresh food must never spawn ON a snake. Squared px clearance from every sampled body node.
+const SS_FOOD_SNAKE_CLEAR2 = 120 * 120;
 
 
 
@@ -879,6 +884,14 @@ function ssSizeFromNs(n){ n=Math.max(SS_MIN_NS, n); return n<=26 ? 40 + (n-8)*(1
 
 const SS_SHED_NE_MS    = 4000;   // client SHED_NOEAT_MS
 
+// How far BEHIND the tail a boost-shed pellet lands. The pellet used to drop on the tail
+// itself, so a boosting snake laid a dense trail directly under its own path and drove straight
+// back through it on any curve. That, plus the old 4s owner lock, is the whole "I go through
+// pebbles and pick up nothing" report. Dropping it back means recovering your own trail costs
+// real travel, which is the anti-farm pressure the timer used to provide - without ever
+// refusing a pickup.
+const SS_SHED_DROP_BACK = 70;   // px beyond the tail, along the tail's own heading
+
 const SS_FOOD_PICKUP_R      = 42;  // client FOOD_PICKUP_R
 
 const SS_KILL_FOOD_PICKUP_R = 42;  // client KILL_FOOD_PICKUP_R
@@ -1072,6 +1085,7 @@ function ssMakeFoodSpread(sg) {
   const K = 12;
 
   let best = null, bestD = -1;
+  let bFall = null, bFallD = -1;   // used only if nothing clears the snakes
 
   for (let c = 0; c < K; c++) {
 
@@ -1111,11 +1125,34 @@ function ssMakeFoodSpread(sg) {
 
     }
 
-    if (nd > bestD) { bestD = nd; best = { x, y }; }
+    /*
+     * NEVER DROP FRESH FOOD ON A SNAKE. Candidates were scored ONLY on distance to other
+     * FOOD, so a pebble could spawn inside a body - or straight into the trail of someone
+     * boosting past. Require a real gap from every body node, and keep a fallback so
+     * spawning can never stall if nothing clears (a crowded arena must still get food).
+     * PERF: hot path. Stride so no snake costs more than ~40 checks, and bail out of both
+     * loops the instant a candidate is disqualified.
+     */
+    let _clr = Infinity;
+    for (const _s of sg.snakes.values()) {
+      if (!_s.alive || !_s.path || !_s.path.length) continue;
+      const _st = Math.max(1, Math.floor(_s.path.length / 40));
+      for (let _p = 0; _p < _s.path.length; _p += _st) {
+        const _nx = _s.path[_p].x - x, _ny = _s.path[_p].y - y;
+        const _nd2 = _nx * _nx + _ny * _ny;
+        if (_nd2 < _clr) _clr = _nd2;
+        if (_clr < SS_FOOD_SNAKE_CLEAR2) break;
+      }
+      if (_clr < SS_FOOD_SNAKE_CLEAR2) break;
+    }
+    if (_clr >= SS_FOOD_SNAKE_CLEAR2) {
+      if (nd > bestD) { bestD = nd; best = { x, y }; }
+    } else if (nd > bFallD) { bFallD = nd; bFall = { x, y }; }
 
   }
 
-  return best ? ssMakeFood(best.x, best.y) : ssMakeFood();
+  const _pick = best || bFall;
+  return _pick ? ssMakeFood(_pick.x, _pick.y) : ssMakeFood();
 
 }
 
@@ -1123,17 +1160,83 @@ function ssMakeFoodSpread(sg) {
 
 function ssReconcileFood(sg) {
 
+  // Regular food is NOT tied to the border. Gold food is — and that part is right.
+
+  //
+
+  // Gold/kill orbs are a dead player's real wager, so they are clamped inside the ring when created
+
+  // and must never be moved or removed. Regular pebbles are scenery: they are laid down where the
+
+  // arena was at the time and they STAY there. If the ring slides away from some, those simply go out
+
+  // of play — they are not dragged along behind the border, which is what made the food look like it
+
+  // was moving with the ring.
+
+  //
+
+  // What was wrong: the target got +SS_FOOD_PUSH_BONUS while the ring slid and nothing ever trimmed
+
+  // the surplus, so a board pushed back and forth kept climbing. And the top-up counted food the ring
+
+  // had already left behind, so the part you can actually play in went sparse — measured at one point:
+
+  // 68 orbs on the board, only 27 of them reachable.
+
+  //
+
+  // So the target is measured on what is IN the ring (the playable area holds a constant amount,
+
+  // moving or still), while a generous overall ceiling stops the stragglers accumulating forever.
+
+  // Only the very furthest are dropped when that ceiling is hit, so nothing vanishes near the edge
+
+  // where anyone could be looking at it.
+
   if (!sg.food) sg.food = [];
 
-  let reg = 0;
+  const cx = (sg.cx || 0), cy = (sg.cy || 0), R = (sg.arenaR || SS_ARENA_R);
 
-  sg.food.forEach(f => { if (!f.k) reg++; });
+  const dist = f => Math.hypot((f.x || 0) - cx, (f.y || 0) - cy);
 
-  // A travelling ring uncovers new ground every tick, so stock it heavier while that is happening.
+  let inRing = 0;
 
-  const _tgt = SS_FOOD_TARGET + ((sg.campPushing || sg.cvx || sg.cvy) ? SS_FOOD_PUSH_BONUS : 0);
+  sg.food.forEach(f => { if (f && !f.k && dist(f) <= R) inRing++; });
 
-  while (reg < _tgt) { sg.food.push(ssMakeFoodSpread(sg)); reg++; }
+  while (inRing < SS_FOOD_TARGET + (sg.paid ? SS_FOOD_PAID_BONUS : 0)) { sg.food.push(ssMakeFoodSpread(sg)); inRing++; }
+
+  const CEIL = Math.round((SS_FOOD_TARGET + (sg.paid ? SS_FOOD_PAID_BONUS : 0)) * 1.6);
+
+  let plain = 0;
+
+  sg.food.forEach(f => { if (f && !f.k) plain++; });
+
+  if (plain > CEIL) {
+
+    const out = [];
+
+    for (let n = 0; n < sg.food.length; n++) {
+
+      const f = sg.food[n];
+
+      if (!f || f.k) continue;
+
+      const d = dist(f);
+
+      if (d > R) out.push([n, d]);          // only ever drop ones already out of play
+
+    }
+
+    out.sort((a, b) => b[1] - a[1]);        // furthest away first
+
+    const drop = new Set();
+
+    for (let n = 0; n < out.length && plain - drop.size > CEIL; n++) drop.add(out[n][0]);
+
+    if (drop.size) sg.food = sg.food.filter((f, n) => !drop.has(n));
+
+  }
 
 }
 
@@ -1679,6 +1782,7 @@ function getSsGame(lid) {
     arenaR: SS_ARENA_R, shrinkPct: 0, shrinkResetAt: 0, // dynamic border state
 
     testHitbox: lid === SS_TEST_LOBBY, // test sandbox EXTRAS only (boost drain, food-shed, circle-viz)
+    paid: /paid-lobby/.test(String(lid)),   // paid lobbies stock extra food
 
     noseCollision: true,
 
@@ -2057,9 +2161,18 @@ function ssStepMovement(sn, sg, lid, io, now) {
 
         sn._shed -= shedEvery;
 
+        // Land the pellet BEHIND the tail, along the tail's own heading, and with NO no-eat lock:
+        // your own trail is food like anyone else's. The growth cap (checked in the pickup loop)
+        // is now the ONLY thing that may ever refuse a pebble.
         const tail = sn.path[sn.path.length - 1] || { x: sn.x, y: sn.y };
-
-        sg.food.push(ssMakeFood(tail.x + (Math.random()-0.5)*6, tail.y + (Math.random()-0.5)*6, 0, 0, sn.pid, now + SS_SHED_NE_MS));
+        const prev = sn.path[sn.path.length - 2] || tail;
+        let _sdx = tail.x - prev.x, _sdy = tail.y - prev.y;
+        const _sdl = Math.hypot(_sdx, _sdy);
+        if (_sdl > 0.0001) { _sdx /= _sdl; _sdy /= _sdl; } else { _sdx = 0; _sdy = 0; }
+        sg.food.push(ssMakeFood(
+          tail.x + _sdx * SS_SHED_DROP_BACK + (Math.random()-0.5)*6,
+          tail.y + _sdy * SS_SHED_DROP_BACK + (Math.random()-0.5)*6,
+          0, 0, sn.pid, 0));   // ne = 0 -> never blocked by the shed cooldown
 
         sg._foodDirty = true;
 

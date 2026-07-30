@@ -2763,7 +2763,13 @@ async function _redeemDeposit(lamps,sig,roomId,playerName,alreadyConfirmed){
       // Verdicts, not hiccups. The server has looked at this deposit and given a final answer —
       // it is spent, or it is stale (an attempt that already ended). Retrying only makes the player
       // wait longer for the same reply.
-      if(/already registered|already been used|different wallet/i.test(e.message||'')) throw e;
+      //
+      // 'Invalid wallet signature' belongs in this list too. It is a deterministic verdict on the proof
+      // we just sent, not a timing problem, so a second identical attempt gets the identical 403 — it
+      // only added ~50s to a wait that was already going to end in failure, and buried the one line
+      // that says what actually went wrong. (The signature preflight in joinLobby now stops this
+      // arising after a deposit at all; this is the backstop.)
+      if(/already registered|already been used|different wallet|invalid wallet signature|banned/i.test(e.message||'')) throw e;
     }
   }
   throw new Error((lastErr&&lastErr.message)||'Could not verify deposit');
@@ -3803,6 +3809,44 @@ async function joinLobby(usd){
       addToast('⚠️ Game servers are not accepting joins right now — you were NOT charged. Try again shortly.','#FFD700',7000);
       lg('mm-log','Servers unavailable — nothing was charged','lerr');
       await new Promise(r=>setTimeout(r,2200));
+      if(_myGen!==_joinGen)return;
+      go('scr-lobby');populateLobby();
+      return;
+    }
+    /*
+     * ── SIGNATURE PREFLIGHT: can this wallet produce a proof the server will ACCEPT? ───────────────
+     *
+     * api/join.js only records the wager if verifyPlayerSig passes — a 64-byte ed25519 signature over
+     * 'pac-arena:join:…' that verifies against the wallet's own public key. That check runs AFTER the
+     * deposit is broadcast, so a wallet whose signMessage hands back something unusable charges the
+     * player and is then refused with "Invalid wallet signature", every single time. That is exactly
+     * what hit players entering through the platform bridge: Privy's Solana RPC can answer
+     * `{signature:<string>}` instead of the Uint8Array its types promise, and the bridge's old encoder
+     * turned a string into an EMPTY byte array — so the server saw no signature at all. One new account
+     * paid six entries in twenty minutes and never got into a single race.
+     *
+     * The deposit is irreversible; this check is free. So it goes FIRST. Verifying locally with the same
+     * primitive the server uses means a wallet that cannot sign is caught while the player still has
+     * their SOL, and "NOT CHARGED" is something we can actually promise.
+     *
+     * The probe string uses a `sigcheck` action that no endpoint accepts, so the signature it produces
+     * can never be replayed as a proof for a join, a cash-out or a bet.
+     */
+    lg('mm-log','Checking wallet signature…','lhi');
+    try{
+      const _pTs=Math.floor(Date.now()/1000);
+      const _pMsg=new TextEncoder().encode('pac-arena:sigcheck:'+ST.address+':'+_pTs);
+      const _pB64=await _sigB64(_pMsg);
+      const _pSig=Uint8Array.from(atob(String(_pB64||'')),c=>c.charCodeAt(0));
+      if(_pSig.length!==64) throw new Error('your wallet returned a '+_pSig.length+'-byte signature (expected 64)');
+      if(!nacl.sign.detached.verify(_pMsg,_pSig,_keypair.publicKey.toBytes()))
+        throw new Error('the signature did not verify against your own wallet');
+    }catch(_se){
+      _joiningLobby=false;
+      const _m='Your wallet could not produce a valid signature ('+((_se&&_se.message)||_se)+'). You were NOT charged.';
+      addToast('❌ '+_m+' Reload the page and try again — if it keeps happening, report it.','#FF4444',12000);
+      lg('mm-log',_m,'lerr');
+      await new Promise(r=>setTimeout(r,2600));
       if(_myGen!==_joinGen)return;
       go('scr-lobby');populateLobby();
       return;
@@ -8487,6 +8531,27 @@ function _ssReconcileFrame(own){
 // server-authoritative. Uses the exact server pickR (thick + FOOD_PICKUP_R) and does NOT widen range.
 function _guestPredictiveEat(my){
   if(!my||!my.path||!my.path.length||!SG||!SG.food||!SG.food.length)return;
+  /*
+   * GROWTH CAP — the second instance of the exact bug the shed-cooldown note below describes, and the
+   * cause of "I drive over food for a few seconds, it collects nothing, then it works again".
+   *
+   * The server refuses regular pebbles outright while ns >= the growth cap (ssGrowCap: intended, the
+   * cap IS the bank). The client never knew that, so it predicted the eat, wiped the pebble from the
+   * screen and pinned it in _eatenLocal so the next snapshot could not re-add it — you saw food vanish,
+   * collect nothing, and pop back when the TTL lapsed.
+   *
+   * It feels random because the cap is MONEY-based, not size-based: ssGrowCap uses carried/entry, so
+   * you hit it at a modest size and it lifts the moment usd rises (money food, a kill) or boosting
+   * burns ns back under it — hence "a few seconds and then it's fine".
+   *
+   * Same rule both sides now, computed from the same ssCapFromRatio the growth code at the render path
+   * already uses. Nothing server-side changes and no pickup RANGE changes: this only stops the client
+   * showing an eat that was never going to happen, so a pebble you cannot have stays visibly on the
+   * field instead of blinking.
+   */
+  const _cBase=ST.lobbyUsd||0;
+  const _cCap=_cBase>0?ssCapFromRatio((_myUsd||0)/_cBase):SS_CAP_MAX;
+  if((my.numSections||0)>=_cCap)return;   // at cap → server eats nothing here, so predict nothing
   const h=my.path[0], now=Date.now(), pickR=msThick(my)+FOOD_PICKUP_R, r2=pickR*pickR;
   for(let i=SG.food.length-1;i>=0;i--){
     const f=SG.food[i];

@@ -123,6 +123,15 @@
     border:1px solid rgba(153,69,255,.35);border-radius:12px;padding:11px 12px;backdrop-filter:blur(6px);
     font-family:ui-monospace,monospace;pointer-events:none;opacity:0;transition:opacity .2s;z-index:3}
   .ctrls.on{opacity:1}
+  /* RACING. The panel stays up while you drive, but a full-strength box in the corner of a racing
+     line is something you resent by lap two — so it steps back: dimmer, narrower, tighter rows, and
+     the "H to hide" footer drops (you already know, and it is the least useful line once moving).
+     Still pointer-events:none, so it can never eat a click. */
+  .ctrls.racing{opacity:.55;width:196px;padding:8px 10px;border-color:rgba(153,69,255,.22)}
+  .ctrls.racing .ctrlsHead{margin-bottom:5px}
+  .ctrls.racing .cr{font-size:10px;padding:1.5px 0}
+  .ctrls.racing .cr i{min-width:64px}
+  .ctrls.racing .ctrlsFoot{display:none}
   .ctrlsHead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:7px}
   .ctrlsHead b{font-size:10px;letter-spacing:.18em;color:#cfc6e8}
   .ctrlsHead span{font-size:9px;letter-spacing:.12em;color:#7fe6a0}
@@ -916,7 +925,22 @@ const CTRL_ROWS = [
   ['Lobby',      'L',          'Start'],
   ['Leave',      '—',        'hold B'],
 ];
-let _ctrlsMode = null, _ctrlsPinned = false;
+let _ctrlsMode = null;
+/*
+ * CONTROLS STAY UP WHILE YOU RACE — and that is now the DEFAULT, not something you have to discover.
+ *
+ * They used to vanish the moment the lights went out, which is precisely when a new player needs them:
+ * you read the panel on the grid, the race starts, and the one thing you were still unsure of (boost?
+ * drift? mirror?) is gone. "Press H" does not help someone who never saw that it was hideable.
+ *
+ * So it defaults ON during a race, H still toggles it, and the choice is REMEMBERED — a player who
+ * hides it does not have to hide it again every single race. Stored per browser; a read failure just
+ * falls back to showing them, because visible-and-unwanted is a smaller problem than gone-when-needed.
+ */
+let _ctrlsPinned = (() => {
+  try { const v = localStorage.getItem('kart_ctrls'); return v === null ? true : v === '1'; }
+  catch (_) { return true; }
+})();
 function renderCtrls() {
   const box = document.getElementById('ctrlsRows'), mode = document.getElementById('ctrlsMode');
   if (!box) return;
@@ -932,9 +956,12 @@ function renderCtrls() {
     return '<div class="cr"><i>' + lbl + '</i><span>' + r[0] + '</span></div>';
   }).join('');
 }
-function showCtrls(on) {
+function showCtrls(on, racing) {
   const el = document.getElementById('ctrls');
-  if (el) el.classList.toggle('on', !!on);
+  if (!el) return;
+  el.classList.toggle('on', !!on);
+  // Same panel, quieter styling while moving — see .ctrls.racing.
+  el.classList.toggle('racing', !!racing);
 }
 
 let _mirrorSkyDone = false;
@@ -1276,7 +1303,11 @@ addEventListener('keydown', (e) => {
   keys[e.key.toLowerCase()] = true;
   keys.shift = e.shiftKey || e.key === 'Shift';
   if (DOWN[e.key]) e.preventDefault();
-  if (e.key.toLowerCase() === 'h') { _ctrlsPinned = !_ctrlsPinned; }
+  // H toggles, and the choice STICKS — hiding them once should not have to be done again every race.
+  if (e.key.toLowerCase() === 'h') {
+    _ctrlsPinned = !_ctrlsPinned;
+    try { localStorage.setItem('kart_ctrls', _ctrlsPinned ? '1' : '0'); } catch (_) {}
+  }
   if (e.key.toLowerCase() === 'l') { lobbyEl.classList.contains('on') ? closeLobby() : openLobby(); }
   if (e.key.toLowerCase() === 'r') reset();
   if (e.key.toLowerCase() === 'm') {          // M toggles engine audio
@@ -3432,10 +3463,14 @@ function frame(now) {
   // interpolation so they are drawn smoothly between the 30Hz packets.
   if (NET.on) { netInterpolate(); }
 
-  // Controls are shown while you are WAITING (grid or lobby), where you actually read them, and stay
-  // up if pinned with H. During a race they get out of the way unless asked for.
+  // Controls are shown while you are WAITING (grid or lobby), where you first read them, AND stay up
+  // through the race itself by default — that is when you actually need to look something up. H hides
+  // them and the choice persists. The `racing` flag only changes how loud the panel is, never whether
+  // it is there, so the two decisions stay independent.
   renderCtrls();
-  showCtrls(_ctrlsPinned || lobbyEl.classList.contains('on') || state !== 'race');
+  const _inLobby = lobbyEl.classList.contains('on');
+  const _racing = state === 'race' && !_inLobby;
+  showCtrls(_ctrlsPinned || _inLobby || state !== 'race', _racing);
 
   shake *= Math.pow(0.001, dt);
   if (shake < 0.2) shake = 0;
