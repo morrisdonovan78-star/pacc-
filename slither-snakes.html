@@ -1198,6 +1198,7 @@ body.mctl #voice-speakers{left:150px;}
     <button onclick="spawnBotSnake('circle')" style="padding:7px 10px;background:#0055AA;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">⭕ CIRCLE (N)</button>
     <button onclick="spawnBotSnake('fight')" style="padding:7px 10px;background:#AA3300;border:none;color:#fff;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">⚔ FIGHTER</button>
     <button onclick="clearBotSnakes()" style="padding:7px 10px;background:#1a0000;border:1px solid #FF4444;color:#FF4444;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">✕ BOTS (C)</button>
+    <button onclick="clearGoldFood()" style="padding:7px 10px;background:#241a00;border:1px solid #FFB400;color:#FFD700;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:6px;letter-spacing:1px;opacity:0.9;">✕ GOLD</button>
   </div>
   <!-- Owner-only. Shown by _syncOwnerUi() so the tuning panel has a real entry point that does not
        depend on a function key surviving the keyboard, the browser, or another handler. -->
@@ -1360,10 +1361,11 @@ const ARENA_R      = 3000;  // world radius (full/normal)
 // broadcast in each ss-state as `ar`. Used for drawing the ring AND for own-snake death prediction
 // so the client stays in step with the authoritative border. Defaults to the full radius.
 let _arenaR = ARENA_R;
-// ARENA CENTRE. The anti-camp push (ssCampPush on the game server) slides the whole ring away from
-// anyone who holds a circle past the trigger, so the arena is no longer necessarily centred on the
-// origin. The server sends it every state packet as acx/acy; everything that draws or tests against
-// the border reads these. Stays 0,0 in practice mode and whenever nobody is camping.
+// ARENA CENTRE. The ROAMING ARENA (ssCampPush on the game server) walks the whole ring to a new spot
+// on a fixed timer — squeezing as it travels, then regaining full size — so the arena is rarely
+// centred on the origin. This is NOT triggered by anything a player does; the old camper-detection
+// push was removed. The server sends the centre every state packet as acx/acy; everything that draws
+// or tests against the border reads these. Stays 0,0 in practice mode only.
 let _arenaCX = 0, _arenaCY = 0, _campPushing = false;
 const SNAKE_SPD    = 288 / 30;  // moneyslither BASE_SPEED  288 px/s ÷ 30 TPS = 9.6 px/tick
 const BOOST_SPD    = 630 / 30;  // moneyslither BOOST_SPEED 630 px/s ÷ 30 TPS = 21 px/tick
@@ -1946,7 +1948,11 @@ function lobbyIdFor(usd){
   if(!(n>0)) return 'ss-free-lobby';
   return 'ss-paid-lobby-'+n;
 }
-function usdToSol(usd){return ST.solPrice>0?parseFloat((usd/ST.solPrice).toFixed(4)):0;}
+// 9 dp = lamport resolution. This used to round to 4 dp, which is ~0.0001 SOL — invisible at a $1 or
+// $5 entry, but at a 10c stake (~0.00067 SOL) it quantised the wager by several percent, so a "10c"
+// entry actually collected about 9.7c. Rounding money to a coarser grid than the chain's own unit
+// has no upside; keep the full precision and let the lamport conversion downstream do the rounding.
+function usdToSol(usd){return ST.solPrice>0?parseFloat((usd/ST.solPrice).toFixed(9)):0;}
 
 // ══ UI HELPERS ═══════════════════════════════════════════════
 function go(id){
@@ -3620,7 +3626,9 @@ function setupOtp(){
 function populateLobby(){
   { const _tb=document.getElementById('test-lobby-btn'); if(_tb)_tb.style.display='inline-flex'; } // test lobby open to everyone; tuning panel stays owner-only
   fetchPrice().then(()=>{
-    const s1=usdToSol(1),s5=usdToSol(5);
+    // DISPLAY rounding only. usdToSol is lamport-precise now, so trim it here rather than at the
+    // source — a label reading "0.006666667 SOL" helps nobody, and the charge must stay exact.
+    const s1=usdToSol(1).toFixed(4),s5=usdToSol(5).toFixed(4);
     const el=id=>document.getElementById(id);
     if(el('l1-sol'))el('l1-sol').textContent='≈ '+s1+' SOL per player';
     if(el('l5-sol'))el('l5-sol').textContent='≈ '+s5+' SOL per player';
@@ -4482,7 +4490,9 @@ async function pkConnect(roomId,gameToken,spectate){
       if(typeof d.ar==='number'&&d.ar>0)_arenaR=d.ar; // live (shrinking/expanding) border radius
       if(typeof d.acx==='number')_arenaCX=d.acx;         // anti-camp push — the ring itself moves
       if(typeof d.acy==='number')_arenaCY=d.acy;
-      if(_campPushing!==!!d.cpush){ _campPushing=!!d.cpush; if(_campPushing){ try{ addToast('⚠ ARENA CLOSING IN — someone is camping','#FF6600',3000); }catch(_){} } }
+      // The border no longer reacts to camping — it roams on a timer, so this can never be blamed on
+      // a player. cpush is now simply "the ring is travelling right now".
+      if(_campPushing!==!!d.cpush){ _campPushing=!!d.cpush; if(_campPushing){ try{ addToast('⚠ ARENA ON THE MOVE','#FF6600',3000); }catch(_){} } }
       // Sync food (sent every ~250ms or when changed)
       if(d.food){
         SG.food=_mapServerFood(d.food);
@@ -7700,6 +7710,16 @@ function clearBotSnakes(){
   let n=0;
   SG.snakes.forEach((s,id)=>{if(id.startsWith('bot-')&&s.alive){eliminateSnake(id,null);n++;}});
   addToast(n?'Removed '+n+' bot(s)':'No bots active','#888');
+}
+// Clear the gold/kill orbs littering a practice lobby. PRACTICE + FREE ONLY, and the SERVER is the
+// authority on that — a gold orb is a claim ticket on escrowed SOL, so the handler re-checks the
+// lobby from the socket handshake and additionally refuses to delete any orb carrying real value.
+// This guard is only here to keep the button from looking broken in a paid room.
+function clearGoldFood(){
+  const _srvLobby=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
+  if(!_srvLobby){addToast('Practice lobby only','#FF4444');return;}
+  if(!_sio){addToast('Not connected','#FF4444');return;}
+  _sio.emit('ss-clear-gold');   // result comes back as an 'ss-notice' toast
 }
 
 function onResize(){if(canvas){canvas.width=window.innerWidth;canvas.height=window.innerHeight;}}
