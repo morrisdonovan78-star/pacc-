@@ -2625,6 +2625,18 @@ async function fetchPrice(){
   try{const r=await fetch('/api/price');const d=await r.json();if(d.price>0)ST.solPrice=d.price;}
   catch(e){ST.solPrice=ST.solPrice||150;}
 }
+/*
+ * Solana will not leave an account holding dust: it must end at exactly zero, or at or above the
+ * RENT-EXEMPT MINIMUM. A wager therefore costs wager + fee + "this much has to STAY behind", which is
+ * why a player holding MORE than the wager can still be refused - and the refusal surfaces as
+ * "Insufficient Funds For Rent" naming their own wallet, after they have already signed and paid a
+ * network fee for a transaction that could never land. Three of those happened on 2026-07-29.
+ *
+ * Spelled out rather than hidden inside a flat 0.001 SOL, so the arithmetic can be read and so the
+ * player can be told the real total instead of a magic number.
+ */
+const SOL_RENT_MIN = 890880;   // rent-exempt minimum for a plain system account, in lamports
+const SOL_TX_FEE   = 5000;     // one signature
 async function fetchBalanceLamports(addr){
   const body=JSON.stringify({jsonrpc:'2.0',id:1,method:'getBalance',params:[addr,{commitment:'confirmed'}]});
   // Retry a few times. A single /api/rpc hiccup used to return 0 — which is INDISTINGUISHABLE from an
@@ -2641,7 +2653,16 @@ async function fetchBalanceLamports(addr){
 async function refreshBal(){
   if(!ST.address)return;
   const lamps=await fetchBalanceLamports(ST.address);
-  if(lamps!=null) ST.balance=lamps/1e9;   // null ⇒ read failed → keep last known balance, never fake a $0
+  /*
+   * Keeping the last known value on a failed read is right - never fake a $0 at someone who has money.
+   * But callers then cannot tell a FRESH balance from a stale one, and "did we read it" was being
+   * inferred from `ST.balance > 0`, which a stale non-zero value passes just as well as a real one.
+   * That is how an unaffordable join got through: the balance it checked was from a richer moment.
+   * Freshness is recorded explicitly now, and exact lamports are kept beside the float so the
+   * affordability check never rounds.
+   */
+  ST.balFresh = (lamps != null);
+  if(lamps!=null){ ST.balance=lamps/1e9; ST.balLam=lamps; ST.balTs=Date.now(); }
   const usd=(ST.balance*ST.solPrice).toFixed(2);
   const short=ST.address.slice(0,6)+'…'+ST.address.slice(-4);
   const solStr=ST.balance.toFixed(4)+' SOL';
@@ -3705,13 +3726,23 @@ async function joinLobby(usd){
   await fetchPrice().catch(()=>{});   // live price so wagerSol is correct (stale/0 price → wagerSol 0 → lenient, never a false block)
   ST.wagerSol=usdToSol(usd);
   await refreshBal();
-  const _need=ST.wagerSol+0.001;
-  // Only block when we actually READ a balance and it is genuinely short. A failed/zero read (an RPC
-  // hiccup, or the balance not yet synced in the embedded/bridge context) must NOT tell a funded
-  // player they are broke — that was the "$2 in my wallet but it says not enough SOL for a $1 lobby"
-  // bug. When the balance is unknown, let the on-chain deposit be the authority: it fails cleanly with
-  // a clear "short on SOL" message if they truly can't cover it.
-  if(ST.balance>0 && ST.balance<_need){
+  /*
+   * -- AFFORDABILITY, IN LAMPORTS, AGAINST A READ WE KNOW IS FRESH --------------------------------
+   * `wager + fee + SOL_RENT_MIN`, because the minimum has to be LEFT IN THE WALLET (see the
+   * constants above). The old reserve was a flat 0.001 SOL, which does happen to cover fee + minimum,
+   * so the arithmetic was never the bug - the balance was. The test read
+   * `ST.balance>0 && ST.balance<need`, where `>0` stood in for "did we manage to read a balance at
+   * all". It cannot do that job: refreshBal keeps the last known value when a read fails, so a stale
+   * balance sails through, the join proceeds, and Solana rejects the deposit with a rent error after
+   * the player has already paid the network fee.
+   *
+   * Still deliberately lenient when the balance is genuinely UNREADABLE - blocking on that was the
+   * "$2 in my wallet but it says not enough SOL for a $1 lobby" bug, and the deposit itself is the
+   * real authority. The difference is that we now know which case we are in, and say so.
+   */
+  const _needLam=Math.floor(ST.wagerSol*solanaWeb3.LAMPORTS_PER_SOL)+SOL_TX_FEE+SOL_RENT_MIN;
+  const _need=_needLam/1e9;
+  if(ST.balFresh && ST.balLam<_needLam){
     /*
      * NEVER boot anyone on ONE balance read. The commonest way to reach this line is PLAY AGAIN
      * straight after a cash-out: the payout is on its way but not yet visible, so the balance we just
@@ -3724,11 +3755,22 @@ async function joinLobby(usd){
     await refreshBal().catch(()=>{});
     if(_myGen!==_joinGen)return;
   }
-  if(ST.balance>0 && ST.balance<_need){
-    addToast('❌ Not enough SOL! Need '+_need.toFixed(4)+' (have '+ST.balance.toFixed(4)+')','#FF4444');
+  if(ST.balFresh && ST.balLam<_needLam){
+    // Say the whole sum. "Need 0.0024 (have 0.0019)" reads as a rounding quibble; WHY the number is
+    // bigger than the wager is the part worth stating, and "add this much" is the actionable bit.
+    const _addSol=(_needLam-ST.balLam)/1e9;
+    addToast('❌ Add '+_addSol.toFixed(4)+' SOL to play $'+usd+' - needs '+_need.toFixed(4)+
+             ' total (wager '+ST.wagerSol.toFixed(4)+' + fee + the 0.00089 SOL Solana’s rent rule makes you '+
+             'leave in your wallet). You were NOT charged.','#FF4444',9000);
+    lg('mm-log','Not enough SOL - nothing was charged. Needed '+_need.toFixed(4)+', had '+(ST.balLam/1e9).toFixed(4),'lerr');
     _joiningLobby=false;
-    if(_BRIDGE){ _bridgeNotify('EXIT',{reason:'insufficient-funds',need:_need,have:ST.balance,usd:usd}); }  // back to the platform to deposit
+    if(_BRIDGE){ _bridgeNotify('EXIT',{reason:'insufficient-funds',need:_need,have:ST.balLam/1e9,usd:usd}); }  // back to the platform to deposit
     return;
+  }
+  if(!ST.balFresh){
+    // Unreadable, so we are letting the chain decide. Put the requirement in the log FIRST, so that if
+    // the deposit does bounce the player is looking at a number rather than a raw Solana rent error.
+    lg('mm-log','Balance unavailable - this needs '+_need.toFixed(4)+' SOL (wager + fee + Solana minimum)','lwarn');
   }
   addToast('🐍 Joining $'+usd+' lobby — wagering '+ST.wagerSol.toFixed(4)+' SOL…','#FFD700');
   stopLobbyCountPoll();
@@ -3885,7 +3927,20 @@ async function joinLobby(usd){
     // attempt touch state owned by a newer one.
     if(_myGen!==_joinGen){ console.warn('[join] superseded attempt aborted:',e&&e.message); return; }
     _joiningLobby=false;
-    lg('mm-log','Error: '+e.message,'lerr');
+    /*
+     * "Insufficient Funds For Rent" is Solana saying the wallet may not be left holding dust - but it
+     * names the player's own wallet, sounds like a platform fault, and is the one error here the
+     * player can actually act on. Translate it and state the figure. This is the backstop for the
+     * pre-flight check above: whenever the balance could not be read, this is what they get.
+     */
+    let _emsg=String((e&&e.message)||e);
+    if(/insufficient\s*funds\s*for\s*rent|InsufficientFundsForRent/i.test(_emsg)){
+      const _n=(Math.floor(ST.wagerSol*solanaWeb3.LAMPORTS_PER_SOL)+SOL_TX_FEE+SOL_RENT_MIN)/1e9;
+      _emsg='Not enough SOL. A $'+usd+' entry needs '+_n.toFixed(4)+' SOL in the wallet - the wager, the '+
+            'network fee, and the 0.00089 SOL Solana requires you to leave behind. Top up and try again.';
+      addToast('❌ '+_emsg,'#FF4444',11000);
+    }
+    lg('mm-log','Error: '+_emsg,'lerr');
     /*
      * A join that dies AFTER the deposit broadcast has taken real money, and the player is owed a
      * straight answer plus something they can quote when they ask for it back. Silently dropping them
@@ -5478,7 +5533,11 @@ async function _wgCreate(){
     await refreshBal().catch(()=>{});
     const lamps=_wgUsdToLamports(usd);
     if(!(lamps>0)){ addToast('Price unavailable — try again','#FF4444'); return; }
-    if(ST.balance<_wgSol(lamps)+0.001){ addToast('Not enough SOL (need '+(_wgSol(lamps)+0.001).toFixed(4)+')','#FF4444'); return; }
+    // Same rent-floor arithmetic as the join guard: the minimum has to be LEFT in the wallet, so a
+    // stake the balance appears to cover can still be refused on-chain.
+    if(ST.balFresh && ST.balLam<lamps+SOL_TX_FEE+SOL_RENT_MIN){
+      addToast('Not enough SOL - needs '+((lamps+SOL_TX_FEE+SOL_RENT_MIN)/1e9).toFixed(4)+
+               ' (stake + fee + the minimum Solana makes you leave in your wallet)','#FF4444',8000); return; }
     addToast('Escrowing '+_wgUsdStr(lamps)+'…','#FFD700');
     const txSig=await _wgDeposit(lamps);
     let nm=''; try{ nm=(typeof getMyName==='function'?(getMyName()||''):''); }catch(_){}
@@ -5545,7 +5604,11 @@ async function _wgAccept(id){
     if(!rv.ok||!rd.ok){ addToast(rd.error||'Could not take that bet','#FF6600',5000); _wg.open.delete(id); _wgRender(); return; }
     await refreshBal().catch(()=>{});
     const lamps=Number(rd.stake)||w.stake;
-    if(ST.balance<_wgSol(lamps)+0.001){ addToast('Not enough SOL (need '+(_wgSol(lamps)+0.001).toFixed(4)+')','#FF4444'); return; }
+    // Same rent-floor arithmetic as the join guard: the minimum has to be LEFT in the wallet, so a
+    // stake the balance appears to cover can still be refused on-chain.
+    if(ST.balFresh && ST.balLam<lamps+SOL_TX_FEE+SOL_RENT_MIN){
+      addToast('Not enough SOL - needs '+((lamps+SOL_TX_FEE+SOL_RENT_MIN)/1e9).toFixed(4)+
+               ' (stake + fee + the minimum Solana makes you leave in your wallet)','#FF4444',8000); return; }
     addToast('Escrowing '+_wgUsdStr(lamps)+'…','#FFD700');
     const txSig=await _wgDeposit(lamps);
     let nm=''; try{ nm=(typeof getMyName==='function'?(getMyName()||''):''); }catch(_){}

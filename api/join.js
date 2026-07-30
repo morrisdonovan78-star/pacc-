@@ -574,8 +574,15 @@ module.exports = async function handler(req, res) {
        */
       try{
         const hk='ph:'+game+':hist:'+walletAddress;
-        await kvLpush(hk,JSON.stringify({t:Date.now(),e:Number(earned)||0,w:Number(wagTot)||0,ty:'join',a:lamps}));
-        await kvLtrim(hk,0,199);
+        const _rec={t:Date.now(),e:Number(earned)||0,w:Number(wagTot)||0,ty:'join',a:lamps};
+        await kvLpush(hk,JSON.stringify(_rec));
+        // 2000, not 200: every entry, cash-out and kill writes a point, so 200 is one busy evening and
+        // the chart's 1M/6M/1Y views all showed the same few hours. KEEP IN SYNC with HIST_MAX in
+        // api/settle.js, along with the per-day rollup below.
+        await kvLtrim(hk,0,1999);
+        // One field per UTC day, overwritten through the day, so the long timeframes have something to
+        // draw once the raw window has rolled past. Same cumulative e/w, so the two series share an axis.
+        try{ await kvHset('phd:'+game+':'+walletAddress,new Date(_rec.t).toISOString().slice(0,10),JSON.stringify(_rec)); }catch(_){}
       }catch(_){}
       // Global counters
       await kvHincrby('ph:'+game+':global','totalWagered',lamps);

@@ -596,9 +596,11 @@ module.exports = async function handler(req, res) {
   if (req.query && req.query.address) {
     try {
       const addr = String(req.query.address).trim();
-      const [stats, histRaw, pfp, cur] = await Promise.all([
+      const [stats, histRaw, histDaily, pfp, cur] = await Promise.all([
         readStats(game, addr),
-        kvLrange('ph:' + game + ':hist:' + addr, 0, 199).catch(() => null),
+        kvLrange('ph:' + game + ':hist:' + addr, 0, 1999).catch(() => null),
+        // Per-day rollup, for the stretch older than the raw window still holds. See pushEarningsPoint.
+        kvHgetall('phd:' + game + ':' + addr).catch(() => null),
         // The photo rides along with the profile it belongs to. Anyone opening another player's
         // profile gets it in the SAME request they were already making — no extra round trip and no
         // per-row KV reads on a leaderboard, which is what would actually burn the command budget.
@@ -608,10 +610,20 @@ module.exports = async function handler(req, res) {
       const hasData = stats.earned > 0 || stats.wagered > 0 || stats.games > 0 || stats.kills > 0 || stats.name;
       if (!hasData) return res.status(200).json({ player: null });
       // kvLpush writes newest-first; reverse to chronological order for the chart
-      const history = (histRaw || [])
+      const rawPts = (histRaw || [])
         .map(s => { try { return JSON.parse(s); } catch (_) { return null; } })
         .filter(Boolean)
         .reverse();
+      /* Prepend the daily rollup for the period the raw window no longer reaches. Both series carry the
+       * same cumulative e/w, so they join onto one axis with no rescaling — the chart receives a single
+       * longer history and needs to know nothing about this. Only days STRICTLY OLDER than the oldest
+       * raw point are used, so a day that is already covered in full detail is never duplicated. */
+      const oldestRaw = rawPts.length ? rawPts[0].t : Infinity;
+      const dayPts = Object.values(histDaily || {})
+        .map(v => { try { return typeof v === 'string' ? JSON.parse(v) : v; } catch (_) { return null; } })
+        .filter(p => p && typeof p.e === 'number' && p.t < oldestRaw)
+        .sort((a, b) => a.t - b.t);
+      const history = dayPts.concat(rawPts);
       // `payTo` is the CURRENT wallet for this account and is the only address a caller should ever
       // send money to — `address` may be a historical key someone had saved.
       // `wallets` is every address on this account. A client about to send money should pick the

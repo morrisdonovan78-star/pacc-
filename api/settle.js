@@ -18,14 +18,28 @@ const REQUIRE_CASH_PROOF = (process.env.CASHOUT_REQUIRE_PROOF || '') === '1';
 console.log('[settle] boot REQUIRE_CASH_PROOF=' + (REQUIRE_CASH_PROOF ? 'ON (proof mandatory)' : 'OFF (client claim, capped 20x)') +
             ' GAME_SECRET=' + (GAME_SECRET ? 'present(' + GAME_SECRET.length + ' chars)' : 'MISSING'));
 const { kvPing, kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvZrevrange, kvHincrby,
-        kvLpush, kvLtrim, kvLrange, kvHget, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
+        kvLpush, kvLtrim, kvLrange, kvHget, kvHset, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
 // Pure pari-mutuel engine (spectator betting). All money math lives here so it is unit-tested
 // offline; this file only does auth, KV, and the on-chain transfers. See lib/betting.js.
 const BET = require('../lib/betting');
 const PAYOUT = require('../lib/eventpayout');   // pure winner/amount planning (unit-tested offline)
 
 /*
- * Appends a timestamped point to the player-profile chart history, capped at 200 points.
+ * Appends a timestamped point to the player-profile chart history.
+ *
+ * TWO series, because one cannot do both jobs:
+ *   ph:<game>:hist:<addr>  a LIST of the last HIST_MAX raw events - full detail, recent only.
+ *   phd:<game>:<addr>      a HASH, one field per UTC day, holding that day's LAST cumulative totals.
+ *
+ * The raw list was capped at 200, which sounds generous and is not: every entry, cash-out and kill
+ * reward writes a point, so an active player burns 200 in a single evening. The chart's 1M/6M/1Y
+ * timeframes then all showed the same three hours, with both axis labels reading the same date, which
+ * looks exactly like a broken chart. The cap is 2000 now, and the daily rollup means the long
+ * timeframes keep working however far back you go - one field per day is ~400 fields a year, and it is
+ * overwritten within a day rather than appended, so it costs no growth.
+ *
+ * The rollup carries the same cumulative e/w as the raw points, so the two series concatenate onto one
+ * axis with no rescaling - see the merge in api/leaderboard.js.
  *
  * ⚠️ `e` ALONE CANNOT DRAW A PROFIT CHART. It is CUMULATIVE GROSS PAYOUTS, which only ever rises —
  * so a player who lost money still got a line sloping cheerfully upward. The chart needs
@@ -40,6 +54,7 @@ const PAYOUT = require('../lib/eventpayout');   // pure winner/amount planning (
  * Pre-existing records have no `w`; the chart deliberately ignores those rather than mixing scales
  * (see PlayerCard.jsx) — there is no way to reconstruct historical wagered-at-time-T after the fact.
  */
+const HIST_MAX = 2000;          // raw per-event points kept per player per game
 async function pushEarningsPoint(game, address, earned, meta) {
   const key = 'ph:' + game + ':hist:' + address;
   const rec = { t: Date.now(), e: Number(earned) || 0 };
@@ -49,7 +64,14 @@ async function pushEarningsPoint(game, address, earned, meta) {
     if (meta.amount != null)  rec.a  = Number(meta.amount) || 0;
   }
   await kvLpush(key, JSON.stringify(rec));
-  await kvLtrim(key, 0, 199);
+  await kvLtrim(key, 0, HIST_MAX - 1);
+  /* Day rollup. Overwrites the same field all day, so it lands on that day's final totals. Wrapped and
+   * swallowed on purpose: this is a chart nicety attached to the cash-out and kill paths, and it must
+   * never be the reason a payout response fails. */
+  try {
+    const day = new Date(rec.t).toISOString().slice(0, 10);
+    await kvHset('phd:' + game + ':' + address, day, JSON.stringify(rec));
+  } catch (_) {}
 }
 
 // ── Ed25519 wallet signature verification ─────────────────────────────────────
