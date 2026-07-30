@@ -2439,7 +2439,22 @@ module.exports = async function handler(req, res) {
         stakes[a] = Math.max(0, Math.floor(Number(await kvGet('pw:' + a)) || 0));
       }
       clearTimeout(guard); done = true;
-      return res.status(200).json({ ok: true, stakes });
+      /* `requireCashProof` rides along on this already-GAME_SECRET-authed read so the guard's state is
+       * checkable from a machine that legitimately holds the secret — i.e. either game node — without
+       * exposing it publicly and without a new endpoint.
+       *
+       * It is here because the flag CANNOT BE READ any other way. This project stores env vars as
+       * "sensitive": `vercel env ls` and the REST API both return "" for the value whatever it is, and
+       * console.log does not surface in the runtime-log view on this plan. That is how the flag came to
+       * be created EMPTY and then deployed under the title "rebuild so CASHOUT_REQUIRE_PROOF=1 takes
+       * effect" — nothing outside the function could tell armed from disarmed, and the guard standing
+       * between a forged cash-out claim and the escrow was in an unknown state for two hours.
+       *
+       * The game server also has a real use for it: with the guard ON, a paid cash-out that mints no
+       * proof is refused outright, so `NO cash proof` in the node's log stops being a note and becomes
+       * the reason a player could not get paid. */
+      return res.status(200).json({ ok: true, stakes,
+        requireCashProof: REQUIRE_CASH_PROOF, gameSecret: GAME_SECRET.length });
     }
 
     /* ── forfeit: a paid Pac-Man player left and never came back (GAME_SECRET-HMAC) ────────────────
