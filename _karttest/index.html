@@ -905,10 +905,14 @@ const CTRL_ROWS = [
   ['Defend',     'E',          'A'],
   // Split out so each key says what it does. One row reading ", . ; '" tells you keys exist and
   // nothing about which does what, and the mirror is the one control people actually want to adjust.
-  ['Mirror angle', ', .', '—'],
-  ['Mirror place', ';',   '—'],
-  ['Mirror size',  "'",   '—'],
-  ['Mirror on/off','K',   '—'],
+  //
+  // The pad column read '—' on all four of these, which was honest but useless — they were genuinely
+  // keyboard-only. They are bound to the stick click now (see gpPoll); '$' is filled in with whichever
+  // click the connected pad actually has, so the panel can never name a button that isn't there.
+  ['Mirror angle', ', .', '$ + ← →'],
+  ['Mirror place', ';',   '$ + ↓'],
+  ['Mirror size',  "'",   '$ + ↑'],
+  ['Mirror on/off','K',   'tap $'],
   ['Lobby',      'L',          'Start'],
   ['Leave',      '—',        'hold B'],
 ];
@@ -917,11 +921,16 @@ function renderCtrls() {
   const box = document.getElementById('ctrlsRows'), mode = document.getElementById('ctrlsMode');
   if (!box) return;
   const pad = !!GP.on;
-  if (_ctrlsMode === pad) return;             // only rebuild when the input scheme actually changes
-  _ctrlsMode = pad;
+  // Keyed on the mirror button too: plugging in a pad that has no stick click has to be able to
+  // rewrite those rows back to '—'. gpPoll clears _ctrlsMode when that changes.
+  const key = pad ? 'pad:' + (GP.mirName || 'none') : 'kb';
+  if (_ctrlsMode === key) return;             // only rebuild when the input scheme actually changes
+  _ctrlsMode = key;
   if (mode) mode.textContent = pad ? 'CONTROLLER' : 'KEYBOARD';
-  box.innerHTML = CTRL_ROWS.map((r) =>
-    '<div class="cr"><i>' + (pad ? r[2] : r[1]) + '</i><span>' + r[0] + '</span></div>').join('');
+  box.innerHTML = CTRL_ROWS.map((r) => {
+    const lbl = pad ? (GP.mirName ? r[2].split('$').join(GP.mirName) : (r[2].indexOf('$') >= 0 ? '—' : r[2])) : r[1];
+    return '<div class="cr"><i>' + lbl + '</i><span>' + r[0] + '</span></div>';
+  }).join('');
 }
 function showCtrls(on) {
   const el = document.getElementById('ctrls');
@@ -1289,6 +1298,7 @@ addEventListener('keyup', (e) => {
 //   LT or B (held)       brake / reverse      LB or X     drift
 //   RB or Y              boost                Start       lobby
 //   Back/Select          reset                Hold B 0.7s leave the game (embedded on the site)
+//   Tap R3               mirror on/off        R3 + D-pad  mirror angle / size / placement
 //
 // In the LOBBY the same stick moves a highlight through the panel's own buttons and A presses one,
 // so create / quick race / join a specific row / pick a region / READY are all reachable. That is
@@ -1305,6 +1315,15 @@ function gpPoll(dt) {
   const btn = (i) => !!(p.buttons[i] && p.buttons[i].pressed);
   const val = (i) => (p.buttons[i] ? p.buttons[i].value : 0);
   const edge = (i) => { const d = btn(i), w = GP.prev[i]; GP.prev[i] = d; return d && !w; };
+  // Shared key-repeat: one press acts immediately, then repeats while held. Used by the mirror
+  // adjust below and by the lobby highlight, which had its own copy of exactly this.
+  const gnow = performance.now();
+  const rep = (down, key, first, next) => {
+    if (!down) { GP.rep[key] = 0; return false; }
+    if (!GP.rep[key]) { GP.rep[key] = gnow + (first || 380); return true; }
+    if (gnow >= GP.rep[key]) { GP.rep[key] = gnow + (next || 120); return true; }
+    return false;
+  };
 
   // Analogue triggers where the pad has them, face buttons where it doesn't — one binding set that
   // works on an Xbox pad, a DualSense and a cheap USB gamepad without a settings screen.
@@ -1336,20 +1355,51 @@ function gpPoll(dt) {
 
   // Lobby / grid panel navigation. Only while something is actually on screen to navigate.
   const inMenu = lobbyEl.classList.contains('on') || gridPanelOpen();
+
+  /* ── MIRROR, ON A PAD ────────────────────────────────────────────────────────────────────────
+   * The controls panel listed all four mirror actions as "—" for controller, because they really
+   * were keyboard-only: the mirror is the one thing people actually adjust mid-session, and on a pad
+   * there was no way to do it at all.
+   *
+   * The stick CLICK is the natural home for it (it is the camera stick) and it is one of the only
+   * buttons this game does not already use — 0-5 are throttle/brake/drift/boost/attack/defend, 6/7
+   * are the triggers, 8 is reset, 9 is the lobby, 12-15 steer. Tap it to toggle the glass; hold it
+   * and the D-pad adjusts, with left/right on the angle and up/down on size and placement.
+   *
+   * While it is held the D-pad must NOT also steer, or lining the mirror up in a corner would jerk
+   * the car — the same reason the keyboard handler consumes these keys before the driving map. The
+   * left stick keeps steering throughout, so you never lose control of the kart to move a mirror.
+   *
+   * R3 preferred, L3 if the pad reports fewer buttons, and if it has neither the panel keeps saying
+   * "—" rather than naming a button that isn't there. Not while a menu is up: there the D-pad is
+   * driving the highlight.
+   */
+  const mirBtn = p.buttons.length > 11 ? 11 : (p.buttons.length > 10 ? 10 : -1);
+  const mirName = mirBtn === 11 ? 'R3' : mirBtn === 10 ? 'L3' : null;
+  if (GP.mirName !== mirName) { GP.mirName = mirName; _ctrlsMode = null; }   // relabel the panel
+  const mirMod = mirBtn >= 0 && !inMenu && btn(mirBtn);
+  if (mirMod) {
+    if (rep(btn(14) || ax < -0.55, 'ml')) mirAdjust('angle', -1);
+    if (rep(btn(15) || ax > 0.55, 'mr')) mirAdjust('angle', 1);
+    if (rep(btn(12), 'mu', 400, 400)) mirAdjust('size');
+    if (rep(btn(13), 'md', 400, 400)) mirAdjust('pos');
+    GP.mirUsed = GP.mirUsed || btn(12) || btn(13) || btn(14) || btn(15) || Math.abs(ax) > 0.55;
+    GP.steer = Math.abs(ax) > GP_DZ ? ax : 0;      // drop the D-pad steer, keep the stick
+  } else if (mirBtn >= 0) {
+    // Release with no adjustment made = a tap, which toggles the mirror. Checked on release so a
+    // hold-and-adjust doesn't also flip it off underneath you.
+    if (GP.mirWas && !GP.mirUsed) mirAdjust('on');
+    GP.mirUsed = false;
+    GP.rep.ml = GP.rep.mr = GP.rep.mu = GP.rep.md = 0;
+  }
+  GP.mirWas = mirMod;
+
   if (inMenu) {
-    const now = performance.now();
-    const step = (dir, key) => {
-      const down = dir();
-      if (!down) { GP.rep[key] = 0; return false; }
-      if (!GP.rep[key]) { GP.rep[key] = now + 380; return true; }
-      if (now >= GP.rep[key]) { GP.rep[key] = now + 120; return true; }
-      return false;
-    };
     const ay = p.axes[1] || 0;
-    if (step(() => btn(13) || ay > 0.55, 'd')) gpMenuMove(1);
-    if (step(() => btn(12) || ay < -0.55, 'u')) gpMenuMove(-1);
-    if (step(() => btn(15) || ax > 0.55, 'r')) gpMenuMove(1);
-    if (step(() => btn(14) || ax < -0.55, 'l')) gpMenuMove(-1);
+    if (rep(btn(13) || ay > 0.55, 'd')) gpMenuMove(1);
+    if (rep(btn(12) || ay < -0.55, 'u')) gpMenuMove(-1);
+    if (rep(btn(15) || ax > 0.55, 'r')) gpMenuMove(1);
+    if (rep(btn(14) || ax < -0.55, 'l')) gpMenuMove(-1);
     if (edge(0)) { const e = gpMenuCurrent(); if (e) { e.click(); startAudio(); } }
     // A pad must never be able to drive while a menu is up over the track.
     GP.gas = GP.brake = GP.drift = GP.boost = GP.attack = GP.defend = false; GP.steer = 0;
