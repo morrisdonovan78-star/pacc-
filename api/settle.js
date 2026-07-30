@@ -66,51 +66,65 @@ const CREATOR_FEE_PCT = 0.10;
 // windows, in a PAID lobby, accrue to the event board (evtk:<id> hash, field = killer wallet).
 // Kills come only from the GAME_SECRET-authed elim-lock below, so the board can't be client-inflated.
 // KEEP THE WINDOWS IN SYNC with the 'bounty' entries of window.SNAKE_EVENTS in slither-snakes.html.
-/* RECURRING WEEKLY, not a hand-maintained list. Bounty Hour is Saturday 2–4 PM ET every week, with
- * the Free Entry Grind in the hour straight after (4–5 PM ET).
+/* Events run on a Saturday 2 PM ET slot (Bounty Hour 2–4 PM, Free Entry Grind 4–5 PM straight
+ * after), but ONLY on the Saturdays listed in SCHEDULED_SATURDAYS below. The slot arithmetic is
+ * generated so an occurrence can never be half-defined; the SCHEDULE is explicit so an event can
+ * never run — or pay out — on a week the operator didn't put there.
  *
- * These used to be arrays with exactly ONE entry in them. The moment Jul 25 2026 passed, the
- * homescreen board froze on "This event has ended — see you at the next one" — permanently, because
- * there was no next entry — while EventCard.jsx cheerfully counted down to the coming Saturday. Two
- * components telling players different things about the same event, and a list nobody would remember
- * to top up. Generating the windows makes going stale impossible.
+ * This used to generate every week forever. That auto-scheduled a Bounty Hour the operator had not
+ * announced, pushed a countdown to it onto the homescreen, and would have opened a live scoring
+ * window that auto-pays $40 of prize money out of the float. Prize money does not get committed by
+ * a for-loop. Add a date here to schedule the next one; remove/omit it and nothing runs.
  *
  * Occurrence ids stay 'bounty-YYYY-MM-DD' / 'grind-YYYY-MM-DD', unchanged, because they key the
  * payout idempotency locks (evtk:<id>, per-place NX) and the already-settled Jul 25 event must keep
  * resolving to the same id it was paid under.
  *
- * SATURDAY_ANCHOR is the same instant as RECRUIT_ANCHOR below — one weekly deadline across the whole
- * platform. Fixed 7-day arithmetic, so during EST these shift to 1–3 PM ET; see the note there. */
+ * KEEP IN SYNC with the 'grind' schedule in api/join.js and window.SNAKE_EVENTS in
+ * slither-snakes.html (the in-game card). SATURDAY_ANCHOR is the same instant as RECRUIT_ANCHOR
+ * below — one weekly deadline across the whole platform. Recruiter of the Week is NOT on this
+ * schedule: it is a rolling weekly contest that always runs. */
+const SCHEDULED_SATURDAYS = ['2026-07-25'];                // ← the only Saturdays an event exists on
 const SATURDAY_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0);   // Sat Jul 25 2026 14:00 ET
+const SAT_UTC_HOUR    = 18;                                // time-of-day of SATURDAY_ANCHOR, in UTC
 const WEEK_MS_EV      = 7 * 24 * 3600 * 1000;
 
-// The Saturday-2PM instant for the week containing `now` (may be in the future within that week).
+// One scheduled day → one occurrence window. Date.parse of 'YYYY-MM-DDT18:00:00Z' is exactly
+// SATURDAY_ANCHOR + n whole weeks for any Saturday in the list, so this and the week arithmetic below
+// can never disagree about when an event starts.
+function evFromDay(day, kind, durMs, offsetMs) {
+  const start = Date.parse(day + 'T' + SAT_UTC_HOUR + ':00:00.000Z');
+  if (!Number.isFinite(start)) return null;                // typo'd date in the schedule → no event
+  return { id: kind + '-' + day, day, start: start + (offsetMs || 0), end: start + (offsetMs || 0) + durMs };
+}
+// The occurrence in the week containing `now` (may be later that same week), or null when that
+// Saturday isn't on the schedule — meaning there is no event that week, at all.
 function evOccurrence(now, kind, durMs, offsetMs) {
   const i = Math.floor((now - SATURDAY_ANCHOR) / WEEK_MS_EV);
-  const start = SATURDAY_ANCHOR + i * WEEK_MS_EV + (offsetMs || 0);
-  const day = new Date(start).toISOString().slice(0, 10);
-  return { id: kind + '-' + day, start, end: start + durMs };
+  const day = new Date(SATURDAY_ANCHOR + i * WEEK_MS_EV).toISOString().slice(0, 10);
+  if (SCHEDULED_SATURDAYS.indexOf(day) < 0) return null;
+  return evFromDay(day, kind, durMs, offsetMs);
 }
-// Every occurrence from `back` weeks ago through `fwd` weeks ahead, oldest first — the generated
-// stand-in for what the arrays used to hold, so "most recent past event" lookups still work.
-function evSeries(now, kind, durMs, offsetMs, back, fwd) {
-  const out = [];
-  for (let k = -back; k <= fwd; k++) out.push(evOccurrence(now + k * WEEK_MS_EV, kind, durMs, offsetMs));
-  return out;
+// EVERY scheduled occurrence, oldest first — driven by the schedule itself, not a sliding window of
+// weeks around `now`. A window would eventually roll off the oldest event, and the "last event's
+// results" board on the homescreen would silently empty out months after the fact.
+function evSeries(kind, durMs, offsetMs) {
+  return SCHEDULED_SATURDAYS.map(d => evFromDay(d, kind, durMs, offsetMs))
+                            .filter(Boolean).sort((a, b) => a.start - b.start);
 }
 const KILL_EVENTS_DUR  = 2 * 3600 * 1000;   // 2h: 2–4 PM ET
 const GRIND_EVENT_DUR  = 1 * 3600 * 1000;   // 1h: 4–5 PM ET, straight after Bounty
 const GRIND_OFFSET_MS  = 2 * 3600 * 1000;   // starts when Bounty ends
 // Kept as a function-backed view so a long-lived serverless instance can never serve a stale window.
-function killEvents(now) { return evSeries(now || Date.now(), 'bounty', KILL_EVENTS_DUR, 0, 12, 2); }
+function killEvents() { return evSeries('bounty', KILL_EVENTS_DUR, 0); }
 function activeKillEvent(now) { now = now || Date.now();
   const e = evOccurrence(now, 'bounty', KILL_EVENTS_DUR, 0);
-  return (now >= e.start && now < e.end) ? e : null; }
+  return (e && now >= e.start && now < e.end) ? e : null; }
 // Free Entry Grind windows — mirror api/join.js. 10 paid $5 games in a window → 1 credit.
 const GRIND_TARGET = 10;
 function activeGrindEvent(now) { now = now || Date.now();
   const e = evOccurrence(now, 'grind', GRIND_EVENT_DUR, GRIND_OFFSET_MS);
-  return (now >= e.start && now < e.end) ? e : null; }
+  return (e && now >= e.start && now < e.end) ? e : null; }
 
 // ── Recruiter of the Week — rolling 7-day contest. weekId buckets all recruit counts so a new week
 // starts clean automatically.
@@ -1290,27 +1304,28 @@ module.exports = async function handler(req, res) {
     // built only from GAME_SECRET-authed elim-lock kills, so exposing them read-only is safe). ──────
     if (action === 'event-board') {
       const now = Date.now();
+      /* Two INDEPENDENT things, deliberately: `state`/`top` is the board being played or the one that
+       * was last played (its final standings stay up indefinitely — that is the results board), and
+       * `next` is the next SCHEDULED event, or null when the operator hasn't scheduled one.
+       *
+       * `state` is never 'upcoming' any more. It used to roll the ended board forward into a countdown
+       * after 24h, which meant the last event's results disappeared and the homescreen advertised an
+       * event that only existed because the schedule generated it. Results and announcements are now
+       * separate fields, so one can never overwrite the other. */
       let ev = activeKillEvent(now), state = 'live';
-      if (!ev) {                                    // no live event → keep showing the LAST event's final
-        const past = killEvents(now).filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
-        if (past) { ev = past; state = 'ended'; }    // board on the homescreen for a day afterwards
-        /* Then switch to counting down to the NEXT Saturday. Since the events recur weekly, an "ended"
-         * board would otherwise sit on the homepage for six straight days telling players they missed
-         * something — which is the opposite of what you want a homepage to say. The 24h hold is
-         * deliberate: the auto-settle below only fires while state === 'ended', so the winners are
-         * long since paid before the board rolls forward. */
-        if (past && (now - past.end) >= 24 * 3600 * 1000) {
-          const next = killEvents(now).filter(e => e.start > now).sort((a, b) => a.start - b.start)[0];
-          if (next) { ev = next; state = 'upcoming'; }
-        }
+      if (!ev) {
+        const past = killEvents().filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
+        if (past) { ev = past; state = 'ended'; }
       }
+      const nextEv = killEvents().filter(e => e.start > now).sort((a, b) => a.start - b.start)[0] || null;
       // Auto-settle: once a bounty window has ended, pay the winners from the float — idempotent
       // (per-place NX locks) and solvency-guarded, so only the first post-event reader does the work
       // and it can never overpay or touch player funds. Always on (the EVENT_AUTOPAY kill-switch was
       // removed 2026-07-25 — it had been silently disabling every event payout).
       if (state === 'ended' && ev && (now - ev.end) < 24 * 3600 * 1000) { try { await settleBounty(ev, { dryRun: false }); } catch (_) {} }
       clearTimeout(guard); done = true;
-      if (!ev) return res.status(200).json({ active: false });
+      const nextOut = nextEv ? { id: nextEv.id, startsAt: nextEv.start, endsAt: nextEv.end } : null;
+      if (!ev) return res.status(200).json({ active: false, next: nextOut });
       const h = (await kvHgetall('evtk:' + ev.id).catch(() => null)) || {};
       const rows = Object.keys(h).map(a => ({ addr: a, kills: parseInt(h[a]) || 0 }))
                          .filter(r => r.kills > 0).sort((a, b) => b.kills - a.kills);
@@ -1320,7 +1335,7 @@ module.exports = async function handler(req, res) {
       const top = rows.slice(0, 10);
       await Promise.all(top.map(async r => { try { r.name = (await kvHget('ph:' + r.addr, 'name')) || ''; } catch (_) { r.name = ''; } }));
       return res.status(200).json({
-        active: true, state, id: ev.id, startsAt: ev.start, endsAt: ev.end,
+        active: true, state, id: ev.id, startsAt: ev.start, endsAt: ev.end, next: nextOut,
         top: top.map(r => ({ name: r.name || (r.addr.slice(0, 4) + '…' + r.addr.slice(-4)), kills: r.kills })),
         you: { rank: youRank, kills: youKills, onBoard: youRank > 0 },
       });
@@ -1420,7 +1435,7 @@ module.exports = async function handler(req, res) {
     // ── event-settle: compute (dryRun, anyone) or fire (real, admin-only) a Bounty-Hour payout ─────
     if (action === 'event-settle') {
       const now = Date.now();
-      const ev = activeKillEvent(now) || killEvents(now).filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
+      const ev = activeKillEvent(now) || killEvents().filter(e => now >= e.end).sort((a, b) => b.end - a.end)[0];
       clearTimeout(guard); done = true;
       if (!ev) return res.status(200).json({ error: 'no event' });
       if (body.dryRun === false) {   // REAL payout — admin secret required

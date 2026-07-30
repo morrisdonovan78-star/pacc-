@@ -88,18 +88,23 @@ function recruitWeekId(now) { now = now || Date.now(); return 'rw' + Math.floor(
 // ── Free Entry Grind — play GRIND_TARGET paid $5 games inside a grind window → earn one free $5
 // credit (credit:<wallet>). KEEP these windows in sync with the 'grind' entries in the client
 // SNAKE_EVENTS + api/settle.js. $5 lobby id is ss-paid-lobby-5.
-// RECURRING WEEKLY: Saturday 4–5 PM ET, the hour straight after Bounty Hour. This was a one-entry
-// array that expired on Jul 25 2026 — after which no grind window was ever active again and the credit
-// could not be earned at all. Generated to match api/settle.js; occurrence ids are unchanged
-// ('grind-YYYY-MM-DD') because they key the per-window progress counters.
+// Saturday 4–5 PM ET, the hour straight after Bounty Hour — but ONLY on the Saturdays listed in
+// SCHEDULED_SATURDAYS. This must stay identical to SCHEDULED_SATURDAYS in api/settle.js: the grind
+// hands out a free $5 entry, so a window opening on a week the operator never scheduled gives away
+// real money. Occurrence ids are unchanged ('grind-YYYY-MM-DD') because they key the per-window
+// progress counters.
 const GRIND_TARGET = 10;
+const SCHEDULED_SATURDAYS = ['2026-07-25'];                // ← keep in sync with api/settle.js
 const SATURDAY_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0);   // Sat Jul 25 2026 14:00 ET — same instant as RECRUIT_ANCHOR
 const GRIND_WEEK_MS   = 7 * 24 * 3600 * 1000;
 function activeGrindEvent(now) {
   now = now || Date.now();
   const i = Math.floor((now - SATURDAY_ANCHOR) / GRIND_WEEK_MS);
-  const start = SATURDAY_ANCHOR + i * GRIND_WEEK_MS + 2 * 3600 * 1000;   // Bounty is 2–4, grind is 4–5
-  const e = { id: 'grind-' + new Date(start).toISOString().slice(0, 10), start, end: start + 3600 * 1000 };
+  const sat = SATURDAY_ANCHOR + i * GRIND_WEEK_MS;
+  const day = new Date(sat).toISOString().slice(0, 10);
+  if (SCHEDULED_SATURDAYS.indexOf(day) < 0) return null;   // no event scheduled that week
+  const start = sat + 2 * 3600 * 1000;                     // Bounty is 2–4, grind is 4–5
+  const e = { id: 'grind-' + day, start, end: start + 3600 * 1000 };
   return (now >= e.start && now < e.end) ? e : null;
 }
 
