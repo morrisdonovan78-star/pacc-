@@ -39,6 +39,14 @@
       "headers": [
         { "key": "Cache-Control", "value": "no-store" }
       ]
+    },
+    {
+      "//": "SOL/USD is a PUBLIC number and this is the only /api route safe to cache: it is display-only. Payout maths never reads it — api/settle.js has its own solUsdQuick() that queries the exchanges directly — so nothing about money depends on this response. It was ~12% of all production traffic, every hit a fresh function invocation, on a project that is already over its Fluid Active CPU allowance and gets THROTTLED, which is a real cause of a payout confirmation timing out. api/price.js already serves a 30s in-memory cache, so a 30s CDN cache adds no staleness that was not already accepted — it just stops paying for the same answer hundreds of times. Same reasoning as the comment in pulp-platform/app/api/event/route.js. Both keys are needed: the /(.*) rule above sets Vercel-CDN-Cache-Control: no-store, which would otherwise keep the CDN out of it. LAST matching rule wins, so this must stay below /api/(.*).",
+      "source": "/api/price",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, s-maxage=30, stale-while-revalidate=120" },
+        { "key": "Vercel-CDN-Cache-Control", "value": "max-age=30, stale-while-revalidate=120" }
+      ]
     }
   ]
 }
