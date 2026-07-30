@@ -8,6 +8,15 @@ const GAME_SECRET = (process.env.GAME_SECRET || '').trim();
 // still get paid instead of being stranded with its money in escrow. With it set, an unproven cashout
 // is refused outright and the wager is left on record to retry — see the cashout path.
 const REQUIRE_CASH_PROOF = (process.env.CASHOUT_REQUIRE_PROOF || '') === '1';
+/* Printed on every cold start, because THE FLAG'S VALUE CANNOT BE READ BACK. This project stores env
+ * vars as "sensitive", so `vercel env ls` and the REST API both return "" for the value whatever it
+ * actually is — which means the only honest way to know whether the guard is armed in production is
+ * for production to say so. It was already set once with an EMPTY value and a deploy titled "so
+ * CASHOUT_REQUIRE_PROOF=1 takes effect", and nothing on the outside could tell the difference. Also
+ * prints whether GAME_SECRET is present at all, since no secret means no proof can ever verify and
+ * every cash-out would be refused with the guard on. Values are never printed, only their state. */
+console.log('[settle] boot REQUIRE_CASH_PROOF=' + (REQUIRE_CASH_PROOF ? 'ON (proof mandatory)' : 'OFF (client claim, capped 20x)') +
+            ' GAME_SECRET=' + (GAME_SECRET ? 'present(' + GAME_SECRET.length + ' chars)' : 'MISSING'));
 const { kvPing, kvGet, kvGetDel, kvSet, kvSetNX, kvDel, kvSetPerm, kvZadd, kvZrem, kvZrevrange, kvHincrby,
         kvLpush, kvLtrim, kvLrange, kvHget, kvHgetall, kvIncrby, kvExpire, kvMget, kvScan } = require('../lib/kv');
 // Pure pari-mutuel engine (spectator betting). All money math lives here so it is unit-tested
