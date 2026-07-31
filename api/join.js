@@ -39,8 +39,12 @@ function mintTokensFor(walletAddress, lobbyId) {
   // rooms. Snake paid lobbies can be ANY stake — the room id is just a label; the money is the
   // on-chain deposit this endpoint verified, and the game server creates the arena on demand
   // (getOrCreateRoom) validating only the token, not a fixed allowlist.
+  // `ss-og-` is the ORIGINAL game mode's twin of an ss- room (ss-og-paid-lobby-5). Same stake, same
+  // escrow, same token shape — only the arena rules differ — so it mints exactly like its Zone Wars
+  // counterpart. Without it here every paid ORIGINAL join gets a null token and is refused at the
+  // door AFTER the deposit has already gone through.
   const VALID_LOBBIES = new Set(['ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
-  const isValidLobby = VALID_LOBBIES.has(lobbyId) || /^(ss-)?paid-lobby-(\d{1,6})(\.\d{1,2})?$/.test(lobbyId || '');
+  const isValidLobby = VALID_LOBBIES.has(lobbyId) || /^(ss-(?:og-)?)?paid-lobby-(\d{1,6})(\.\d{1,2})?$/.test(lobbyId || '');
   return {
     gameToken:  isValidLobby ? makeGameToken(walletAddress, lobbyId)  : null,
     entryToken: isValidLobby ? makeEntryToken(walletAddress, lobbyId) : null,

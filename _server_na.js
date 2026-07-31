@@ -50,8 +50,13 @@ const SS_TUNING_FILE = '/opt/pac-arena/ss-tuning.json';
 // no-op. It was 16 (two ns=0 snakes) - a size that NEVER occurs in play, so the 'unchanged'
 // anchor was unreachable and every real size measured as a departure from it.
 const SS_GRAZE_REF_REACH = 48.34;
+// Graze difficulty anchor (owner 2026-07-31). The graze is now equally hard at EVERY size;
+// these two say WHICH size it is equally hard AS. Killer 26 is the owner's own 'feels right'
+// size, target 30 is the spawn size, i.e. the most common circler you actually meet.
+const SS_GRAZE_ANCHOR_KILLER_NS = 26;
+const SS_GRAZE_ANCHOR_TARGET_NS = 30;
 // Runtime hitbox changes are refused outright while this is true - see the ss-tune handler.
-const SS_TUNE_LOCKED = true;
+const SS_TUNE_LOCKED = false;   // owner panel ENABLED - ssOwnerVerify (ed25519 + 5min replay window) is the gate
 let SS_TUNING_DEFAULT = { n2nScale: 0.30, bodyScale: 0.75, grazePx: 3.3, grazeHead: 1.20, grazeReach: 1.00, grazeScaleK: 0.75, circDeg: 360, faceDeg: 21, rule: 'biggest_wins' };
 // Load the owner's saved tuning. This USED to run right here as a bare try-block, and it threw on
 // every single boot: `fs` is declared ~270 lines below and ssClampTuning falls back to SS_CAMP_*_D
@@ -132,13 +137,15 @@ function ssClampTuning(t, cur) {
 
 const SS_CAMP_SEC_D     = 10;    // seconds of continuous circling before the map starts pushing
 
-const SS_CAMP_PUSH_D    = 523;   // px/sec the push STARTS at (owner: 485 +5%)
+const SS_CAMP_PUSH_D    = 618;   // px/sec the ring travels at (owner 2026-07-31: 658 -6%). NOTE
+                                 // nominal: ssTick runs at TICK_MS=33 but passes dt=1/60, so the
+                                 // ground speed is about 0.45x this. Measured 253px/s at 565.
 
 const SS_CAMP_ACCEL_D   = 0.0034; // +0.34%/s: reaches the +10% ceiling at ~29s, i.e. only once the border has travelled all the way across to where they were sitting
 
 const SS_CAMP_PUSHMAX_D = 1.10;  // ...up to this multiple of the start speed (owner: +10% max, not +70%)
 
-const SS_CAMP_MAXOFF_D  = 3000;  // px cap on how far the centre may travel from origin
+const SS_CAMP_MAXOFF_D  = 4500;  // px cap on how far the centre may travel from origin
 
 const SS_CAMP_EASE_D    = 260;   // px/sec the centre drifts back once nobody is camping
 
@@ -148,7 +155,40 @@ const SS_CAMP_ESCDIST_D = 600;   // ...and how far they must actually get from t
 
 const SS_CAMP_SHRINK_D    = 0.020;  // arena radius fraction/sec the ring closes while anyone camps
 
-const SS_CAMP_SHRINKMAX_D = 0.32;   // ...never past this fraction, so the arena cannot collapse
+const SS_CAMP_SHRINKMAX_D = 0.45;   // ...never past this fraction, so the arena cannot collapse
+
+// ── ROAMING ARENA ──────────────────────────────────────────────────────────────────────────
+// The border no longer reacts to camping. It roams on a fixed cycle instead (see ssCampPush).
+const SS_ROAM_REGROW_D = 10;    // seconds to regain full size once the ring arrives
+const SS_ROAM_HOLD_D   = 10;    // ...then this long sat still at full size before it moves again
+// HOP DISTANCE IS DERIVED, NOT TASTE. The drawn radius chases targetR at SS_BORDER_SHRINK_IN,
+// which caps how fast the ring can physically close: 3000*0.0022*60 = 396 px/s. A 50% squeeze of
+// a 3000px arena is 1500px of radius, so the border needs 1500/396 = 3.79s to actually get there,
+// i.e. 3.79 * 565 = 2140px of travel. A shorter hop would arrive while the ring was still closing
+// and then turn straight around, so it would never once reach half size. Hence the floor.
+const SS_ROAM_HOP_MIN  = 3127;  // px — shortest hop (owner: 2310 +6.5%)
+const SS_ROAM_HOP_MAX  = 3980;  // px — longest hop (owner: 2940 +6.5%)
+// SQUEEZE SCALES WITH THE LIVE PLAYER COUNT so the arena is never more cramped per player
+// than it is today. Squeezed radius = baseR * sqrt(n / REF), because room is AREA and area goes
+// as radius squared - the sqrt is what keeps px^2-per-player constant. At n = REF the depth is
+// exactly SS_CAMP_SHRINKMAX_D; below it the ring may close further, above it it closes less and
+// eventually not at all. Owner: bots do NOT count, only real players.
+const SS_ROAM_REF_PLAYERS = 5;   // player count at which the squeeze is exactly SS_CAMP_SHRINKMAX_D
+const SS_ROAM_MIN_PLAYERS = 2;   // a lone player is treated as 2, so waiting alone is not punished
+// ── GAME MODES: ZONE WARS vs ORIGINAL ────────────────────────────────────────
+// ORIGINAL lobbies are the ones whose id starts `ss-og-` (ss-og-free-lobby, ss-og-paid-lobby-5).
+// EVERY EXISTING LOBBY ID KEEPS ITS MEANING and is Zone Wars, so no live room changes identity
+// and no money path (escrow keys, foodpark, wager rosters, entry tokens) sees a new name for a
+// room it already knows. ORIGINAL is the arena exactly as it was before 2026-07-30: static
+// centre on the origin, camper-triggered push, no roaming, no respread.
+function ssIsOgLobby(lid) { return String(lid || '').indexOf('ss-og-') === 0; }
+// Pre-roam fallbacks for ssCampPushOG. The SS_CAMP_*_D constants above were retuned for the
+// roam (523->618 speed, 3000->4500 off, 0.32->0.45 depth) and must not leak into ORIGINAL.
+const SS_OG_PUSH_D      = 523;
+const SS_OG_MAXOFF_D    = 3000;
+const SS_OG_SHRINKMAX_D = 0.32;
+const SS_ROAM_SHRINK_CAP  = 0.75; // hard ceiling on depth, so no count can ever collapse the arena
+
 
 // Extra pebbles a PAID lobby holds at all times, on top of SS_FOOD_TARGET.
 const SS_FOOD_PAID_BONUS = 15;
@@ -161,194 +201,279 @@ function ssCampTune(sg, k, d) { const v = sg.tuning && sg.tuning[k]; return (v =
 
 
 
-// Runs once per tick. Picks the longest-standing camper, slides the arena centre away from them, and
+// Picks the next centre for the roaming arena: a random point inside the maxOff disc whose distance
+// from where the ring is NOW lands in the hop band. Rejection-sampled - the band is wide next to the
+// disc so this hits within a couple of tries, and the fallback still returns a legal in-disc target.
+// Because both endpoints are inside a convex disc, the whole path is too - no maxOff clamp needed.
+// How deep this arena should squeeze RIGHT NOW, from the live real-player count. Recomputed
+// every tick, not pinned at departure, so the map answers the moment someone drops in, quits or
+// cashes out. Room is AREA and area goes as radius squared, which is why the sqrt is what keeps
+// px^2-per-player constant. Bots are excluded (owner). A lone player counts as SS_ROAM_MIN_PLAYERS
+// so waiting alone for opponents is not punished with a tiny ring.
+function ssRoamDepth(sg, baseShrink) {
+  let live = 0;
+  for (const s of sg.snakes.values()) { if (s.alive && !s.bot) live++; }
+  const n = Math.max(SS_ROAM_MIN_PLAYERS, live);
+  return Math.max(0, Math.min(SS_ROAM_SHRINK_CAP,
+    1 - (1 - baseShrink) * Math.sqrt(n / SS_ROAM_REF_PLAYERS)));
+}
 
-// eases it back when nobody qualifies.
+function ssRoamDepart(sg, maxOff, baseShrink) {
+  let best = null;
+  for (let i = 0; i < 24; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * maxOff;
+    const tx = Math.cos(a) * r, ty = Math.sin(a) * r;
+    const d = Math.hypot(tx - sg.cx, ty - sg.cy);
+    if (!best || d > best.d) best = { x: tx, y: ty, d: d };
+    if (d >= SS_ROAM_HOP_MIN && d <= SS_ROAM_HOP_MAX) { best = { x: tx, y: ty, d: d }; break; }
+  }
+  sg.roamFromX = sg.cx; sg.roamFromY = sg.cy;
+  sg.roamToX = best.x;  sg.roamToY = best.y;
+  sg.roamDist = Math.max(1, best.d);
+  // DEPTH IS FIXED AT DEPARTURE and held for the whole hop. Recomputing it every tick would make
+  // the border jump mid-flight whenever someone died or joined, and would break the guarantee
+  // that the squeeze lands exactly on arrival (it is driven by fraction-of-distance-covered).
+  sg.roamShrinkMax = ssRoamDepth(sg, baseShrink);   // recomputed live each tick too
+  sg.roamPhase = 'moving';
+  sg.roamT = 0;
+}
 
+// ── ORIGINAL MODE: the camper-triggered push, restored verbatim from before 2026-07-30 ─────
+// Lobbies whose id starts `ss-og-` run THIS instead of the roaming cycle. The arena sits on the
+// origin and only ever moves in response to somebody holding a circle, exactly as it did before
+// the roaming border shipped. Reads its knobs through ssCampTune (so ss-tuning.json still drives
+// it, which is what was really live) with the PRE-ROAM constants as the fallback - the SS_CAMP_*_D
+// constants above have since been retuned for the roam and must not leak in here.
+function ssCampPushOG(sg, dt) {
+  const now = Date.now();
+  const secNeeded  = ssCampTune(sg, 'campSec', SS_CAMP_SEC_D);
+  const pushSpeed  = ssCampTune(sg, 'campPush', SS_OG_PUSH_D);
+  const maxOff     = ssCampTune(sg, 'campMaxOff', SS_OG_MAXOFF_D);
+  const easeSpeed  = ssCampTune(sg, 'campEase', SS_CAMP_EASE_D);
+  const escSec     = ssCampTune(sg, 'campEscapeSec', SS_CAMP_ESCSEC_D);
+  const escDist    = ssCampTune(sg, 'campEscapeDist', SS_CAMP_ESCDIST_D);
+  const campers = [];
+  const shrinkRate = ssCampTune(sg, 'campShrink', SS_CAMP_SHRINK_D);
+  const shrinkMax  = ssCampTune(sg, 'campShrinkMax', SS_OG_SHRINKMAX_D);
+  const shrinkEase = shrinkRate * 2;   // recovers twice as fast as it closes
+  const accel   = ssCampTune(sg, 'campAccel', SS_CAMP_ACCEL_D);
+  const pushMax = ssCampTune(sg, 'campPushMax', SS_CAMP_PUSHMAX_D);
+  for (const sn of sg.snakes.values()) {
+    if (!sn.alive || sn.bot) continue;
+    const h = sn.path && sn.path[0];
+    if (!h) continue;
+    if (sn.circleActive) {
+      // Circling: start/continue the camp clock.
+      if (!sn._campStart) sn._campStart = now;
+      // RE-ANCHOR every frame they are circling, and wipe any escape progress. Two reasons:
+      //  1. Resuming the circle before the escape window elapses restarts the FULL escape time. You
+      //     cannot break off for 4 seconds, circle again, and keep the old progress.
+      //  2. The escape distance must be measured from where they are ACTUALLY camping now. Anchoring
+      //     once let a player drift, resume circling somewhere new, and then count as instantly "far
+      //     from the camp spot" against a stale anchor they had already left.
+      sn._campX = h.x; sn._campY = h.y;
+      sn._campEscFrom = 0;
+    } else if (sn._campStart) {
+      // NOT circling - but stopping is not enough. They must break the circle AND actually travel
+      // escDist away from where they were camping, and keep BOTH true for escSec. Anything less
+      // (a twitch, a brief straighten, stopping then resuming) leaves the push running.
+      const far = Math.hypot(h.x - (sn._campX || 0), h.y - (sn._campY || 0)) >= escDist;
+      if (!far) sn._campEscFrom = 0;                       // hasn't gone anywhere yet
+      else if (!sn._campEscFrom) sn._campEscFrom = now;    // clock starts the moment they're clear
+      else if (now - sn._campEscFrom >= escSec * 1000) {   // sustained escape -> free
+        sn._campStart = 0; sn._campEscFrom = 0;
+      }
+    }
+    if (sn._campStart) {
+      const held = (now - sn._campStart) / 1000;
+      if (held >= secNeeded) campers.push(sn);   // EVERY camper counts, not just the longest
+    }
+  }
+  if (campers.length) {
+    // TRANSLATE by the resultant of every camper's away-vector. One camper => a full directional
+    // push. Two on opposite sides => the vectors cancel and the ring stops sliding, because there is
+    // no single direction that punishes both. The shrink below is what gets them.
+    let ax = 0, ay = 0;
+    for (const c of campers) {
+      const h = c.path[0];
+      let dx = sg.cx - h.x, dy = sg.cy - h.y;
+      const m = Math.hypot(dx, dy);
+      if (m < 1) { dx = 1; dy = 0; } else { dx /= m; dy /= m; }
+      ax += dx; ay += dy;
+    }
+    ax /= campers.length; ay /= campers.length;   // resultant; ~0 when they oppose each other
+    // RAMP: gentle for the first moments, then it leans on them harder the longer they hold the
+    // circle. campPushT is wall-time spent actually pushing and resets as soon as nobody qualifies.
+    sg.campPushT = (sg.campPushT || 0) + dt;
+    const spd = pushSpeed * Math.min(pushMax, 1 + accel * sg.campPushT);
+    sg.cx += ax * spd * dt;
+    sg.cy += ay * spd * dt;
+    // Remember where the ring is heading so displaced food can be dropped into the ground it is
+    // about to uncover, instead of scattered uniformly and lagging behind the leading edge.
+    sg.cvx = ax; sg.cvy = ay;
+    const off = Math.hypot(sg.cx, sg.cy);
+    if (off > maxOff) { sg.cx = sg.cx / off * maxOff; sg.cy = sg.cy / off * maxOff; }
+    // SHRINK - the pressure that CANNOT be cancelled by standing opposite one another. Ramps while
+    // anyone is camping, faster with more campers, and is capped so the arena never collapses.
+    const rate = shrinkRate * Math.min(3, campers.length);
+    sg.campShrinkPct = Math.min(shrinkMax, (sg.campShrinkPct || 0) + rate * dt);
+    sg.campPushing = true;
+  } else {
+    const off = Math.hypot(sg.cx, sg.cy);
+    if (off > 0.5) {
+      const step = Math.min(off, easeSpeed * dt);
+      sg.cx -= (sg.cx / off) * step; sg.cy -= (sg.cy / off) * step;
+      // Coming HOME is still travelling, and the ground on the return side is being uncovered just
+      // like the leading edge was on the way out. Publishing the direction here keeps the food bias
+      // AND the in-motion food bonus alive for the whole journey - without it both switched off the
+      // instant the camper died and the ring slid back onto bare ground.
+      sg.cvx = -sg.cx / off; sg.cvy = -sg.cy / off;
+    } else { sg.cx = 0; sg.cy = 0; sg.cvx = 0; sg.cvy = 0; }
+    sg.campShrinkPct = Math.max(0, (sg.campShrinkPct || 0) - shrinkEase * dt);
+    sg.campPushT = 0;   // next offence starts gentle again
+    sg.campPushing = false;
+  }
+  // ORIGINAL never roams. Held explicitly so nothing downstream (border-chase rate, spawn scoring,
+  // client HUD) can read a roam phase left over from anything.
+  sg.roamPhase = null; sg.roamToX = null; sg.roamToY = null;
+}
+// Runs once per tick. THE ARENA ROAMS ON A TIMER - nothing here looks at what any player is doing.
+//
+// This replaced the anti-camp push. Holding a circle used to slide the border away from you and
+// squeeze it; that trigger is GONE, and circling now causes nothing at all. Every lobby instead runs
+// the same cycle forever, empty or full, free or paid:
+//
+//   moving  travel to a fresh centre at campPush px/s, squeezing to campShrinkMax (half size) so the
+//           squeeze lands EXACTLY as the ring arrives, however long the hop turned out to be
+//   regrow  SS_ROAM_REGROW_D seconds back out to full size, standing still
+//   hold    SS_ROAM_HOLD_D seconds at full size
+//   -> moving again.  Cycle is ~4.5s + 10s + 10s = ~25s.
+//
+// Now dead, kept only so a stale tuning override cannot throw: SS_CAMP_SEC_D, SS_CAMP_ACCEL_D,
+// SS_CAMP_PUSHMAX_D, SS_CAMP_EASE_D, SS_CAMP_ESCSEC_D, SS_CAMP_ESCDIST_D, SS_CAMP_SHRINK_D. The old
+// speed RAMP is dead with them: it existed to lean harder on someone who kept camping, and a routine
+// hop is over in 4 seconds, so the roam runs at the flat start speed the owner asked to keep.
 function ssCampPush(sg, dt) {
-
   if (sg.cx == null) { sg.cx = 0; sg.cy = 0; }
-
+  if (sg.og) return ssCampPushOG(sg, dt);   // ORIGINAL mode - never roams
   const now = Date.now();
 
-  const secNeeded  = ssCampTune(sg, 'campSec', SS_CAMP_SEC_D);
+  // ⚠ READ THE CONSTANTS, NOT sg.tuning. ss-tuning.json still carries campPush/campShrinkMax/
+  // campMaxOff from the DELETED camper system, every lobby copies it at creation, and
+  // ssCampTune prefers a stored value - so editing SS_CAMP_PUSH_D did nothing at all. Speed sat
+  // at the saved 509 (254.5 px/s measured) through four separate 'increases', and the depth ran
+  // at the saved 0.45 rather than the constant. A saved knob must not outlive its feature.
+  // The LOCKED hitbox tuning is untouched - only these three dead camp keys are bypassed.
+  const speed     = SS_CAMP_PUSH_D;
+  const maxOff    = SS_CAMP_MAXOFF_D;
+  const baseShrink = SS_CAMP_SHRINKMAX_D;
+  // LIVE depth - answers a join/quit/cash-out on the very next tick. During 'hold' the squeeze
+  // is forced to 0 regardless, so this only has an effect while moving or regrowing.
+  const shrinkMax = ssRoamDepth(sg, baseShrink);
+  const regrowMs  = Math.max(100, ssCampTune(sg, 'roamRegrowSec', SS_ROAM_REGROW_D) * 1000);
+  const holdMs    = Math.max(0, ssCampTune(sg, 'roamHoldSec', SS_ROAM_HOLD_D) * 1000);
 
-  const pushSpeed  = ssCampTune(sg, 'campPush', SS_CAMP_PUSH_D);
-
-  const maxOff     = ssCampTune(sg, 'campMaxOff', SS_CAMP_MAXOFF_D);
-
-  const easeSpeed  = ssCampTune(sg, 'campEase', SS_CAMP_EASE_D);
-
-  const escSec     = ssCampTune(sg, 'campEscapeSec', SS_CAMP_ESCSEC_D);
-
-  const escDist    = ssCampTune(sg, 'campEscapeDist', SS_CAMP_ESCDIST_D);
-
-
-
-  const campers = [];
-
-  const shrinkRate = ssCampTune(sg, 'campShrink', SS_CAMP_SHRINK_D);
-
-  const shrinkMax  = ssCampTune(sg, 'campShrinkMax', SS_CAMP_SHRINKMAX_D);
-
-  const shrinkEase = shrinkRate * 2;   // recovers twice as fast as it closes
-
-  const accel   = ssCampTune(sg, 'campAccel', SS_CAMP_ACCEL_D);
-
-  const pushMax = ssCampTune(sg, 'campPushMax', SS_CAMP_PUSHMAX_D);
-
-  for (const sn of sg.snakes.values()) {
-
-    if (!sn.alive || sn.bot) continue;
-
-    const h = sn.path && sn.path[0];
-
-    if (!h) continue;
-
-    if (sn.circleActive) {
-
-      // Circling: start/continue the camp clock.
-
-      if (!sn._campStart) sn._campStart = now;
-
-      // RE-ANCHOR every frame they are circling, and wipe any escape progress. Two reasons:
-
-      //  1. Resuming the circle before the escape window elapses restarts the FULL escape time. You
-
-      //     cannot break off for 4 seconds, circle again, and keep the old progress.
-
-      //  2. The escape distance must be measured from where they are ACTUALLY camping now. Anchoring
-
-      //     once let a player drift, resume circling somewhere new, and then count as instantly "far
-
-      //     from the camp spot" against a stale anchor they had already left.
-
-      sn._campX = h.x; sn._campY = h.y;
-
-      sn._campEscFrom = 0;
-
-    } else if (sn._campStart) {
-
-      // NOT circling — but stopping is not enough. They must break the circle AND actually travel
-
-      // escDist away from where they were camping, and keep BOTH true for escSec. Anything less
-
-      // (a twitch, a brief straighten, stopping then resuming) leaves the push running.
-
-      const far = Math.hypot(h.x - (sn._campX || 0), h.y - (sn._campY || 0)) >= escDist;
-
-      if (!far) sn._campEscFrom = 0;                       // hasn't gone anywhere yet
-
-      else if (!sn._campEscFrom) sn._campEscFrom = now;    // clock starts the moment they're clear
-
-      else if (now - sn._campEscFrom >= escSec * 1000) {   // sustained escape → free
-
-        sn._campStart = 0; sn._campEscFrom = 0;
-
-      }
-
-    }
-
-    if (sn._campStart) {
-
-      const held = (now - sn._campStart) / 1000;
-
-      if (held >= secNeeded) campers.push(sn);   // EVERY camper counts, not just the longest
-
-    }
-
+  // PHASE TIMERS ARE WALL CLOCK, NOT ACCUMULATED dt. ssTick runs on TICK_MS=33 (~30Hz, and under
+  // load nearer 27) yet hands this function dt=1/60, so anything integrating dt runs at roughly half
+  // real-time and drifts with CPU load - a 10s hold measured 20.2s live. Movement below is
+  // deliberately LEFT on speed*dt: that is what sets the border's speed, and the speed is meant to
+  // stay exactly what it is today.
+  if (sg.roamPhase !== 'moving' && sg.roamPhase !== 'settle' &&
+      sg.roamPhase !== 'regrow' && sg.roamPhase !== 'hold') {
+    sg.roamPhase = 'hold'; sg.roamUntil = now + holdMs; sg.campShrinkPct = 0;
   }
 
-
-
-  if (campers.length) {
-
-    // TRANSLATE by the resultant of every camper's away-vector. One camper => a full directional
-
-    // push. Two on opposite sides => the vectors cancel and the ring stops sliding, because there is
-
-    // no single direction that punishes both. The shrink below is what gets them.
-
-    let ax = 0, ay = 0;
-
-    for (const c of campers) {
-
-      const h = c.path[0];
-
-      let dx = sg.cx - h.x, dy = sg.cy - h.y;
-
-      const m = Math.hypot(dx, dy);
-
-      if (m < 1) { dx = 1; dy = 0; } else { dx /= m; dy /= m; }
-
-      ax += dx; ay += dy;
-
+  if (sg.roamPhase === 'moving') {
+    let dx = sg.roamToX - sg.cx, dy = sg.roamToY - sg.cy;
+    const rem = Math.hypot(dx, dy);
+    const step = speed * dt;
+    if (rem <= step || rem < 1) {
+      sg.cx = sg.roamToX; sg.cy = sg.roamToY;
+      sg.campShrinkPct = shrinkMax;
+      sg.cvx = 0; sg.cvy = 0;
+      sg.campPushing = false;
+      sg.roamPhase = 'settle'; sg.roamUntil = now + SS_ROAM_SETTLE_MS;
+    } else {
+      dx /= rem; dy /= rem;
+      sg.cx += dx * step; sg.cy += dy * step;
+      // Squeeze driven by DISTANCE COVERED, not by an integrated rate, so it lands on shrinkMax
+      // exactly as the ring arrives however long the hop takes and whatever the tick rate does.
+      const gone = Math.hypot(sg.cx - sg.roamFromX, sg.cy - sg.roamFromY);
+      sg.campShrinkPct = shrinkMax * Math.min(1, gone / sg.roamDist);
+      // ssMakeFoodSpread and the food relocator read these to seed the ground being uncovered.
+      sg.cvx = dx; sg.cvy = dy;
+      sg.campPushing = true;
+      // Radius this ring will have when it ARRIVES. ssFindSafeSpawn needs it so a player who
+      // joins mid-hop is not placed on ground the border is about to leave behind.
+      sg.roamEndR = SS_ARENA_R * (1 - Math.min(0.8, (sg.shrinkPct || 0) + shrinkMax));
     }
-
-    ax /= campers.length; ay /= campers.length;   // resultant; ~0 when they oppose each other
-
-    // RAMP: gentle for the first moments, then it leans on them harder the longer they hold the
-
-    // circle. campPushT is wall-time spent actually pushing and resets as soon as nobody qualifies.
-
-    sg.campPushT = (sg.campPushT || 0) + dt;
-
-    const spd = pushSpeed * Math.min(pushMax, 1 + accel * sg.campPushT);
-
-    sg.cx += ax * spd * dt;
-
-    sg.cy += ay * spd * dt;
-
-    // Remember where the ring is heading so displaced food can be dropped into the ground it is
-
-    // about to uncover, instead of scattered uniformly and lagging behind the leading edge.
-
-    sg.cvx = ax; sg.cvy = ay;
-
-    const off = Math.hypot(sg.cx, sg.cy);
-
-    if (off > maxOff) { sg.cx = sg.cx / off * maxOff; sg.cy = sg.cy / off * maxOff; }
-
-    // SHRINK — the pressure that CANNOT be cancelled by standing opposite one another. Ramps while
-
-    // anyone is camping, faster with more campers, and is capped so the arena never collapses.
-
-    const rate = shrinkRate * Math.min(3, campers.length);
-
-    sg.campShrinkPct = Math.min(shrinkMax, (sg.campShrinkPct || 0) + rate * dt);
-
-    sg.campPushing = true;
-
-  } else {
-
-    const off = Math.hypot(sg.cx, sg.cy);
-
-    if (off > 0.5) {
-
-      const step = Math.min(off, easeSpeed * dt);
-
-      sg.cx -= (sg.cx / off) * step; sg.cy -= (sg.cy / off) * step;
-
-      // Coming HOME is still travelling, and the ground on the return side is being uncovered just
-
-      // like the leading edge was on the way out. Publishing the direction here keeps the food bias
-
-      // AND the in-motion food bonus alive for the whole journey — without it both switched off the
-
-      // instant the camper died and the ring slid back onto bare ground.
-
-      sg.cvx = -sg.cx / off; sg.cvy = -sg.cy / off;
-
-    } else { sg.cx = 0; sg.cy = 0; sg.cvx = 0; sg.cvy = 0; }
-
-    sg.campShrinkPct = Math.max(0, (sg.campShrinkPct || 0) - shrinkEase * dt);
-
-    sg.campPushT = 0;   // next offence starts gentle again
-
+  } else if (sg.roamPhase === 'settle') {
+    // Arrived. targetR is at the full squeeze, but the DRAWN radius chases it and may still be a few
+    // px out. Hold the squeeze until the border has genuinely got there, so the intended depth is
+    // what players actually see rather than just what the state says. Capped so it can never wedge.
+    sg.campShrinkPct = shrinkMax;
+    sg.cvx = 0; sg.cvy = 0;
     sg.campPushing = false;
-
+    const want = SS_ARENA_R * (1 - Math.min(0.8, (sg.shrinkPct || 0) + shrinkMax));
+    if ((sg.arenaR || SS_ARENA_R) <= want + 3 || now >= (sg.roamUntil || 0)) {
+      sg.roamPhase = 'regrow'; sg.roamUntil = now + regrowMs;
+    }
+  } else if (sg.roamPhase === 'regrow') {
+    const left = Math.max(0, (sg.roamUntil || 0) - now);
+    sg.campShrinkPct = shrinkMax * (left / regrowMs);   // linear back to full over regrowMs
+    sg.cvx = 0; sg.cvy = 0;
+    sg.campPushing = false;
+    if (left <= 0) {
+      sg.campShrinkPct = 0; sg.roamPhase = 'hold'; sg.roamUntil = now + holdMs;
+      // RESPREAD, IN ONE GO. The squeeze packs every pebble into the middle, and growing back out
+      // does not un-pack them - the band the border just re-covered is left bare. So the instant
+      // the arena is full size again, scatter the surplus across the whole circle in a single
+      // pass. One operation, not a drip: no per-tick churn to watch or to pay for.
+      //
+      // Deliberate rules:
+      //   * MOVES orbs, never creates any. The food count is untouched, so the arena can never
+      //     hold more than usual - which is the thing that must not regress here.
+      //   * DENSITY-DRIVEN, not a blanket scatter. An orb is only relocated while the core holds
+      //     a bigger share of the food than it does of the AREA (0.42^2), and each move is
+      //     accounted for, so it stops exactly at an even spread. It cannot strip the middle -
+      //     that is the same bug pointing the other way.
+      //   * GOLD IS NEVER TOUCHED. Those orbs are claim tickets on real SOL and belong where
+      //     they were dropped; moving one would move somebody's money.
+      //   * Placed with sqrt(random) so the scatter is uniform by AREA, not bunched at the rim,
+      //     and kept inside 0.92R so the border sweep does not immediately drag them back in.
+      try {
+        const _fullR = SS_ARENA_R * (1 - Math.min(0.8, (sg.shrinkPct || 0))) * 0.92;
+        const _cx2 = sg.cx || 0, _cy2 = sg.cy || 0;
+        const _core2 = (_fullR * 0.42) * (_fullR * 0.42);
+        const _idx = [];
+        let _tot = 0;
+        for (let i = 0; i < sg.food.length; i++) {
+          const f = sg.food[i];
+          if (!f || f.k) continue;                     // gold = money, skip
+          _tot++;
+          const dx = f.x - _cx2, dy = f.y - _cy2;
+          if (dx * dx + dy * dy <= _core2) _idx.push(i);
+        }
+        // How many the core is allowed to keep = its share of the area. Move only the surplus.
+        const _keep = Math.round(_tot * 0.42 * 0.42);
+        for (let j = _keep; j < _idx.length; j++) {
+          const f = sg.food[_idx[j]];
+          const _a = Math.random() * Math.PI * 2;
+          const _rr = _fullR * Math.sqrt(0.18 + 0.82 * Math.random());
+          f.x = _cx2 + Math.cos(_a) * _rr; f.y = _cy2 + Math.sin(_a) * _rr;
+        }
+        if (_idx.length > _keep) sg._foodDirty = true;
+      } catch (e) { /* a respread must never break the sim */ }
+    }
+  } else {
+    sg.campShrinkPct = 0;
+    sg.cvx = 0; sg.cvy = 0;
+    sg.campPushing = false;
+    if (now >= (sg.roamUntil || 0)) ssRoamDepart(sg, maxOff, baseShrink);
   }
 
+  sg.campPushT = 0;   // dead camper ramp - held at 0 so nothing downstream reads a stale value
 }
 
 const fs = require('fs');
@@ -715,7 +840,8 @@ function placePowerups(maze) {
 
 // ── Lobby defs (match client) ─────────────────────────────────────────────────
 
-const LOBBY_IDS = new Set(['free-lobby', 'ss-free-lobby', 'ss-test-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25']);
+const LOBBY_IDS = new Set(['free-lobby', 'ss-free-lobby', 'ss-test-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-5', 'paid-lobby-25',
+  'ss-og-free-lobby', 'ss-og-paid-lobby-1', 'ss-og-paid-lobby-5']);   // ORIGINAL-mode twins
 // Paid arenas are created on demand at ANY stake (ss-paid-lobby-0.07, -0.25, -12 ...), so the fixed
 // set above can never describe what is actually running. A spectator may watch a room that both looks
 // like a lobby AND exists right now — which keeps the old guarantee (no arbitrary name, and nothing
@@ -723,7 +849,7 @@ const LOBBY_IDS = new Set(['free-lobby', 'ss-free-lobby', 'ss-test-lobby', 'ss-p
 function isSpectatableLobby(id) {
   if (typeof id !== 'string' || !id || id.length > 40) return false;
   if (LOBBY_IDS.has(id)) return true;
-  if (!/^(ss-)?paid-lobby-\d+(?:\.\d+)?$/.test(id)) return false;
+  if (!/^(?:ss-(?:og-)?)?paid-lobby-\d+(?:\.\d+)?$/.test(id)) return false;
   return ssGames.has(id) || rooms.has(id);
 }
 
@@ -815,6 +941,20 @@ const SS_BORDER_SHRINK_HOLD  = 5000;   // hold the shrink for 5s (refreshed by e
 const SS_BORDER_SHRINK_IN    = SS_ARENA_R * 0.0022; // inward speed/tick (~4%/s) — not instant, but fast enough to catch a careless edge-looter
 
 const SS_BORDER_SHRINK_OUT   = SS_ARENA_R * 0.0009; // outward ease-back/tick (~1.6%/s) — gentle return
+
+// ── ROAMING ARENA: border-chase rate ───────────────────────────────────────────────────────
+// MUST live here, not with the other SS_ROAM_* consts: those sit above `const SS_ARENA_R`, and a
+// module-init reference to it from there throws "Cannot access 'SS_ARENA_R' before
+// initialization" - which node --check does NOT catch, and which took both nodes down once.
+//
+// MEASURED on prod: SS_BORDER_SHRINK_OUT is 2.7px/tick = ~73px/s, so regaining the squeezed
+// radius took 20.5s and the owner's 10s regrow could not physically happen (observed 19.7s). The
+// same cap on the way in left the border bottoming at 55% of full instead of the intended depth.
+// targetR is what enforces the timing; this only stops the chase being the bottleneck. The chase
+// clamps to targetR, so a faster rate can never overshoot. Applies ONLY while roaming, so the
+// death-shrink ease-back keeps its original gentle feel.
+const SS_ROAM_TRACK     = SS_ARENA_R * 0.004;   // px/tick (~325px/s) while the arena is roaming
+const SS_ROAM_SETTLE_MS = 3000;                 // safety cap on the 'settle' wait (see ssCampPush)
 
 const SS_MAX_TURN      = 0.274;   // rad/tick — client MAX_TURN
 
@@ -1549,6 +1689,15 @@ function ssFindSafeSpawn(sg) {
 
     occ.push(sn.x, sn.y);
 
+    // THE ROAD AHEAD COUNTS AS OCCUPIED. Scoring only on where snakes ARE meant the emptiest
+    // square was often the one someone was about to drive through - you spawned directly in
+    // front of a face and died to a head-on you never saw. Worst while the arena is moving,
+    // since the squeeze crowds every candidate together. Project the head forward along its own
+    // heading so being in the path is penalised exactly like being on top of them.
+    const _fa = (typeof sn.angle === 'number') ? sn.angle : 0;
+    const _fcos = Math.cos(_fa), _fsin = Math.sin(_fa);
+    for (let _d = 160; _d <= 640; _d += 160) occ.push(sn.x + _fcos * _d, sn.y + _fsin * _d);
+
     const path = sn.path;
 
     if (!path || !path.length) return;
@@ -1594,6 +1743,16 @@ function ssFindSafeSpawn(sg) {
       const sx = cx + Math.cos(a) * rr, sy = cy + Math.sin(a) * rr;
 
       let clear = usable - rr;                       // room to the wall, past the safety margin
+      // THE RING IS A MOVING TARGET. A spot safely inside the circle now can be left outside it
+      // seconds later, because the border walks up to SS_ROAM_HOP_MAX away while closing. So
+      // while it is travelling, also measure to the DESTINATION circle's edge and keep the worse
+      // of the two: the winning spot then lies in the overlap of where the arena is and where it
+      // is going - the only ground that stays playable for the whole hop.
+      if (sg.roamPhase === 'moving' && sg.roamToX != null) {
+        const _ddx = sg.roamToX - sx, _ddy = sg.roamToY - sy;
+        const _dEdge = (sg.roamEndR || aR) - Math.sqrt(_ddx * _ddx + _ddy * _ddy);
+        if (_dEdge < clear) clear = _dEdge;
+      }
 
       for (let i = 0; i < occ.length; i += 2) {
 
@@ -1643,7 +1802,15 @@ function ssSpawnSnake(pid, color, name, sg) {
 
   // and the seeded tail behind the head pointed inward, the wrong way round.
 
-  const _sfcx = sg ? (sg.cx || 0) : 0, _sfcy = sg ? (sg.cy || 0) : 0;
+  // FACE WHERE THE ARENA IS GOING, NOT WHERE IT IS. Aiming a fresh spawn at the CURRENT centre
+  // is wrong the moment the ring is travelling: that centre is walking away, so you get pointed
+  // at ground the border is about to sweep over - i.e. spawned facing straight into a moving
+  // wall - and the seeded tail is laid into the closing edge. Aim at the DESTINATION centre
+  // instead, so a new player starts out running with the map. Falls back to the live centre
+  // whenever the ring is parked (settle/regrow/hold), which is the old behaviour.
+  const _roamAim = !!(sg && sg.roamPhase === 'moving' && sg.roamToX != null);
+  const _sfcx = sg ? (_roamAim ? sg.roamToX : (sg.cx || 0)) : 0;
+  const _sfcy = sg ? (_roamAim ? sg.roamToY : (sg.cy || 0)) : 0;
 
   const _sfdx = _sfcx - sx, _sfdy = _sfcy - sy;
 
@@ -1776,6 +1943,7 @@ function getSsGame(lid) {
   if (!ssGames.has(lid)) ssGames.set(lid, {
 
     snakes: new Map(), tickInterval: null, tick: 0,
+    og: ssIsOgLobby(lid),   // ORIGINAL mode: static arena + camper push, no roam, no respread
 
     food: [], _foodDirty: true, _lastFoodSend: 0, _history: [],
 
@@ -1983,22 +2151,35 @@ function ssForfeitNow(lid, pid, io) {
 const SS_CAP_BASE   = 43;   // carrying just your entry wager (1x) — spawn(30) + 13 headroom
 const SS_CAP_DOUBLE = 58;   // double the entry wager (2x)
 const SS_CAP_MAX    = 63;   // triple (3x) and the hard ceiling beyond it
+// ZONE WARS runs a much tighter ladder (owner 2026-07-31). Base is the SPAWN size, so a base-
+// wager snake in Zone Wars does not grow at all - growth is something you only get by carrying
+// more than you paid in. Confirmed intended. ORIGINAL keeps the numbers above untouched.
+const SS_ZW_CAP_BASE   = 30;
+const SS_ZW_CAP_DOUBLE = 40;
+const SS_ZW_CAP_MAX    = 50;
 // Growth cap by how many ENTRY WAGERS you are carrying (r = usd / entry wager).
 // r<=1 (just your entry) => 30; 2x => 45; 3x => 50; beyond 3x => still 50 (hard ceiling).
 // Two legs by design: +15/wager up to double, then +5/wager to triple.
 // Only physical SIZE is limited here - money (usd) is uncapped and keeps growing past this.
-function ssCapFromRatio(r) {
-  if (!isFinite(r) || r <= 1) return SS_CAP_BASE;
-  if (r <= 2) return Math.round(SS_CAP_BASE + 15 * (r - 1));
-  if (r <= 3) return Math.round(SS_CAP_DOUBLE + 5 * (r - 2));
-  return SS_CAP_MAX;
+function ssCapFromRatio(r, zw) {
+  const B = zw ? SS_ZW_CAP_BASE : SS_CAP_BASE;
+  const D = zw ? SS_ZW_CAP_DOUBLE : SS_CAP_DOUBLE;
+  const M = zw ? SS_ZW_CAP_MAX : SS_CAP_MAX;
+  if (!isFinite(r) || r <= 1) return B;
+  if (r <= 2) return Math.round(B + (D - B) * (r - 1));   // linear base->double
+  if (r <= 3) return Math.round(D + (M - D) * (r - 2));   // linear double->triple
+  return M;
 }
-function ssGrowCap(sn) {
+// sg is REQUIRED: the cap ladder differs per mode, and the mode lives on the game, not the
+// snake. Both call sites already have it in scope. Missing sg falls back to ORIGINAL's ladder,
+// which is the wider one, so a future caller that forgets it cannot silently shrink anybody.
+function ssGrowCap(sn, sg) {
   // PREVIOUS BUG: this used `base` (the lobby entry price) not `usd` (what you carry), so a $1
   // lobby was locked at 30 forever no matter how much money you picked up. Now ratio-based.
   const base = sn.baseUsd || 0, usd = sn.usd || 0;   // baseUsd = entry wager; 0 = free lobby
-  if (base <= 0) return SS_CAP_MAX;   // free lobby: same 50 ceiling, cannot out-grow a paid snake
-  return ssCapFromRatio(usd / base);
+  const zw = !!(sg && !sg.og);   // Zone Wars ladder; ORIGINAL keeps the old one
+  if (base <= 0) return zw ? SS_ZW_CAP_MAX : SS_CAP_MAX;   // free lobby: the mode's own ceiling
+  return ssCapFromRatio(usd / base, zw);
 }
 
 
@@ -2117,7 +2298,7 @@ function ssStepMovement(sn, sg, lid, io, now) {
 
   // (e.g. auto-disabling at BOOST_MIN=12) -- the "random length appears at low size" bug.)
 
-  const _growCap = ssGrowCap(sn);
+  const _growCap = ssGrowCap(sn, sg);
 
   while ((sn.growQueue || 0) > 0 && sn.ns < _growCap) {
 
@@ -2246,9 +2427,14 @@ function ssTick(lid, io) {
 
     const targetR = SS_ARENA_R * (1 - Math.min(0.8, (sg.shrinkPct || 0) + (sg.campShrinkPct || 0)));
 
-    if (sg.arenaR > targetR)      sg.arenaR = Math.max(targetR, sg.arenaR - SS_BORDER_SHRINK_IN);  // closing in — fast
+    // While roaming, track targetR tightly so the cycle's timing is what players actually see;
+    // otherwise keep the original gentle death-shrink ease exactly as it was.
+    const _roaming = sg.roamPhase && sg.roamPhase !== 'hold';
+    const _inRate  = _roaming ? Math.max(SS_BORDER_SHRINK_IN, SS_ROAM_TRACK)  : SS_BORDER_SHRINK_IN;
+    const _outRate = _roaming ? Math.max(SS_BORDER_SHRINK_OUT, SS_ROAM_TRACK) : SS_BORDER_SHRINK_OUT;
+    if (sg.arenaR > targetR)      sg.arenaR = Math.max(targetR, sg.arenaR - _inRate);  // closing in
 
-    else if (sg.arenaR < targetR) sg.arenaR = Math.min(targetR, sg.arenaR + SS_BORDER_SHRINK_OUT); // opening back — gentle
+    else if (sg.arenaR < targetR) sg.arenaR = Math.min(targetR, sg.arenaR + _outRate); // opening back
 
     // Gold/SOL kill food and pebbles must never sit outside the map — push anything the shrinking
 
@@ -2511,7 +2697,7 @@ function ssTick(lid, io) {
 
     if (!sn.alive) return;
 
-    const _cap = ssGrowCap(sn);
+    const _cap = ssGrowCap(sn, sg);
 
     for (let i = sg.food.length - 1; i >= 0; i--) {
 
@@ -2730,6 +2916,20 @@ function ssBroadcastState(sg, lid, io) {
                 acx: Math.round(sg.cx || 0), acy: Math.round(sg.cy || 0), cpush: !!sg.campPushing };
 
   const now = Date.now();
+
+  // (A 100ms floor was tried here on 2026-07-30 and REVERTED - it made gold orbs visibly lag
+  //  outside the moving border. The dirty path deliberately bypasses the 250ms throttle.)
+  // The roaming border's edge-sweep sets _foodDirty every tick while the ring travels,
+
+  // and the roaming border's edge-sweep sets it EVERY tick while the ring travels - so the
+
+  // full ~100-orb array went out at 30Hz instead of 4Hz for ~10s of every ~30s, in every
+
+  // lobby. That is the FPS dip 'when the circle moves' and the worse ping, especially on
+
+  // EU where the RTT is higher. Real events still land within 100ms and the client predicts
+
+  // pickups locally, so nothing is visibly slower; the sweep just stops spamming.
 
   if (sg._foodDirty || !sg._lastFoodSend || now - sg._lastFoodSend > 250) {
 
@@ -3642,8 +3842,54 @@ function ssCheckCollisionsNose(sg, lid, io) {
        * there: the smallest-size feel -- the one that was already liked -- is UNCHANGED, and only
        * the fall-off away from it is corrected. Nothing gets harder than it is today.
        */
+      /*
+       * GRAZE DIFFICULTY IS NOW A FIXED NUMBER OF WORLD PIXELS, AT EVERY SIZE, FOR BOTH SNAKES.
+       *
+       * `sink` = how far the circler may sink into the trail and LIVE = (Ra + Rd) - killDist
+       *        = (1 - grazeHead)*Ra + (1 - bodyScale)*Rd + margin.
+       * That is the difficulty. It was not size-invariant, and grazeScaleK could not make it so:
+       *
+       *   killer's own size (circler fixed at ns30):  ns22 1.61px -> ns40 3.21 -> ns50 3.98 -> ns63 4.89
+       *
+       * i.e. growing from 22 to 63 handed the circler THREE TIMES the forgiveness for the same
+       * input. Owner, in their own words: good at 20-25, noticeably worse past 25, impossible at
+       * 40+, never once seen at 50+. That row IS the complaint.
+       *
+       * THE LEVER WAS NEVER grazeScaleK. The dominant term is (1 - bodyScale)*Rd = 0.25 * MY OWN
+       * radius: bodyScale thins the trail I lay by a quarter of my thickness, and I get thicker
+       * as I grow. grazeScaleK only shapes the small `margin` term, which is why 1.15 -> 1.0 ->
+       * 0.75 all felt like nothing, and why even k=0 only closes the gap from 2.33x to 1.48x.
+       *
+       * AND WHY 'RELATIVE FEEL' WAS THE WRONG TARGET: the camera does NOT zoom with snake size
+       * (_zbase = min(canvas.width/928, canvas.height/522) - viewport only). A world pixel is the
+       * same screen pixel whatever size you are, so aim resolves in ABSOLUTE px. The old design
+       * aimed for constant margin/reach ('k=1 = perfectly identical feel'), which is the correct
+       * invariant only for a camera that scales with the snake. This one does not.
+       *
+       * So: solve for the margin that makes sink a CONSTANT S.
+       *     margin = S - (1 - grazeHead)*Ra - (1 - bodyScale)*Rd
+       * with S anchored so two ns=30 snakes - the reference the owner already knows - are
+       * EXACTLY as they are today:
+       *     S = grazePx + ((1-grazeHead) + (1-bodyScale)) * (SS_GRAZE_REF_REACH / 2)
+       * grazePx still sets the difficulty and grazeHead/bodyScale still set where the reference
+       * lands, so the panel keeps working. grazeScaleK is now INERT by design: its only job was
+       * to create size dependence, and there is none left to shape.
+       * margin may go negative (small circler, big trail) - that is correct and intended, it
+       * just means the scaled reach undershoots and is added back. sink stays S > 0 either way,
+       * so a circler can always make contact before it dies.
+       */
+      // ANCHOR: the difficulty is pinned to what the owner already knows as correct - a size-26
+      // snake grazing a spawn-size (ns 30) circler. Owner, verbatim: 'DO LIKE 26 SIZE HARD'.
+      // Every knob still does its old job (it sets WHERE the anchor lands); what has gone is the
+      // size DEPENDENCE, so that one difficulty now applies at every size, for both snakes.
+      // With the locked values this is S = 2.00px. Raise grazePx to make grazing more forgiving
+      // (harder to land), lower it to make it easier - exactly as the slider always behaved.
+      const _Ra0 = ssSectionRadius(SS_GRAZE_ANCHOR_TARGET_NS);
+      const _Rd0 = ssSectionRadius(SS_GRAZE_ANCHOR_KILLER_NS);
+      const _sinkRef = (1 - grazeHead) * _Ra0 + (1 - grazeBody) * _Rd0
+        + skimMargin * Math.pow(Math.max(1, _Ra0 + _Rd0) / SS_GRAZE_REF_REACH, grazeScaleK);
       const margin = skimOn
-        ? skimMargin * Math.pow(Math.max(1, RaBase + Rd) / SS_GRAZE_REF_REACH, grazeScaleK)
+        ? _sinkRef - (1 - grazeHead) * RaBase - (1 - grazeBody) * Rd
         : 0;
 
       const reach = RaEff + RdEff, dpath = D.path;
@@ -3843,7 +4089,7 @@ const WG_ENABLED    = new Set((process.env.SS_WAGER_LOBBIES || '').split(',').ma
 function wgEnabled(lid) {
   if (!lid) return false;
   if (WG_ENABLED.has(lid)) return true;
-  return /^ss-paid-lobby-\d+(?:\.\d+)?$/.test(String(lid)) || String(lid) === 'ss-test-lobby';
+  return /^ss-(?:og-)?paid-lobby-\d+(?:\.\d+)?$/.test(String(lid)) || String(lid) === 'ss-test-lobby';
 }
 const WG_SETTLE_URL = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
 // Falls back to REGION, which is what ecosystem.config.js actually sets. WG_REGION was never
@@ -4564,13 +4810,14 @@ app.get('/counts', (_, res) => {
     }
     return { n, names };
   };
-  const FIXED = ['free-lobby', 'ss-free-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-25'];
+  const FIXED = ['free-lobby', 'ss-free-lobby', 'ss-paid-lobby-1', 'ss-paid-lobby-5', 'paid-lobby-1', 'paid-lobby-25',
+                 'ss-og-free-lobby', 'ss-og-paid-lobby-1', 'ss-og-paid-lobby-5'];
   for (const id of FIXED) {
     const d = id.indexOf('ss-') === 0 ? ssData(id) : pacData(id);
     counts[id] = d.n; players[id] = d.names;
   }
   for (const [lid] of ssGames) {
-    if (typeof lid === 'string' && lid.indexOf('ss-paid-lobby-') === 0 && !(lid in counts)) { const d = ssData(lid); counts[lid] = d.n; players[lid] = d.names; }
+    if (typeof lid === 'string' && (lid.indexOf('ss-paid-lobby-') === 0 || lid.indexOf('ss-og-paid-lobby-') === 0) && !(lid in counts)) { const d = ssData(lid); counts[lid] = d.n; players[lid] = d.names; }
   }
   // Dynamic PAC lobbies (any custom stake) — enumerate the ROOMS map, not socket rooms, so a lobby
   // reports the same way whether or not anyone is currently connected to its socket room.
@@ -4848,7 +5095,7 @@ io.on('connection', socket => {
 
   if (!lobbyId) { socket.disconnect(); return; }
 
-  const isPaid = lobbyId !== 'free-lobby' && lobbyId !== 'ss-free-lobby' && lobbyId !== SS_TEST_LOBBY;
+  const isPaid = lobbyId !== 'free-lobby' && lobbyId !== 'ss-free-lobby' && lobbyId !== 'ss-og-free-lobby' && lobbyId !== SS_TEST_LOBBY;
 
 
 
@@ -5414,7 +5661,7 @@ io.on('connection', socket => {
     // inserted into ssGames.get(lobbyId), so a client cannot aim a bot at a room it isn't in, and a
     // socket sitting in a paid room is rejected outright here. Belt-and-braces: reject anything with
     // 'paid' in the id too, so adding a new free-lobby id later can never accidentally open paid up.
-    const BOT_LOBBIES = ['ss-free-lobby', 'free-lobby', SS_TEST_LOBBY];
+    const BOT_LOBBIES = ['ss-free-lobby', 'ss-og-free-lobby', 'free-lobby', SS_TEST_LOBBY];
     if (BOT_LOBBIES.indexOf(lobbyId) === -1 || String(lobbyId || '').indexOf('paid') !== -1) {
       socket.emit('ss-notice', 'Bots are only available in the free lobby');
       return;
@@ -5531,7 +5778,7 @@ io.on('connection', socket => {
   // who isn't the local host, which is everyone in a server-authoritative free lobby.
   socket.on('ss-clear-bots', () => {
    try {
-    const BOT_LOBBIES = ['ss-free-lobby', 'free-lobby', SS_TEST_LOBBY];
+    const BOT_LOBBIES = ['ss-free-lobby', 'ss-og-free-lobby', 'free-lobby', SS_TEST_LOBBY];
     if (BOT_LOBBIES.indexOf(lobbyId) === -1 || String(lobbyId || '').indexOf('paid') !== -1) return;
     const sg = ssGames.get(lobbyId);
     if (!sg) return;
@@ -5540,6 +5787,38 @@ io.on('connection', socket => {
     if (n) console.log(`[${lobbyId}] cleared ${n} bot(s)`);
     socket.emit('ss-notice', n ? ('Removed ' + n + ' bot(s)') : 'No bots active');
    } catch (e) { console.warn('[ss-clear-bots] ' + (e && e.message)); }
+  });
+
+  // Clear gold/kill orbs — PRACTICE + FREE LOBBIES ONLY.
+  //
+  // ⚠ MONEY. A gold orb is a CLAIM TICKET on SOL already sitting in escrow; deleting one in a
+  // paid room would strand real money with nothing left to claim it. So this is gated exactly
+  // like the bot handlers (lobbyId comes from the handshake, never from the client) AND, belt
+  // and braces, it refuses to remove any orb that actually carries value. Even if a lobby were
+  // somehow misclassified, or a free lobby ever ended up holding a funded orb, this cannot
+  // destroy money — it will skip those and say so.
+  socket.on('ss-clear-gold', () => {
+   try {
+    const BOT_LOBBIES = ['ss-free-lobby', 'ss-og-free-lobby', 'free-lobby', SS_TEST_LOBBY];
+    if (BOT_LOBBIES.indexOf(lobbyId) === -1 || String(lobbyId || '').indexOf('paid') !== -1) {
+      socket.emit('ss-notice', 'Gold clearing is practice-lobby only');
+      return;
+    }
+    const sg = ssGames.get(lobbyId);
+    if (!sg || !sg.food) return;
+    let removed = 0, kept = 0;
+    const before = sg.food.length;
+    sg.food = sg.food.filter(f => {
+      if (!f || !f.k) return true;                                   // ordinary pebble — untouched
+      if ((Number(f.w) || 0) > 0 || (Number(f.lam) || 0) > 0) { kept++; return true; }  // FUNDED
+      removed++; return false;
+    });
+    if (removed) { sg._foodDirty = true; console.log('[' + lobbyId + '] cleared ' + removed + ' gold orb(s)'); }
+    else if (before) sg.food.length = sg.food.length;                // no-op, keeps shape explicit
+    socket.emit('ss-notice', removed
+      ? ('Removed ' + removed + ' gold orb(s)' + (kept ? (' — kept ' + kept + ' holding real value') : ''))
+      : (kept ? ('Kept ' + kept + ' gold orb(s) holding real value') : 'No gold orbs'));
+   } catch (e) { console.warn('[ss-clear-gold] ' + (e && e.message)); }
   });
 
   // ── OWNER-ONLY LIVE COMBAT TUNING (ed25519-verified) ────────────────────────────────────────
@@ -5847,7 +6126,8 @@ app.get('/admin/status', requireAdmin, (req, res) => {
 
   // The live maps are the truth; BASE_IDS stays only as a floor so a quiet site still has shape.
 
-  const BASE_IDS = ['free-lobby','ss-free-lobby','ss-paid-lobby-1','ss-paid-lobby-5','paid-lobby-1','paid-lobby-5','paid-lobby-25'];
+  const BASE_IDS = ['free-lobby','ss-free-lobby','ss-paid-lobby-1','ss-paid-lobby-5','paid-lobby-1','paid-lobby-5','paid-lobby-25',
+                   'ss-og-free-lobby','ss-og-paid-lobby-1','ss-og-paid-lobby-5'];
 
   const LOBBY_IDS = [...new Set([...BASE_IDS, ...ssGames.keys(), ...rooms.keys()])];
 

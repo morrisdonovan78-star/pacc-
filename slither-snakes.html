@@ -654,6 +654,10 @@ body.mctl #voice-speakers{left:150px;}
     </div>
     <button class="btn btn-g" onclick="playNow()" style="margin-bottom:10px;font-size:12px;letter-spacing:2px;padding:16px 20px;">▶ PLAY NOW</button>
     <button class="btn btn-y" onclick="openWatchBet()" style="margin-bottom:10px;font-size:11px;letter-spacing:2px;padding:14px 20px;">🎲 WATCH &amp; BET LIVE</button>
+    <div style="display:flex;gap:8px;margin-bottom:8px;">
+      <button id="mode-zone" class="btn btn-y btn-sm" onclick="setGameMode('ZONE')" style="flex:1;" title="Roaming border — the arena travels, closes in, then regrows">⚡ ZONE WARS</button>
+      <button id="mode-og" class="btn btn-y btn-sm" onclick="setGameMode('OG')" style="flex:1;" title="The classic static arena — it only moves if someone camps">🕹 ORIGINAL</button>
+    </div>
     <div style="display:flex;gap:8px;">
       <button id="srv-na" class="btn btn-c btn-sm" onclick="setGameServer('NA')" style="flex:1;">🇺🇸 NA</button>
       <button id="srv-eu" class="btn btn-c btn-sm" onclick="setGameServer('EU')" style="flex:1;">🇩🇪 EU</button>
@@ -1316,7 +1320,8 @@ body.mctl #voice-speakers{left:150px;}
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:9px;">
     <button onclick="clearBotSnakes()" style="padding:7px 4px;background:#1a0000;border:1px solid #FF4444;color:#FF4444;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">✕ BOTS (C)</button>
-    <button onclick="_resetTuning()" style="padding:7px 4px;background:#111;border:1px solid #555;color:#888;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">RESET</button>
+    <button onclick="_refreshTuning()" title="Read the values this server is ACTUALLY running and show them here. Sends nothing." style="padding:7px 4px;background:#001a14;border:1px solid #00CC99;color:#00FFCC;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">↻ REFRESH</button>
+    <button onclick="_resetTuning()" title="OVERWRITES the server with this client's defaults. This is a WRITE, not a refresh." style="padding:7px 4px;background:#111;border:1px solid #555;color:#888;font-family:Orbitron,sans-serif;font-size:9px;cursor:pointer;border-radius:5px;letter-spacing:1px;">RESET</button>
   </div>
 
   <div id="tun-host-note" style="font-size:9px;color:#444;text-align:center;">Live on server • T to close • H = hitboxes</div>
@@ -1387,19 +1392,32 @@ const INIT_SECTIONS= 30;    // starting section count (join length) — owner 20
 // with head radius and looked oversized on big/long snakes) — see _drawHeadCircle's eR.
 const EYE_BASE_R   = BASE_RADIUS+Math.pow(INIT_SECTIONS*SIZE_PER_SEGMENT,RADIUS_GROWTH)*RADIUS_SCALE;
 const MAX_SECTIONS = 300;   // absolute hard cap for remote snakes; MY cap = ssCapFromRatio (below)
-// Wager-scaled growth cap. r = value carried / entry wager: 1x => 30, 2x => 45, 3x => 50, and 50
-// is the hard ceiling past 3x. The two legs slope differently on purpose (+15/wager to double,
-// then +5/wager to triple). MUST match SS_CAP_* / ssCapFromRatio in _server_na.js — the server is
-// authoritative and will clamp anyway; a mismatch just makes your own snake stutter at the cap.
-const SS_CAP_BASE  = 30;    // carrying just your entry wager (1x)
-const SS_CAP_DOUBLE= 45;    // double the entry wager (2x)
-const SS_CAP_MAX   = 50;    // triple (3x) and the hard ceiling beyond it; also the free-lobby cap
-function ssCapFromRatio(r){
-  if(!isFinite(r)||r<=1)return SS_CAP_BASE;
-  if(r<=2)return Math.round(SS_CAP_BASE+15*(r-1));
-  if(r<=3)return Math.round(SS_CAP_DOUBLE+5*(r-2));
-  return SS_CAP_MAX;
+// Wager-scaled growth cap. r = value carried / entry wager. THE LADDER DIFFERS PER MODE:
+//   ZONE WARS  30 / 40 / 50 — base IS the spawn size, so a base-wager snake does not grow at all;
+//              growth is something you earn by carrying more than you paid in (owner, confirmed).
+//   ORIGINAL   43 / 58 / 63 — unchanged from before the modes split.
+// MUST match SS_CAP_* / SS_ZW_CAP_* / ssCapFromRatio in the server — the server is authoritative and
+// will clamp anyway; a mismatch just makes your own snake stutter at the cap.
+// (The old client numbers here were 30/45/50 against a server running 43/58/63, so the prediction
+// was already wrong in ORIGINAL's favour before today. Both sides now agree in both modes.)
+const SS_CAP_BASE  = 43;    // ORIGINAL: carrying just your entry wager (1x)
+const SS_CAP_DOUBLE= 58;    // ORIGINAL: double the entry wager (2x)
+const SS_CAP_MAX   = 63;    // ORIGINAL: triple (3x) and the hard ceiling beyond it
+const SS_ZW_CAP_BASE  = 30;
+const SS_ZW_CAP_DOUBLE= 40;
+const SS_ZW_CAP_MAX   = 50;
+// Reads the LIVE room, not the menu toggle: the toggle only decides where your next join goes, and
+// a player who arrived through a link can be in a room the toggle disagrees with.
+function _capsZW(){ return lobbyModeOf(pkRoomId)!=='OG'; }
+function ssCapFromRatio(r,zw){
+  if(zw===undefined)zw=_capsZW();
+  const B=zw?SS_ZW_CAP_BASE:SS_CAP_BASE, D=zw?SS_ZW_CAP_DOUBLE:SS_CAP_DOUBLE, M=zw?SS_ZW_CAP_MAX:SS_CAP_MAX;
+  if(!isFinite(r)||r<=1)return B;
+  if(r<=2)return Math.round(B+(D-B)*(r-1));
+  if(r<=3)return Math.round(D+(M-D)*(r-2));
+  return M;
 }
+function ssCapMax(){ return _capsZW()?SS_ZW_CAP_MAX:SS_CAP_MAX; }
 const MAX_TURN     = 0.274; // rad/tick
 const BOOST_DRAIN  = 8;     // ticks between boost drain events
 const BOOST_DRAIN_AMT = 5.2734375;  // drain accumulator per tick = AMT/DRAIN = 0.659 sections/tick (25% faster than 4.21875)
@@ -1779,6 +1797,15 @@ let _joinStage='idle';
 // WebSocket is stalled by a middlebox or a slow upgrade, so it's the right second attempt.
 let _ssForcePolling=false;
 let GAME_SERVER=localStorage.getItem('ss_server')||'NA';
+// ── GAME MODE: ZONE WARS vs ORIGINAL ─────────────────────────────────────────────────────────────
+// Picked exactly like the NA/EU server, and it works the same way: it does not change how a lobby
+// behaves, it changes WHICH lobby you join. ORIGINAL rooms carry an `ss-og-` prefix; every id
+// without it is Zone Wars, so no existing room, escrow key or entry token changes meaning.
+//   ZONE WARS — the roaming border. It travels to a new spot while closing, regrows, waits, goes
+//               again, forever. Tighter size caps (30/40/50).
+//   ORIGINAL  — the arena as it was before 30 Jul 2026: parked on the origin, and it only moves if
+//               somebody camps a circle. Size caps 43/58/63.
+let GAME_MODE=localStorage.getItem('ss_mode')==='OG'?'OG':'ZONE';
 let REGION=localStorage.getItem('ss_region')||'US';
 
 // Game state
@@ -1936,18 +1963,28 @@ function getSioUrl(){return GAME_SERVERS[GAME_SERVER].url;}
 // legacy room whose label isn't canonical (`ss-paid-lobby-0.50`) is then still joinable. Accepted only
 // when it really is a room for THIS stake — a URL param must never be able to aim a paid join at some
 // other lobby. Compared NUMERICALLY: a prefix/trailing-zero match would let $2 resolve to $20.
+// MODE IS PART OF THE ID, and it is applied HERE and nowhere else, for the same reason the stake is:
+// the moment two places build the name, two places can disagree about it. `ss-og-` = ORIGINAL.
+// An override coming in from a JOIN/spectate link carries its own mode in its name, so it is honoured
+// as-is once the stake matches numerically — clicking an ORIGINAL lobby must not silently drop you
+// into the Zone Wars room of the same price just because that is what your toggle happens to say.
 let _lobbyIdOverride=null;
+function _modePfx(){ return GAME_MODE==='OG'?'ss-og-':'ss-'; }
 function lobbyIdFor(usd){
   const n=Number(usd);
   if(_lobbyIdOverride){
     if(n>0){
-      const m=/^ss-paid-lobby-(\d+(?:\.\d+)?)$/.exec(_lobbyIdOverride);
+      const m=/^ss-(?:og-)?paid-lobby-(\d+(?:\.\d+)?)$/.exec(_lobbyIdOverride);
       if(m && Number(m[1])===n) return _lobbyIdOverride;
-    } else if(_lobbyIdOverride==='ss-free-lobby') return _lobbyIdOverride;
+    } else if(_lobbyIdOverride==='ss-free-lobby'||_lobbyIdOverride==='ss-og-free-lobby') return _lobbyIdOverride;
   }
-  if(!(n>0)) return 'ss-free-lobby';
-  return 'ss-paid-lobby-'+n;
+  if(!(n>0)) return _modePfx()+'free-lobby';
+  return _modePfx()+'paid-lobby-'+n;
 }
+// Which mode a lobby id means. Used for the HUD badge and for anything that must behave per-mode
+// (size caps, the roaming-border toast) whatever route the player took into the room.
+function lobbyModeOf(id){ return String(id||'').indexOf('ss-og-')===0?'OG':'ZONE'; }
+function isFreeLobbyId(id){ return id==='ss-free-lobby'||id==='ss-og-free-lobby'||id==='free-lobby'; }
 // 9 dp = lamport resolution. This used to round to 4 dp, which is ~0.0001 SOL — invisible at a $1 or
 // $5 entry, but at a 10c stake (~0.00067 SOL) it quantised the wager by several percent, so a "10c"
 // entry actually collected about 9.7c. Rounding money to a coarser grid than the chain's own unit
@@ -2572,6 +2609,30 @@ function syncServerBtns(){
     b.style.borderColor=active?'var(--g)':'var(--c)';
   });
 }
+// Same inline-style trick as syncServerBtns, and for the same cascade reason.
+function syncModeBtns(){
+  [['zone','ZONE'],['og','OG']].forEach(([k,v])=>{
+    const b=document.getElementById('mode-'+k);
+    if(!b)return;
+    const active=(GAME_MODE===v);
+    b.classList.toggle('btn-g',active);
+    b.style.background=active?'var(--g)':'transparent';
+    b.style.color=active?'#001500':'var(--y)';
+    b.style.borderColor=active?'var(--g)':'var(--y)';
+  });
+}
+// Mode changes the room you will join, so anyone already sitting on a live connection must not be
+// left with a toggle that disagrees with the arena around them. Switching only ever affects the
+// NEXT join; it never moves a player mid-match.
+function setGameMode(m,quiet){
+  if(m!=='ZONE'&&m!=='OG')m='ZONE';
+  GAME_MODE=m;
+  try{ localStorage.setItem('ss_mode',m); }catch(_){}
+  syncModeBtns();
+  if(quiet)return;
+  ssSetSetting('ss_mode',m);                                            // account-backed
+  addToast(m==='OG'?'Mode: ORIGINAL — static arena':'Mode: ZONE WARS — roaming border','#FFD700');
+}
 // `quiet` = restoring the saved preference from the account, not a fresh user click: apply it
 // silently (no toast) and don't echo it straight back to the server it just came from.
 // _serverPickedAt = when the user last EXPLICITLY chose a region. A quiet apply from an async
@@ -3018,7 +3079,13 @@ async function finishLoginBridge(info){
   // The exact room the Live Matches card was showing, straight from the game server's own /counts —
   // so we join THAT room rather than rebuilding its name from a parsed number. Validated per-stake
   // inside lobbyIdFor(); a bad value simply falls back to the canonical id.
-  try{ if(info.lobby && /^ss-(free-lobby|paid-lobby-\d+(?:\.\d+)?)$/.test(String(info.lobby))) _lobbyIdOverride=String(info.lobby); }catch(_){}
+  // The mode is part of that name, and it is authoritative: clicking an ORIGINAL lobby from Live
+  // Matches must put you in THAT arena, not in the Zone Wars room of the same price because that is
+  // what your own toggle said. Quietly move the toggle to match so the UI agrees with the room.
+  try{ if(info.lobby && /^ss-(?:og-)?(free-lobby|paid-lobby-\d+(?:\.\d+)?)$/.test(String(info.lobby))){
+    _lobbyIdOverride=String(info.lobby);
+    setGameMode(lobbyModeOf(_lobbyIdOverride),true);
+  } }catch(_){}
   _keypair={ publicKey:new solanaWeb3.PublicKey(info.address) };
   ST.conn=makeConnection();
   try{ _ownerCheck(); }catch(_){}
@@ -3642,9 +3709,12 @@ function fetchLobbyCounts(){
     fetch(getSioUrl()+'/counts',{signal:AbortSignal.timeout(4000)})
       .then(r=>r.json())
       .then(d=>{
-        const f=d['ss-free-lobby']||d['free-lobby']||0;
-        const p1=d['ss-paid-lobby-1']||d['paid-lobby-1']||0;
-        const p5=d['ss-paid-lobby-5']||d['paid-lobby-25']||0;
+        // Both modes counted together: the number under "$1 LOBBY" should mean "people playing
+        // for $1", not "people playing for $1 in whichever mode my toggle happens to be on".
+        const _n=k=>Number(d[k])||0;
+        const f =_n('ss-free-lobby')+_n('ss-og-free-lobby')+_n('free-lobby');
+        const p1=_n('ss-paid-lobby-1')+_n('ss-og-paid-lobby-1')+_n('paid-lobby-1');
+        const p5=_n('ss-paid-lobby-5')+_n('ss-og-paid-lobby-5')+_n('paid-lobby-25');
         const el=id=>document.getElementById(id);
         if(el('l0-cnt'))el('l0-cnt').textContent=f+' online';
         if(el('l1-cnt'))el('l1-cnt').textContent=p1+' online';
@@ -3734,7 +3804,7 @@ async function joinLobby(usd){
     go('scr-mm');
     document.getElementById('mm-sub').textContent='Joining free lobby…';
     lg('mm-log','Connecting to free lobby…','lhi');
-    pkConnect('ss-free-lobby');
+    pkConnect(lobbyIdFor(0));
     return;
   }
   await fetchPrice().catch(()=>{});   // live price so wagerSol is correct (stale/0 price → wagerSol 0 → lenient, never a false block)
@@ -4300,6 +4370,13 @@ async function pkConnect(roomId,gameToken,spectate){
         if(!t||typeof t!=='object')return;
         Object.assign(_tuningTest,t);
         if(_showTuning)_syncTuningUI();
+        // A refresh that repaints in silence is indistinguishable from one that did nothing, which
+        // is exactly the doubt this button exists to remove. Say what came back.
+        if(Date.now()-_tuneRefreshAt<6000){
+          _tuneRefreshAt=0;
+          addToast('LIVE: overlap '+(+t.grazePx).toFixed(2)+'px · head '+(+t.grazeHead).toFixed(2)
+                   +' · body '+(+t.bodyScale).toFixed(2)+' · fairness '+(+t.grazeScaleK).toFixed(2),'#00FFCC',6000);
+        }
       }catch(_){}
     });
     // Pull the lobby's live tuning right away (socket.io buffers until connected) so hitbox rendering
@@ -4490,9 +4567,13 @@ async function pkConnect(roomId,gameToken,spectate){
       if(typeof d.ar==='number'&&d.ar>0)_arenaR=d.ar; // live (shrinking/expanding) border radius
       if(typeof d.acx==='number')_arenaCX=d.acx;         // anti-camp push — the ring itself moves
       if(typeof d.acy==='number')_arenaCY=d.acy;
-      // The border no longer reacts to camping — it roams on a timer, so this can never be blamed on
-      // a player. cpush is now simply "the ring is travelling right now".
-      if(_campPushing!==!!d.cpush){ _campPushing=!!d.cpush; if(_campPushing){ try{ addToast('⚠ ARENA ON THE MOVE','#FF6600',3000); }catch(_){} } }
+      // cpush = "the ring is travelling right now", but WHY it is travelling differs per mode, and
+      // the warning has to say the right thing. In ZONE WARS it roams on a timer and nobody caused
+      // it. In ORIGINAL it only ever moves because somebody is camping a circle — which is the whole
+      // point of that mechanic, so the toast has to name it or the push looks like a bug.
+      if(_campPushing!==!!d.cpush){ _campPushing=!!d.cpush; if(_campPushing){ try{
+        addToast(lobbyModeOf(pkRoomId)==='OG'?'⚠ ANTI-CAMP: THE ARENA IS MOVING':'⚠ ARENA ON THE MOVE','#FF6600',3000);
+      }catch(_){} } }
       // Sync food (sent every ~250ms or when changed)
       if(d.food){
         SG.food=_mapServerFood(d.food);
@@ -5691,8 +5772,8 @@ async function _fetchLiveLobbies(){
         const n=d[k];
         if(typeof n!=='number'||n<1)continue;
         let stake=null;
-        if(k==='ss-free-lobby')stake=0;
-        else{ const m=/^ss-paid-lobby-(\d+(?:\.\d+)?)$/.exec(k); if(m)stake=parseFloat(m[1]); }
+        if(k==='ss-free-lobby'||k==='ss-og-free-lobby')stake=0;
+        else{ const m=/^ss-(?:og-)?paid-lobby-(\d+(?:\.\d+)?)$/.exec(k); if(m)stake=parseFloat(m[1]); }
         if(stake===null)continue;                      // pac / test / unknown rooms aren't snake arenas
         const names=(d._players&&Array.isArray(d._players[k]))?d._players[k]:[];
         out.push({region:reg,lobbyId:k,stake,count:n,names});
@@ -5703,6 +5784,10 @@ async function _fetchLiveLobbies(){
   return out;
 }
 const _stakeLabel=(s)=>(Number(s)>0?('$'+Number(s)):'FREE');
+// ZONE WARS and ORIGINAL can both be live at the same stake in the same region, and the two
+// rows would otherwise read identically. Zone Wars carries no tag (it is the default arena);
+// ORIGINAL is called out explicitly.
+const _modeTag=(id)=>(lobbyModeOf(id)==='OG'?' 🕹OG':'');
 
 // Rebuild the "switch arena" strip shown while spectating from the live lobby list, so it offers the
 // arenas that exist right now instead of the same four fixed tiers.
@@ -5713,7 +5798,7 @@ async function _renderWatchSwitch(){
   try{ rows=await _fetchLiveLobbies(); }catch(_){}
   if(!rows.length){ ws.innerHTML='<span style="font-size:10px;color:#8a7c54">No other live arenas right now</span>'; return; }
   ws.innerHTML=rows.slice(0,10).map(r=>
-    '<button class="copy-btn" data-ws="'+r.region+'|'+r.lobbyId+'|'+r.stake+'">'+(r.region==='EU'?'🇩🇪':'🇺🇸')+' '+r.region+' '+_stakeLabel(r.stake)+' ('+r.count+')</button>'
+    '<button class="copy-btn" data-ws="'+r.region+'|'+r.lobbyId+'|'+r.stake+'">'+(r.region==='EU'?'🇩🇪':'🇺🇸')+' '+r.region+' '+_stakeLabel(r.stake)+_modeTag(r.lobbyId)+' ('+r.count+')</button>'
   ).join('');
   ws.querySelectorAll('[data-ws]').forEach(b=>b.onclick=(e)=>{
     e.preventDefault(); e.stopPropagation();
@@ -5751,7 +5836,7 @@ function openWatchBet(){
       for(const r of byReg[region]){
         const who=r.names&&r.names.length?r.names.slice(0,3).join(', '):(r.count+' playing');
         x+='<button data-wb="'+region+'|'+r.lobbyId+'|'+r.stake+'" style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:rgba(255,215,0,.08);border:1px solid #6b5a20;color:#FFD700;border-radius:9px;font-weight:800;font-size:12px;padding:11px;cursor:pointer;text-align:left">'
-          +'<span>'+_stakeLabel(r.stake)+' ARENA</span>'
+          +'<span>'+_stakeLabel(r.stake)+' '+(lobbyModeOf(r.lobbyId)==='OG'?'ORIGINAL':'ZONE WARS')+'</span>'
           +'<span style="font-weight:600;font-size:10px;color:#b8a97a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px">'+r.count+' · '+who+'</span></button>';
       }
       x+='</div>';
@@ -6304,7 +6389,7 @@ function snakeTick(){
       let _cap;
       if(snake.id===myPid){
         const _base=ST.lobbyUsd||0;
-        _cap=_base>0?ssCapFromRatio((_myUsd||0)/_base):SS_CAP_MAX;
+        _cap=_base>0?ssCapFromRatio((_myUsd||0)/_base):ssCapMax();
       }else{ _cap=MAX_SECTIONS; }
       snake.growQueue--;
       snake.numSections=Math.min(_cap,snake.numSections+1);
@@ -6389,6 +6474,22 @@ function snakeTick(){
 // a size that never occurs in play - so the 'scaling is a no-op here' anchor was unreachable and
 // every real size measured as a departure from it. MUST match SS_GRAZE_REF_REACH on the server.
 const _GRAZE_REF_REACH=48.34;
+// GRAZE DIFFICULTY ANCHOR — MUST match SS_GRAZE_ANCHOR_*_NS on the server.
+// The graze is now equally hard at every size, for BOTH snakes; these say which size it is equally
+// hard AS. Killer 26 is the owner's own "feels right" size, target 30 is the spawn size.
+const _GRAZE_ANCHOR_KILLER_NS=26, _GRAZE_ANCHOR_TARGET_NS=30;
+// sink = (Ra + Rd) - killDist = how deep a graze visibly sinks in before it kills. It is ONE number
+// and it is both things at once: the depth you see, and the difficulty. Holding it constant is what
+// makes every size play the same. Port of the server's _sinkRef.
+//   sink = (1-gHead)*Ra + (1-gBody)*Rd + margin   ->   margin = S - (1-gHead)*Ra - (1-gBody)*Rd
+function _grazeSinkRef(gPx,gHead,gBody,gScaleK){
+  const _r=ns=>BASE_RADIUS+Math.pow(ns*SIZE_PER_SEGMENT,RADIUS_GROWTH)*RADIUS_SCALE;
+  const Ra0=_r(_GRAZE_ANCHOR_TARGET_NS), Rd0=_r(_GRAZE_ANCHOR_KILLER_NS);
+  return (1-gHead)*Ra0+(1-gBody)*Rd0+gPx*Math.pow(Math.max(1,Ra0+Rd0)/_GRAZE_REF_REACH,gScaleK);
+}
+function _grazeMargin(RaBase,Rd,gPx,gHead,gBody,gScaleK){
+  return _grazeSinkRef(gPx,gHead,gBody,gScaleK)-(1-gHead)*RaBase-(1-gBody)*Rd;
+}
 const _PT={ grazePx:1.16, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
 // per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
@@ -6424,10 +6525,10 @@ function _practiceCheckCollisions(){
     for(const D of alive){ if(A===D||died.has(A.id))continue;
       const skimOn=aCirc||!!D.circleActive;
       const RaEff=RaBase*(skimOn?gHead:1), Rd=R(D), RdEff=Rd*(skimOn?gBody:1), reach=RaEff+RdEff;
-      // Graze forgiveness scales with the snakes — see the server's collision site for the arithmetic.
-      // This MUST match the server exactly: a client that predicts a different hitbox is how you get
-      // "I died into empty space".
-      const margin=skimOn?M*Math.pow(Math.max(1,RaBase+Rd)/_GRAZE_REF_REACH,gScaleK):0;
+      // Graze forgiveness is a CONSTANT number of px at every size now — see the server's collision
+      // site for the derivation. This MUST match the server exactly: a client that predicts a
+      // different hitbox is how you get "I died into empty space".
+      const margin=skimOn?_grazeMargin(RaBase,Rd,M,gHead,gBody,gScaleK):0;
       const killDist=reach-margin, killDist2=killDist>0?killDist*killDist:0;
       const segs=segsCache.get(D.id)||[]; if(segs.length<2)continue; const spacing=Rd*SEGMENT_SPACING;
       const neck=Math.max(2,Math.ceil((RaBase+Rd)/spacing));
@@ -6819,6 +6920,7 @@ function _applyGfx(){
 //           read straight from localStorage at the point of use (e.g. clip toggle, snake colour).
 const SS_SET_DEFS = [
   {k:'ss_server',      def:'NA',   apply:v=>{ if(v==='NA'||v==='EU') setGameServer(v,true); }},
+  {k:'ss_mode',        def:'ZONE', apply:v=>{ if(v==='ZONE'||v==='OG') setGameMode(v,true); }},
   {k:'ss_gfx',         def:'high', apply:v=>{ _gfx=v; _applyGfx(); }},
   {k:'ss_clip_on',     def:'1',    apply:null},   // clips ON by default; '0' = player turned them off
   {k:'ss_winclip_off', def:'1',    apply:null},   // auto cash-out clips OFF by default; '0' = opted in
@@ -6897,6 +6999,7 @@ async function ssLoadSettings(){
   if(Object.keys(miss).length){ Object.assign(_ssSetDirty,miss); ssPushSettings(); }
 
   try{ syncServerBtns(); }catch(_){}
+  try{ syncModeBtns(); }catch(_){}
   try{ _renderSettings(); }catch(_){}
 }
 _applyGfx();
@@ -7379,7 +7482,7 @@ function launchSnakeGame(){
   // no owner gate. Practice mode is already owner-only via launchPractice. Paid lobbies never show it,
   // and the SERVER independently refuses to spawn bots outside free/test, so hiding it is only cosmetic
   // — a console emit still can't put a bot in a paid room.
-  const _bbFree=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
+  const _bbFree=(isFreeLobbyId(pkRoomId)||_isTestLobby());
   const _bb=document.getElementById('bot-bar');if(_bb)_bb.style.display=((_isPractice||_bbFree)&&!isSpectating)?'flex':'none';
   // Owner-only tuning entry point — a button, so it works even if F9 is eaten by the OS/browser.
   const _tob=document.getElementById('tune-open-btn');
@@ -7402,7 +7505,7 @@ function _tuningUnlocked(){ try{ return localStorage.getItem('ss_owner')==='1'; 
 // from the free lobby retunes every arena — but the panel must never be open while the owner is in a
 // paid room with real money on the line. A mis-drag there would change the collision constants of a
 // live money game mid-run.
-function _tuningLobbyOk(){ return pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby(); }
+function _tuningLobbyOk(){ return isFreeLobbyId(pkRoomId)||_isTestLobby(); }
 // ── HITBOXES ARE LOCKED ─────────────────────────────────────────────────────────────────────────
 // The live values are the ones the game is meant to run and are not adjustable at runtime by anyone,
 // including the owner. Combat feel that can move mid-session is combat feel nobody in a paid lobby
@@ -7411,7 +7514,11 @@ function _tuningLobbyOk(){ return pkRoomId==='ss-free-lobby'||pkRoomId==='free-l
 // This is the COSMETIC half. The real lock is server-side (SS_TUNE_LOCKED in server.js): every node
 // refuses an ss-tune write outright, so a hand-modified client or a replayed owner signature changes
 // nothing. Flipping this alone would not unlock anything.
-const _TUNING_LOCKED=true;
+// UNLOCKED (owner 2026-07-30). Authority was never this flag: every ss-tune write is verified
+// SERVER-side against the owner wallet's ed25519 key, inside a 5-minute replay window, over a
+// signature that covers the lobby id, the timestamp AND a hash of the values. A hand-modified
+// client can flip this constant all it likes and still change nothing.
+const _TUNING_LOCKED=false;
 function _toggleTuning(){
   const _p=document.getElementById('tuning-panel'); if(!_p)return;
   if(_TUNING_LOCKED){ _showTuning=false; _p.style.display='none'; return; }
@@ -7515,6 +7622,22 @@ function _syncTuningUI(){
   e('tun-face').value=_tuning.faceDeg;  e('tun-face-val').textContent =_tuning.faceDeg+'°';
   e('tun-rule').value=_tuning.rule||'biggest_wins';
   _drawTuningPreview();
+}
+// ↻ REFRESH — PULL ONLY. Asks the server what this lobby is really running and repaints the panel
+// with it. It sends NOTHING, so opening the panel and pressing this can never change the game.
+//
+// WHY THIS EXISTS. The only other button here is RESET, and RESET is a WRITE: it copies this
+// client's hardcoded _LIVE_TUNING_DEFAULTS over whatever the server has and signs the push. One
+// press retunes EVERY arena on that node and persists to ss-tuning.json on disk. That is how NA
+// ended up running grazeScaleK -0.3 and grazePx 3.54 while EU ran the locked 1.15 / 1.16 — the two
+// regions were playing different games and nothing said so. There was no way to simply LOOK.
+// Now there is, and the two buttons are labelled for what they actually do.
+let _tuneRefreshAt=0;
+function _refreshTuning(){
+  if(!_sio){ addToast('Not connected','#FF4444'); return; }
+  _tuneRefreshAt=Date.now();          // the ss-tuning reply within the next few seconds is ours
+  try{ _sio.emit('ss-tuning-get'); }catch(_){ addToast('Refresh failed','#FF4444'); return; }
+  addToast('Reading live server values…','#00FFCC',1600);
 }
 function _resetTuning(){
   // In the TEST lobby, reset the TEST tuning to the CURRENT code defaults (_TEST_DEFAULTS),
@@ -7672,7 +7795,7 @@ function spawnBotSnake(mode){
   // A local bot isn't in the server's ss-state snapshot, so the ss-state reconciler prunes it after ~2
   // packets → "spawns then instantly disappears". This must NOT be gated on !isHost — the test-lobby
   // owner is alone so isHost is true; check the lobby type FIRST.
-  const _srvLobby=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
+  const _srvLobby=(isFreeLobbyId(pkRoomId)||_isTestLobby());
   if(_srvLobby){
     // Open to everyone in free/test lobbies. The SERVER is the authority: it refuses any lobby that
     // isn't free/test (so paid can't be reached even from the console), enforces the 5-circle cap, and
@@ -7704,7 +7827,7 @@ function clearBotSnakes(){
   // Server-authoritative free/test lobbies: the bots live on the SERVER, so ask it to clear them.
   // Locally deleting them would just get them re-added by the next ss-state packet, and the old
   // isHost check made this button dead for everyone in a free lobby (nobody is the host there).
-  const _srvLobby=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
+  const _srvLobby=(isFreeLobbyId(pkRoomId)||_isTestLobby());
   if(_srvLobby){ if(_sio)_sio.emit('ss-clear-bots'); else addToast('Not connected','#FF4444'); return; }
   if(!SG||!isHost){addToast(!SG?'No game active':'Only host can clear bots','#FF4444');return;}
   let n=0;
@@ -7716,7 +7839,7 @@ function clearBotSnakes(){
 // lobby from the socket handshake and additionally refuses to delete any orb carrying real value.
 // This guard is only here to keep the button from looking broken in a paid room.
 function clearGoldFood(){
-  const _srvLobby=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
+  const _srvLobby=(isFreeLobbyId(pkRoomId)||_isTestLobby());
   if(!_srvLobby){addToast('Practice lobby only','#FF4444');return;}
   if(!_sio){addToast('Not connected','#FF4444');return;}
   _sio.emit('ss-clear-gold');   // result comes back as an 'ss-notice' toast
@@ -7887,7 +8010,7 @@ function onGameKey(e){
   // free/test-only and the 5-circle cap, so this is not a way into paid lobbies.
   // NOTE: not Shift+N — Shift is the BOOST key, so a Shift combo would boost at the same time.
   if(!a && (e.key==='n'||e.key==='N'||e.key==='c'||e.key==='C')){
-    const _kbFree=(pkRoomId==='ss-free-lobby'||pkRoomId==='free-lobby'||_isTestLobby());
+    const _kbFree=(isFreeLobbyId(pkRoomId)||_isTestLobby());
     if(_isPractice||_kbFree){ if(e.key==='c'||e.key==='C')clearBotSnakes(); else spawnBotSnake('circle'); return; }
   }
   // Body-renderer A/B toggles removed: the renderer is LOCKED to the good look (_BODY3STROKE +
@@ -8570,7 +8693,7 @@ function _guestPredictiveEat(my){
    * field instead of blinking.
    */
   const _cBase=ST.lobbyUsd||0;
-  const _cCap=_cBase>0?ssCapFromRatio((_myUsd||0)/_cBase):SS_CAP_MAX;
+  const _cCap=_cBase>0?ssCapFromRatio((_myUsd||0)/_cBase):ssCapMax();
   if((my.numSections||0)>=_cCap)return;   // at cap → server eats nothing here, so predict nothing
   const h=my.path[0], now=Date.now(), pickR=msThick(my)+FOOD_PICKUP_R, r2=pickR*pickR;
   for(let i=SG.food.length-1;i>=0;i--){
@@ -9196,6 +9319,38 @@ function drawArena(){
   ctx.restore();
 }
 
+// ── FOOD vs THE MOVING BORDER (client-side prediction) ───────────────────────────────────────────
+// MEASURED on both live nodes, 2026-07-31: the server NEVER has an orb outside the ring — the worst
+// offender sat 18px INSIDE it. What it does have is a refresh gap. `ss-state` arrives at 60Hz and
+// carries the border (ar/acx/acy) every single packet, but the food array only rides along when it
+// actually changed or once the 250ms throttle expires — measured 7.3/s on NA and 7.5/s on EU, with
+// a p90 gap of ~270ms. The border travels ~330px/s, so for up to a quarter of a second the ring is
+// drawn where it IS and the orbs are drawn where they WERE — up to ~90px behind it.
+//
+// That is the whole of "gold sits on the OUTSIDE while the map moves, then pops inside" and "pebbles
+// drift outside the border and only then disappear". Nothing is wrong with the positions; the border
+// is simply 8x fresher than the food.
+//
+// Raising the food rate is exactly the change that was blamed for the FPS/ping drop, so instead the
+// client applies the SERVER'S OWN out-of-bounds rule to what it is about to draw. It costs nothing
+// and it removes the jump, because it predicts the correction the server is already about to send:
+//   * GOLD is pulled onto the edge circle — the identical `edge/dist` scaling the server uses. Gold
+//     is a claim ticket on real SOL, so it is never hidden and never moved anywhere the server
+//     would not put it; only the DRAW position is predicted, sg.food is untouched.
+//   * A PEBBLE outside the ring is not drawn at all. The server relocates it to a fresh point within
+//     a tick, so the only thing showing it achieves is a quarter-second of food sitting in the dead
+//     zone followed by a teleport.
+// Returns null for "do not draw".
+function _foodDrawPos(f){
+  const R=_arenaR||ARENA_R, cx=_arenaCX||0, cy=_arenaCY||0;
+  const edge=R-20;                                   // server: `const edge = sg.arenaR - 20`
+  if(!(edge>0))return {x:f.x,y:f.y};
+  const dx=f.x-cx, dy=f.y-cy, d2=dx*dx+dy*dy;
+  if(d2<=edge*edge)return {x:f.x,y:f.y};
+  if(!f.k)return null;                               // pebble: about to be relocated, don't draw it
+  const sc=edge/Math.sqrt(d2);
+  return {x:cx+dx*sc, y:cy+dy*sc};
+}
 function drawFood(){
   const now=Date.now();
   if(_perf.on&&SG&&SG.food)_perf.food+=SG.food.length;
@@ -9203,39 +9358,42 @@ function drawFood(){
   // Batch glow pass
   ctx.globalAlpha=0.22;
   SG.food.forEach(f=>{
-    if(Math.abs(f.x-_camX)>vHW||Math.abs(f.y-_camY)>vHH)return;
+    const P=_foodDrawPos(f); if(!P)return;
+    if(Math.abs(P.x-_camX)>vHW||Math.abs(P.y-_camY)>vHH)return;
     const pulse=f.k?(1+0.35*Math.sin(now*0.008+f.x*0.01)):(1+0.18*Math.sin(now*0.004+f.x*0.01+f.y*0.01));
     ctx.fillStyle=foodColor(f);
-    ctx.beginPath();ctx.arc(f.x,f.y,f.size*pulse*(f.k?3.5:2),0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(P.x,P.y,f.size*pulse*(f.k?3.5:2),0,Math.PI*2);ctx.fill();
   });
   ctx.globalAlpha=1;
   // Body pass — kill food gets special treatment
   SG.food.forEach(f=>{
-    if(Math.abs(f.x-_camX)>vHW||Math.abs(f.y-_camY)>vHH)return;
+    const P=_foodDrawPos(f); if(!P)return;
+    if(Math.abs(P.x-_camX)>vHW||Math.abs(P.y-_camY)>vHH)return;
     const pulse=f.k?(1+0.35*Math.sin(now*0.008+f.x*0.01)):(1+0.18*Math.sin(now*0.004+f.x*0.01+f.y*0.01));
     const r=f.size*pulse;
     const col=foodColor(f);
+    const fx=P.x, fy=P.y;
     if(f.k){
       // Outer ring
       ctx.strokeStyle='rgba(255,215,0,0.9)';
       ctx.lineWidth=2.5;
-      ctx.beginPath();ctx.arc(f.x,f.y,r*1.45,0,Math.PI*2);ctx.stroke();
+      ctx.beginPath();ctx.arc(fx,fy,r*1.45,0,Math.PI*2);ctx.stroke();
       // Inner glow ring
       ctx.strokeStyle='rgba(255,255,255,0.5)';
       ctx.lineWidth=1;
-      ctx.beginPath();ctx.arc(f.x,f.y,r*1.15,0,Math.PI*2);ctx.stroke();
+      ctx.beginPath();ctx.arc(fx,fy,r*1.15,0,Math.PI*2);ctx.stroke();
     }
     ctx.fillStyle=col;
-    ctx.beginPath();ctx.arc(f.x,f.y,r,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(fx,fy,r,0,Math.PI*2);ctx.fill();
     // $ symbol on kill food
     if(f.k&&r>5){
       ctx.fillStyle='rgba(20,10,0,0.85)';
       ctx.font=`bold ${Math.round(r*1.1)}px Arial`;
       ctx.textAlign='center';ctx.textBaseline='middle';
-      ctx.fillText('$',f.x,f.y+r*0.05);
+      ctx.fillText('$',fx,fy+r*0.05);
     } else {
       ctx.fillStyle='rgba(255,255,255,0.75)';
-      ctx.beginPath();ctx.arc(f.x-r*0.25,f.y-r*0.25,r*0.35,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.arc(fx-r*0.25,fy-r*0.25,r*0.35,0,Math.PI*2);ctx.fill();
     }
   });
 }
@@ -9250,7 +9408,8 @@ function drawFood(){
 function _drawGrazeViz(){
   if(!_grazeViz||!_isTestLobby()||!SG||typeof ctx==='undefined'||!ctx)return;
   const me=SG.snakes.get(myPid); if(!me||!me.alive||!me.path||!me.path.length)return;
-  const T=_tuningTest, margin=(+T.grazePx||0), gHead=(+T.grazeHead||1), gBody=(+T.bodyScale||1), gReach=(+T.grazeReach||1);
+  const T=_tuningTest, gHead=(+T.grazeHead||1), gBody=(+T.bodyScale||1), gReach=(+T.grazeReach||1);
+  const _gPx=(+T.grazePx||0), _gK=(T.grazeScaleK!=null?+T.grazeScaleK:1.15);
   const gph=me.path[0], Rg=sectionRadius(me), gCirc=!!me.spinning;
   const z=_camZoom||1;
   ctx.save(); ctx.lineWidth=1.5/z; ctx.font=`${Math.round(11/z)}px monospace`; ctx.textBaseline='top';
@@ -9258,6 +9417,7 @@ function _drawGrazeViz(){
     if(C===me||!C.alive||!C.path||C.path.length<2)continue;
     const skimOn=gCirc||!!C.spinning; if(!skimOn)continue;         // graze interaction requires SOMEONE circling
     const Rc=sectionRadius(C);
+    const margin=_grazeMargin(Rg,Rc,_gPx,gHead,gBody,_gK);   // same constant-sink rule as the server
     const RgEff=Rg*gHead, RcEff=Rc*gBody, reach=RgEff+RcEff, killDist=Math.max(0,reach-margin);
     const bpts=getBodyPoints(C); if(!bpts||bpts.length<3)continue;
     const spacing=Rc*SEGMENT_SPACING;
@@ -9678,8 +9838,9 @@ function drawMinimap(mySnake){
   mm.fillStyle='rgba(6,6,18,0.88)';mm.fillRect(0,0,mw,mh);
   // Food dots
   SG.food.forEach(f=>{
+    const P=_foodDrawPos(f); if(!P)return;                 // same border rule as the main view
     mm.fillStyle=foodColor(f)+'88';
-    mm.fillRect(mw/2+(f.x-_mcx)*scale-1,mh/2+(f.y-_mcy)*scale-1,2,2);
+    mm.fillRect(mw/2+(P.x-_mcx)*scale-1,mh/2+(P.y-_mcy)*scale-1,2,2);
   });
   // Snake dots
   SG.snakes.forEach(s=>{
@@ -10077,6 +10238,7 @@ function socTab(t){
 document.addEventListener('DOMContentLoaded',async ()=>{
   setupOtp();
   syncServerBtns();
+  syncModeBtns();
   _showPracticeBtn();
   _loadSnakeColorPick();
   _paintLobbySel();
