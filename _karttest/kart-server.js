@@ -574,6 +574,111 @@ function markRaceInFlight(lb) {
   saveQueue();
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════════
+ * THE GAMES FEED — kart used to post NOTHING anywhere.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════════
+ * Snake and PAC announced their paid joins to Discord; kart and blackjack were silent, so half the
+ * platform was invisible to the people most likely to play it. A race lobby opening is exactly the
+ * moment somebody else might want to be in it, and it is useless five minutes later — the post has to
+ * happen when the room opens, and it has to carry a link that puts you IN that room.
+ *
+ * ONE card per lobby, EDITED as the grid fills, rather than a message per racer: an eight-seat room
+ * would otherwise be eight notifications for one race. @everyone rides on paid rooms only, and only
+ * on the card itself, never on an edit.
+ */
+const DISCORD_WEBHOOK_GAMES = (process.env.DISCORD_WEBHOOK_GAMES || '').trim();
+const DISCORD_GAMES_PING = (process.env.DISCORD_GAMES_PING || '1') !== '0';
+const SITE_URL = (process.env.SITE_URL || 'https://snakepot.com').replace(/\/+$/, '');
+
+// Player-supplied text going into a public message: neutralise pings and markdown.
+function discordSafe(s) {
+  return String(s == null ? '' : s).replace(/@/g, '@​').replace(/[`*_~|\\<>]/g, '').trim().slice(0, 24) || 'A racer';
+}
+
+async function discordSend(payload, messageId) {
+  if (!DISCORD_WEBHOOK_GAMES) return null;
+  try {
+    const base = DISCORD_WEBHOOK_GAMES;
+    const url = messageId ? base + '/messages/' + messageId : base + '?wait=true';
+    const r = await fetch(url, {
+      method: messageId ? 'PATCH' : 'POST',
+      // Discord is behind Cloudflare, which 403s some default agents outright (error 1010).
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'SnakePot (https://snakepot.com, 1.0)' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) { console.warn('[kart] discord ' + r.status); return r.status === 404 ? '404' : null; }
+    const j = await r.json().catch(() => null);
+    return (j && j.id) || null;
+  } catch (e) { console.warn('[kart] discord failed', e && e.message); return null; }
+}
+
+function kartCard(lb) {
+  const names = [...lb.racers.values()].map((r) => discordSafe(r.name));
+  const onGrid = names.length;
+  const usd = lb.stakeCents / 100;
+  const who = !onGrid ? 'A race lobby just opened.'
+    : onGrid === 1 ? '**' + names[0] + '** opened a race lobby.'
+    : onGrid === 2 ? '**' + names[0] + '** and **' + names[1] + '** are on the grid.'
+    : '**' + names[0] + '**, **' + names[1] + '** and ' + (onGrid - 2) + ' more are on the grid.';
+  const state = lb.state === 'waiting' ? 'Waiting to start' : lb.state === 'countdown' ? 'Lights out!' : lb.state === 'racing' ? 'Racing now' : 'Finished';
+  return {
+    content: '',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      author: { name: 'KART ARENA' },
+      title: (lb.stakeCents > 0 ? '$' + usd + ' race' : 'Free race') + ' · ' + REGION,
+      description: who,
+      color: lb.stakeCents > 0 ? 0x4dabf7 : 0x868e96,
+      fields: [
+        { name: 'Stake', value: lb.stakeCents > 0 ? '$' + usd : 'Free', inline: true },
+        { name: 'On the grid', value: onGrid + '/' + MAX_RACERS, inline: true },
+        { name: 'Status', value: state, inline: true },
+      ],
+      footer: { text: lb.id + ' · track ' + TRACK_ID },
+    }],
+    components: [{ type: 1, components: [{
+      type: 2, style: 5, label: 'JOIN THIS RACE',
+      /*
+       * ⚠️ THE REGION IS NOT OPTIONAL HERE. Kart lobby ids are per-NODE counters — NA and EU each
+       * hand out kf-1, kf-2, kf-3 independently — so `?lobby=kf-2` with no region resolves against
+       * whichever node the client happens to pick (its stored preference, defaulting to NA). That is
+       * either a DIFFERENT race with the same id or no race at all. Snake's ids are globally unique
+       * so it survives the omission; kart's are not.
+       */
+      url: SITE_URL + '/play/kart?region=' + encodeURIComponent(REGION) + '&lobby=' + encodeURIComponent(lb.id),
+      emoji: { name: '🏁' },
+    }] }],
+  };
+}
+
+const FEED_WINDOW_MS = 15 * 60 * 1000;
+async function notifyKartLobby(lb) {
+  if (!DISCORD_WEBHOOK_GAMES || !lb || lb.house) return;   // the house practice room is always there
+  const now = Date.now();
+  const f = lb._feed;
+  const stale = !f || (now - f.createdAt > FEED_WINDOW_MS) || (!f.pending && !f.msgId);
+  if (stale) {
+    const nf = lb._feed = { msgId: null, createdAt: now, pending: true, dirty: false };
+    const card = kartCard(lb);
+    if (DISCORD_GAMES_PING && lb.stakeCents > 0) { card.content = '@everyone'; card.allowed_mentions = { parse: ['everyone'] }; }
+    const id = await discordSend(card, null);
+    nf.pending = false;
+    if (id && id !== '404') nf.msgId = id;
+    // ⚠️ THE ROOM ALMOST CERTAINLY CHANGED WHILE THAT POST WAS IN FLIGHT.
+    // Creating a lobby and joining it are two events a few milliseconds apart, so the card is posted
+    // for an EMPTY room and the creator's own join arrives before Discord has answered. Without this
+    // the normal path — open a room, walk onto the grid — left a card reading "0/8, a race lobby just
+    // opened" until some second person happened to turn up.
+    if (nf.dirty && nf.msgId) { nf.dirty = false; await notifyKartLobby(lb); }
+    return;
+  }
+  if (f.pending) { f.dirty = true; return; }               // first post still in flight — redo it after
+  if (!f.msgId) return;
+  const r = await discordSend(kartCard(lb), f.msgId);
+  if (r === '404') { f.msgId = null; f.createdAt = 0; }    // card deleted — next event starts a new one
+}
+
 const MIN_STAKE_C = 10;        // $0.10 floor — below this the network fee dominates the pot
 const MAX_STAKE_C = 50000;     // $500 ceiling
 function normStake(v) {
@@ -1072,6 +1177,9 @@ io.on('connection', (sock) => {
     const lb = makeLobby(String(d.name || '').trim(), String(d.player || '').slice(0, 16), d.stake);
     broadcastLobbyList();
     sock.emit('k-created', { id: lb.id });
+    // Announce the room the moment it exists. Deliberately after the creator is told their lobby id,
+    // so a slow Discord can never delay the person who opened it getting into it.
+    notifyKartLobby(lb).catch(() => {});
   });
 
   sock.on('k-join', (d) => {
@@ -1130,6 +1238,7 @@ io.on('connection', (sock) => {
     lb.emptySince = 0;
     sendState(lb);
     broadcastLobbyList();
+    notifyKartLobby(lb).catch(() => {});   // edits the existing card with the fuller grid
   });
 
   function joinAsSpectator(s2, lb) {
@@ -1340,6 +1449,8 @@ setInterval(() => {
       // raceId is `lb.id + ':' + lb.tStart`, so this is the first moment the pot HAS an id. Record it
       // before anything else happens to it.
       markRaceInFlight(lb);
+      // Last edit of the card: "Racing now", so nobody clicks PLAY on a race that has already gone.
+      notifyKartLobby(lb).catch(() => {});
       broadcastKartRoster(lb);
       lb._simAt = now; lb._acc = 0;   // start the accumulator clean, not with the whole countdown in it
       for (const r of lb.racers.values()) { r.lapStart = 0; r.sectors = new Set(); r.prevSec = -1; }
