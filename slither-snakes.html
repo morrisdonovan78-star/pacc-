@@ -1938,7 +1938,10 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 const _TEST_DEFAULTS={grazePx:3.54,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:60,grazeScaleK:1.15,rule:'biggest_wins',dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
-const _LIVE_TUNING_DEFAULTS={grazePx:3.54,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:1.15,rule:'biggest_wins',dbg:false};
+// THE canonical live combat values — the single definition of "what it is supposed to be".
+// n2nScale is listed explicitly: _pushTuning sends it, so leaving it out of here meant RESET
+// quietly pushed a default this file never stated.
+const _LIVE_TUNING_DEFAULTS={grazePx:3.54,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:1.15,n2nScale:0.30,rule:'biggest_wins',dbg:false};
 let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
@@ -7647,6 +7650,50 @@ function _refreshTuning(){
   try{ _sio.emit('ss-tuning-get'); }catch(_){ addToast('Refresh failed','#FF4444'); return; }
   addToast('Reading live server values…','#00FFCC',1600);
 }
+// Push a signed tuning payload to ONE region, over a throwaway socket, and disconnect.
+//
+// ⚠️ WHY THIS HAS TO EXIST. `ss-tune` retunes every arena ON THE NODE THAT RECEIVES IT and writes
+// that node's ss-tuning.json. `_sio` is connected to exactly one region, so RESET has only ever
+// fixed the region you happened to be playing on — which is how NA ended up on grazeScaleK -0.3 /
+// grazePx 3.54 while EU ran the locked values, with nothing anywhere saying the two disagreed.
+// "Reset everywhere" has to mean every node, so this is called once per region.
+//
+// Each region gets its OWN signature (fresh ts, and the lobby id is part of the signed canon), so
+// nothing is replayed. Joins the FREE lobby, which needs no entry token and risks no wager.
+async function _pushTuningToRegion(regionKey, t){
+  const url=GAME_SERVERS[regionKey] && GAME_SERVERS[regionKey].url;
+  if(!url) return false;
+  const lid='ss-free-lobby';
+  const canon=JSON.stringify(['grazePx','grazeHead','bodyScale','grazeReach','circDeg','faceDeg','n2nScale','grazeScaleK','rule']
+    .map(k=>(t[k]===undefined||t[k]===null?null:t[k])));
+  const hashBuf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canon));
+  const hash=[...new Uint8Array(hashBuf)].map(b=>b.toString(16).padStart(2,'0')).join('');
+  const ts=Date.now();
+  const sig=await _sigB64(new TextEncoder().encode('ss-tune:'+lid+':'+ts+':'+hash));
+  return await new Promise((resolve)=>{
+    let done=false;
+    const finish=(ok)=>{ if(done)return; done=true; try{sock.close();}catch(_){} resolve(ok); };
+    const sock=io(url,{transports:['websocket'],forceNew:true,reconnection:false,timeout:8000,
+      auth:{lobbyId:lid,pid:(ST.address||'owner'),name:'OWNER',color:'#FFD700',wagerSol:0}});
+    sock.on('connect',()=>{ try{ sock.emit('ss-tune',{tuning:t,ts,sig}); }catch(_){ finish(false); } });
+    sock.on('ss-tuning',()=>finish(true));            // the server echoes what it applied
+    sock.on('ss-notice',(m)=>{ if(/reject|lock/i.test(String(m||'')))finish(false); });
+    sock.on('connect_error',()=>finish(false));
+    setTimeout(()=>finish(false),9000);
+  }).catch(()=>false);
+}
+// RESET = put the combat model back to _LIVE_TUNING_DEFAULTS on EVERY node, and clear every local
+// cache that could resurrect an old value on the next page load.
+async function _resetTuningEverywhere(){
+  const t={..._LIVE_TUNING_DEFAULTS};
+  const regions=Object.keys(GAME_SERVERS);
+  addToast('Resetting combat tuning on '+regions.join(' + ')+'…','#FFD700',2500);
+  const ok=[];
+  for(const r of regions){ if(await _pushTuningToRegion(r,t)) ok.push(r); }
+  if(ok.length===regions.length) addToast('✓ Reset on ALL regions ('+ok.join(', ')+')','#39FF14',5000);
+  else if(ok.length) addToast('⚠ Reset on '+ok.join(', ')+' — the rest did NOT apply','#FF6600',7000);
+  else addToast('Reset FAILED on every region — nothing changed','#FF4444',7000);
+}
 function _resetTuning(){
   // In the TEST lobby, reset the TEST tuning to the CURRENT code defaults (_TEST_DEFAULTS),
   // clear its cached localStorage, and push to the server — never leave stale/old values.
@@ -7659,11 +7706,13 @@ function _resetTuning(){
     return;
   }
   if(localStorage.getItem('ss_owner')==='1'){
-    // Owner panel outside the test lobby: reset to the LIVE locked defaults (what every lobby runs).
-    Object.assign(_tuningTest,_LIVE_TUNING_DEFAULTS);
+    // Owner panel outside the test lobby: back to the LIVE defaults, on EVERY node, and wipe the
+    // local caches so a refresh cannot bring an old value back.
+    _tuningTest={..._LIVE_TUNING_DEFAULTS};
+    _tuning={hbs:1.07,hhbs:1.18,faceDeg:21,rule:'biggest_wins'};
+    try{ localStorage.removeItem('ss_tuning_v4'); localStorage.removeItem('ss_tuning_test8'); }catch(_){}
     _syncTuningUI();
-    _pushTuning();
-    addToast('Tuning reset to LIVE locked defaults','#888');
+    _resetTuningEverywhere();     // async — toasts per region as they confirm
     return;
   }
   _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
