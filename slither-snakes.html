@@ -5467,10 +5467,15 @@ function _wgRulesHtml(){
       h+='<div style="margin-bottom:7px"><div style="font-size:10px;font-weight:800;color:#FFD700">'+n+'</div>'+
          '<div style="font-size:9px;color:#c9bd92;line-height:1.45">'+d+'</div></div>';
     }
+    // The two refund clocks are DIFFERENT cases and were being read as one, so they are stated
+    // separately and with their real numbers: 5 min = WG_OPEN_WINDOW_MS, 1 hour = WG_VOID_AFTER_MS
+    // (api/settle.js). Change them there, change them here and on the platform /bets page.
     h+='<div style="font-size:9px;color:#8a7c54;line-height:1.45;border-top:1px solid #2c2a1f;padding-top:6px">'+
-       'Every bet is <b>even money</b>: you and your opponent stake the same amount, and the winner takes both minus an <b>8% fee</b>. '+
-       'If nobody takes your bet before it closes you get <b>100% back, no fee</b>. '+
-       'If a matched bet can never be decided, both sides are refunded in full after an hour.</div>';
+       'Every bet is <b>even money</b>: you and your opponent stake the same amount, and the winner takes both minus an <b>8% fee</b> on the winnings.'+
+       '<div style="margin-top:5px;color:#c9bd92"><b>You get your SOL back, in full and with no fee, if the bet never happens:</b></div>'+
+       '<div style="margin-top:3px">· <b style="color:#FFD700">5 minutes</b> — nobody takes the other side: the bet drops and your whole stake is returned.</div>'+
+       '<div>· <b style="color:#FFD700">1 hour</b> — matched but the game never settles it: the bet is voided and <b>both</b> sides get their whole stake back.</div>'+
+       '<div style="margin-top:4px">Both run automatically on the game servers — you do not have to be online for them.</div></div>';
     h+='</div>';
   }
   h+='</div>';

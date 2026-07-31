@@ -992,16 +992,21 @@ const WG_PAY_LOCK_TTL = 180;
 /*
  * How long a new wager stays takeable before it is returned UNMATCHED, in full, with no fee.
  *
- * OWNER 2026-07-31: 60s → 15 minutes. "If someone doesn't place a bet on the opposite side within 15
- * minutes the bet should drop and refund." A minute was not long enough for anyone to actually see a
- * bet and take it, so bets kept dying unmatched — the refund worked, the MARKET didn't.
+ * OWNER 2026-07-31: 60s → 5 minutes ("refund in 5 mins if no one bets on the other side"; briefly set
+ * to 15 before they settled on 5). A minute was not long enough for anyone to actually see a bet and
+ * take it, so bets kept dying unmatched — the refund worked, the MARKET didn't.
+ *
+ * ⚠️ This is the UNMATCHED clock only. A MATCHED bet that the game never resolved is a different
+ * case on a different timer — WG_VOID_AFTER_MS, which the owner has confirmed stays at ONE HOUR.
+ * Do not collapse the two: voiding a matched bet early takes money off a duel whose players are
+ * legitimately still alive.
  *
  * Safe to lengthen despite the wider outcome-sniping surface: the anti-snipe guard is on RESERVE, not
  * on create. A taker must hold a roster signature issued within WG_SIG_MAX_AGE_MS, and the game server
  * only signs snakes that are currently ALIVE — so a wager whose subject has already died or cashed out
  * simply cannot be taken, however long it has been on the book. It sits unmatched and refunds here.
  */
-const WG_OPEN_WINDOW_MS = 900000;
+const WG_OPEN_WINDOW_MS = 300000;   // 5 minutes
 const WG_RESERVE_MS = 90000;   // an acceptor has 90s to land their deposit before the claim expires
 // A matched wager that the game never resolved is VOIDED after this long and both stakes are
 // returned in full with no fee. Owner's call at 1h: long enough that no real round is still running,
