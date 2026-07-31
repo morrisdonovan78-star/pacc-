@@ -884,7 +884,7 @@ body.mctl #voice-speakers{left:150px;}
 
     <div style="font-family:'Press Start 2P',monospace;font-size:9px;color:var(--acc);margin:16px 0 8px;">KEYS</div>
     <div style="font-size:11px;color:var(--muted);line-height:1.9;">
-      <b>T</b> chat · <b>F8</b> betting panel · <b>Q</b> cash out · <b>G</b> save clip · <b>E</b> auto-circle<br>
+      <b>T</b> chat · <b>F8</b> betting panel · <b>Q</b> cash out · <b>G</b> save clip · <b>E</b> auto-circle · <b>F2</b> performance<br>
       <b>V</b> push-to-talk (turn it on in ⚙ Settings) · <b>M</b> your mic · <b>J</b> mute everyone else<br>
       Every key is rebindable in <b>⚙ Settings</b>, controller included.
     </div>
@@ -1864,7 +1864,7 @@ function _perfUpdate(){
     ['snakes / segs',_perf.snakes.toFixed(0)+' / '+_perf.segs.toFixed(0)],['food',_perf.food.toFixed(0)],['ping',_ping+' ms']];
   if(performance.memory)rows.push(['JS heap',(performance.memory.usedJSHeapSize/1048576).toFixed(0)+' MB']);
   const bound=js>frameInt*0.7?'CPU/JS-bound':'GPU/composite-bound';
-  _perf.dom.innerHTML=`<b style="color:#8cf">⚡ PERF</b> <span style="color:${js>frameInt*0.7?'#f66':'#6f6'}">${bound}</span> <span style="color:#555">(\` toggle)</span><table style="border-collapse:collapse;margin-top:3px">`
+  _perf.dom.innerHTML=`<b style="color:#8cf">⚡ PERF</b> <span style="color:${js>frameInt*0.7?'#f66':'#6f6'}">${bound}</span> <span style="color:#555">(F2 toggle)</span><table style="border-collapse:collapse;margin-top:3px">`
     +rows.map(r=>`<tr><td style="padding:0 10px 0 0">${r[0]}</td><td style="text-align:right">${r[1]}</td></tr>`).join('')+'</table>';
   _perf.b={};_perf.frames=0;_perf.jsSum=0;_perf.dtAcc=0;_perf.dtN=0;_perf.dtMax=0;_perf.lastUpdate=performance.now();
 }
@@ -6875,7 +6875,8 @@ const SS_BIND_DEFS = [
   {act:'zoomOut',    label:'Zoom Out',         keys:['-','_']},
   {act:'voice',      label:'Mic Mute',         keys:['m']},
   // V and J are free: space/shift=boost, q=cashout, g=clip, m=mic, e=auto-circle, t=chat,
-  // n/c=bots, 9/`=perf, F8=bets, F9=tuning.
+  // n/c=bots, F2=perf overlay, F8=bets, F9=tuning. (F2 chosen because backtick is a dead key
+  // on many non-US layouts; see the perf handler.)
   {act:'voicePtt',   label:'Push-to-Talk',     keys:['v']},
   {act:'voiceDeaf',  label:'Mute Others',      keys:['j']},
   {act:'autoCircle', label:'Auto-Circle',      keys:['e']},
@@ -8073,7 +8074,15 @@ function onGameKey(e){
   // 'H' hitboxes stays hardcoded (dev tool, not in the remap list) unless the key is bound elsewhere.
   const a=_ssKeyAction(e.key);
   if(!a && (e.key==='h'||e.key==='H')){_showHitboxes=!_showHitboxes;addToast(_showHitboxes?'Hitboxes ON':'Hitboxes OFF','#FFD700');return;}
-  if(!a && (e.code==='Backquote'||e.key==='`')){togglePerf();return;} // perf overlay (measurement only) — BACKTICK only.
+  /* PERF OVERLAY = F2.
+   * It was BACKTICK only, which is why "it doesn't work" for people: on a great many non-US layouts
+   * (UK, FR AZERTY, DE QWERTZ, ES, and every layout where ` is a dead accent key) that key either
+   * sits somewhere else entirely or produces no keydown until a second press. F2 is a single physical
+   * key on every layout, it is NOT a Chrome shortcut (F1 help, F3 find, F5 reload, F6 address bar,
+   * F11 fullscreen, F12 devtools are — F2 is not), and nothing in this game uses it: taken keys are
+   * space/shift, q, g, +/-, m, v, j, e, t, n, c, h, p, F4, F8, F9.
+   * Backtick still works as a legacy alias so anyone used to it is not broken. */
+  if(!a && (e.key==='F2'||e.code==='F2'||e.code==='Backquote'||e.key==='`')){e.preventDefault();togglePerf();return;}
   // '9' used to toggle this too, which is why pressing for the tuning panel put the PERF overlay on
   // screen instead: this check runs before the F9 handler and returned early. A bare number key is a
   // bad binding for a dev overlay anyway.

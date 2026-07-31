@@ -1389,6 +1389,49 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    /* ── recruit-migrate: rescue counts written to a FUTURE week by the old admin anchor ────────────
+     *
+     * api/admin.js carried its own copy of RECRUIT_ANCHOR set 62 hours earlier than the one here and
+     * in join.js, so every hand-credited recruit was banked under `recruit:rw<n+1>` while `my-refcode`
+     * and the homescreen podium both read `recruit:rw<n>`. The operator saw "credited" and the
+     * player's count never moved. The anchor is fixed; this moves the stranded counts.
+     *
+     * SAFETY — this can only ever move counts BACKWARDS out of a week that has not started yet:
+     *   * source must be a strictly FUTURE week index (only reachable via that bug),
+     *   * destination is ALWAYS the current week, never a caller-supplied one,
+     *   * counts are ADDED with hincrby (never overwritten), then the source key is deleted so a
+     *     second run is a no-op rather than a double credit.
+     * There is no input that can disturb a past week or invent a count that was not already banked.
+     *
+     * GAME_SECRET proof, the same gate wager-sweep uses. `?dry=1` reports without moving anything.
+     */
+    if (action === 'recruit-migrate') {
+      const gts = Number(req.headers['x-game-ts'] || 0);
+      if (!verifyGameProof(req, 'recruit-migrate:' + gts)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
+      clearTimeout(guard); done = true;
+      const wk = recruitWeek();
+      const curIdx = parseInt(String(wk.id).slice(2), 10);
+      const dry = !!body.dry;
+      const scanned = [], moved = [];
+      // Look a few weeks ahead — the bug could only ever be a small offset, and this bounds the work.
+      for (let i = curIdx + 1; i <= curIdx + 4; i++) {
+        const from = 'rw' + i;
+        const h = (await kvHgetall('recruit:' + from).catch(() => null)) || {};
+        const addrs = Object.keys(h);
+        if (!addrs.length) continue;
+        scanned.push({ week: from, players: addrs.length });
+        for (const a of addrs) {
+          const n = parseInt(h[a], 10) || 0;
+          if (n <= 0) continue;
+          if (!dry) await kvHincrby('recruit:' + wk.id, a, n).catch(() => {});
+          moved.push({ player: a.slice(0, 4) + '…' + a.slice(-4), count: n, from, to: wk.id });
+        }
+        if (!dry) await kvDel('recruit:' + from).catch(() => {});
+      }
+      return res.status(200).json({ ok: true, dry, currentWeek: wk.id, futureWeeksFound: scanned, moved,
+        totalMoved: moved.reduce((s, m) => s + m.count, 0) });
+    }
+
     // ── my-refcode: a player's own invite code/link + their qualified-recruit count this week ───────
     if (action === 'my-refcode') {
       const w = String(body.playerAddress || '').trim();
