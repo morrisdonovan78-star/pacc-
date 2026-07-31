@@ -359,7 +359,20 @@ module.exports = async function handler(req, res) {
     // Count the qualified recruit too when asked — the operator can see they really paid.
     let counted = false;
     if (req.body.countRecruit) {
-      const RECRUIT_ANCHOR = Date.UTC(2026, 6, 23, 4, 0, 0), WK = 7 * 24 * 60 * 60 * 1000;
+      /*
+       * ⚠️ THIS ANCHOR MUST MATCH api/settle.js AND api/join.js EXACTLY.
+       *
+       * It did not. This file carried `Date.UTC(2026, 6, 23, 4, 0, 0)` while both of the others use
+       * `Date.UTC(2026, 6, 25, 18, 0, 0)` — 62 hours earlier, which is enough to land on a DIFFERENT
+       * week index. So every hand-credited recruit was written to `recruit:rw<n+1>` while the profile
+       * card (`my-refcode`) and the homescreen podium both read `recruit:rw<n>`: the operator saw
+       * "credited", and the player's count never moved. Reported as "I did this and it's not working
+       * either — it doesn't show on the homescreen after he refreshes."
+       *
+       * Three hand-copied constants that must agree is the actual defect; keeping them in step is the
+       * cheap fix. If this anchor is ever changed again, change it in all three files together.
+       */
+      const RECRUIT_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0), WK = 7 * 24 * 60 * 60 * 1000;
       const wk = 'rw' + Math.floor((Date.now() - RECRUIT_ANCHOR) / WK);
       if (await kvSetNX('refq:' + player, String(Date.now()))) {
         await kvHincrby('recruit:' + wk, referrer, 1).catch(() => {});
