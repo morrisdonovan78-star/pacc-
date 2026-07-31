@@ -1264,9 +1264,9 @@ body.mctl #voice-speakers{left:150px;}
     </div>
     <div style="color:#FFD700;font-size:9px;margin:2px 0 6px;letter-spacing:1px;border-top:1px solid #2a1a3a;padding-top:8px;">◆ CIRCLE GRAZE — independent knobs (graze kill ONLY; nothing here touches normal body / H2H / movement)</div>
     <div style="margin-bottom:11px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="MAX BODY OVERLAP: px a graze may sink INTO the body before it kills. This is only LITERAL visual depth when Target body/trail radius = 1.00, Graze head hitbox = 1.00 and Graze size fairness = 0 — a body radius under 1.00 hides extra depth inside the sprite, and any fairness above 0 multiplies this number by snake size. NOTE: depth and difficulty are the SAME quantity (sink-in = Ra + Rd − killDist), so lowering this always makes the graze harder.">① Max body overlap (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.0 px</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="GRAZE ROOM: how deep YOU may be inside a circling snake's body and still live. Raise it to give yourself more room to work around a circler. It does NOT change how far a circler has to be driven into your trail to die — that is fixed at 4.30px at every size, for every snake. These used to be one number, which is why turning this up also made your own kills need more graze.">① Graze room (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.0 px</span></div>
       <input type="range" id="tun-grazePx" min="0" max="20" step="0.01" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
-      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0 = contact</span><span>20 = exaggerated</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0 = no room</span><span>20 = lots of room</span></div>
     </div>
     <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#39FF14;" title="GRAZE HEAD HITBOX: scales the grazing head's radius for the graze check ONLY. Smaller = harder / must be more precise; larger = easier.">② Graze head hitbox (×)</span><span id="tun-grazehead-val" style="color:#39FF14;min-width:44px;text-align:right;">1.00×</span></div>
@@ -6481,6 +6481,10 @@ const _GRAZE_REF_REACH=48.34;
 // The graze is now equally hard at every size, for BOTH snakes; these say which size it is equally
 // hard AS. Killer 26 is the owner's own "feels right" size, target 30 is the spawn size.
 const _GRAZE_ANCHOR_KILLER_NS=26, _GRAZE_ANCHOR_TARGET_NS=30;
+// MUST match SS_GRAZE_KILL_SINK on the server. KILL DEPTH IS FIXED and is NOT what grazePx moves:
+// grazePx buys ROOM (how deep you may be inside a circler's body and live) — see the server's
+// collision site. They are two different tests with a different snake in the victim slot.
+const _GRAZE_KILL_SINK=4.304;
 // MUST match SS_GRAZE_NECK_PTS * SS_POINT_DIST on the server (20 * 1.6).
 const _GRAZE_NECK_PX=32;
 // sink = (Ra + Rd) - killDist = how deep a graze visibly sinks in before it kills. It is ONE number
@@ -6492,8 +6496,11 @@ function _grazeSinkRef(gPx,gHead,gBody,gScaleK){
   const Ra0=_r(_GRAZE_ANCHOR_TARGET_NS), Rd0=_r(_GRAZE_ANCHOR_KILLER_NS);
   return (1-gHead)*Ra0+(1-gBody)*Rd0+gPx*Math.pow(Math.max(1,Ra0+Rd0)/_GRAZE_REF_REACH,gScaleK);
 }
-function _grazeMargin(RaBase,Rd,gPx,gHead,gBody,gScaleK){
-  return _grazeSinkRef(gPx,gHead,gBody,gScaleK)-(1-gHead)*RaBase-(1-gBody)*Rd;
+// aCirc = the VICTIM is the circler => this is a KILL, fixed depth. Otherwise the victim is working
+// around a circler => ROOM, which is what grazePx sets.
+function _grazeMargin(RaBase,Rd,gPx,gHead,gBody,gScaleK,aCirc){
+  const want=aCirc?_GRAZE_KILL_SINK:_grazeSinkRef(gPx,gHead,gBody,gScaleK);
+  return want-(1-gHead)*RaBase-(1-gBody)*Rd;
 }
 const _PT={ grazePx:3.54, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
@@ -6533,7 +6540,7 @@ function _practiceCheckCollisions(){
       // Graze forgiveness is a CONSTANT number of px at every size now — see the server's collision
       // site for the derivation. This MUST match the server exactly: a client that predicts a
       // different hitbox is how you get "I died into empty space".
-      const margin=skimOn?_grazeMargin(RaBase,Rd,M,gHead,gBody,gScaleK):0;
+      const margin=skimOn?_grazeMargin(RaBase,Rd,M,gHead,gBody,gScaleK,aCirc):0;
       const killDist=reach-margin, killDist2=killDist>0?killDist*killDist:0;
       const segs=segsCache.get(D.id)||[]; if(segs.length<2)continue; const spacing=Rd*SEGMENT_SPACING;
       // Circle graze: a FLAT dead zone behind the target's head (server SS_GRAZE_NECK_PTS = 20 path
@@ -9474,7 +9481,7 @@ function _drawGrazeViz(){
     if(C===me||!C.alive||!C.path||C.path.length<2)continue;
     const skimOn=gCirc||!!C.spinning; if(!skimOn)continue;         // graze interaction requires SOMEONE circling
     const Rc=sectionRadius(C);
-    const margin=_grazeMargin(Rg,Rc,_gPx,gHead,gBody,_gK);   // same constant-sink rule as the server
+    const margin=_grazeMargin(Rg,Rc,_gPx,gHead,gBody,_gK,true);  // the ring shows the KILL test
     const RgEff=Rg*gHead, RcEff=Rc*gBody, reach=RgEff+RcEff, killDist=Math.max(0,reach-margin);
     const bpts=getBodyPoints(C); if(!bpts||bpts.length<3)continue;
     const spacing=Rc*SEGMENT_SPACING;

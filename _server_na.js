@@ -69,6 +69,19 @@ const SS_GRAZE_REF_REACH = 48.34;
 // it must go. Visible graze depth is unchanged at 4.30px. Normal body collisions and N2N keep the
 // original size-scaled exclusion — only the circle graze uses this.
 const SS_GRAZE_NECK_PTS = 20;
+// ⚠️ KILL DEPTH AND ROOM ARE TWO DIFFERENT TESTS. They are not the same event and must not
+// share a knob. Both are circle-graze tests, but the VICTIM is a different snake in each:
+//
+//   aCirc                    the victim IS the circler -> its own loop drove it into someone's
+//                            trail. THIS IS THE KILL. Depth fixed at SS_GRAZE_KILL_SINK.
+//   !aCirc && D.circleActive the victim is NOT circling, the target is -> this is somebody
+//                            manoeuvring around a circler. THIS IS ROOM, and grazePx drives it.
+//
+// Lumping them into one margin is why turning 'max body overlap' up to give yourself room ALSO
+// made your kills need that much more graze - the owner's exact complaint, and it was real.
+// Split, grazePx buys room to work with WITHOUT moving how far a circler must be driven to die.
+// Still symmetric: every player gets the same room and every circler dies at the same depth.
+const SS_GRAZE_KILL_SINK = 4.304;   // px, every size — a size-26 snake vs a spawn-size circler
 const SS_GRAZE_ANCHOR_KILLER_NS = 26;
 const SS_GRAZE_ANCHOR_TARGET_NS = 30;
 // Runtime hitbox changes are refused outright while this is true - see the ss-tune handler.
@@ -3902,10 +3915,14 @@ function ssCheckCollisionsNose(sg, lid, io) {
       // (harder to land), lower it to make it easier - exactly as the slider always behaved.
       const _Ra0 = ssSectionRadius(SS_GRAZE_ANCHOR_TARGET_NS);
       const _Rd0 = ssSectionRadius(SS_GRAZE_ANCHOR_KILLER_NS);
-      const _sinkRef = (1 - grazeHead) * _Ra0 + (1 - grazeBody) * _Rd0
+      // ROOM: what grazePx buys. Anchored the same way, so it is one number at every size.
+      const _roomSink = (1 - grazeHead) * _Ra0 + (1 - grazeBody) * _Rd0
         + skimMargin * Math.pow(Math.max(1, _Ra0 + _Rd0) / SS_GRAZE_REF_REACH, grazeScaleK);
+      // aCirc => the victim is the circler => this is a KILL, and its depth is FIXED. Anything
+      // else under skimOn is somebody working around a circler, and gets the room instead.
+      const _sinkWant = aCirc ? SS_GRAZE_KILL_SINK : _roomSink;
       const margin = skimOn
-        ? _sinkRef - (1 - grazeHead) * RaBase - (1 - grazeBody) * Rd
+        ? _sinkWant - (1 - grazeHead) * RaBase - (1 - grazeBody) * Rd
         : 0;
 
       const reach = RaEff + RdEff, dpath = D.path;
