@@ -989,7 +989,19 @@ const WG_TTL       = 604800;   // wager records live 7 days (history)
 // blocked every future payout forever and stranded the stake. Short TTL = self-releasing.
 const WG_PAY_LOCK_TTL = 180;
 
-const WG_OPEN_WINDOW_MS = 60000; // how long a new wager stays takeable before it's returned unmatched
+/*
+ * How long a new wager stays takeable before it is returned UNMATCHED, in full, with no fee.
+ *
+ * OWNER 2026-07-31: 60s → 15 minutes. "If someone doesn't place a bet on the opposite side within 15
+ * minutes the bet should drop and refund." A minute was not long enough for anyone to actually see a
+ * bet and take it, so bets kept dying unmatched — the refund worked, the MARKET didn't.
+ *
+ * Safe to lengthen despite the wider outcome-sniping surface: the anti-snipe guard is on RESERVE, not
+ * on create. A taker must hold a roster signature issued within WG_SIG_MAX_AGE_MS, and the game server
+ * only signs snakes that are currently ALIVE — so a wager whose subject has already died or cashed out
+ * simply cannot be taken, however long it has been on the book. It sits unmatched and refunds here.
+ */
+const WG_OPEN_WINDOW_MS = 900000;
 const WG_RESERVE_MS = 90000;   // an acceptor has 90s to land their deposit before the claim expires
 // A matched wager that the game never resolved is VOIDED after this long and both stakes are
 // returned in full with no fee. Owner's call at 1h: long enough that no real round is still running,

@@ -1264,7 +1264,7 @@ body.mctl #voice-speakers{left:150px;}
     </div>
     <div style="color:#FFD700;font-size:9px;margin:2px 0 6px;letter-spacing:1px;border-top:1px solid #2a1a3a;padding-top:8px;">◆ CIRCLE GRAZE — independent knobs (graze kill ONLY; nothing here touches normal body / H2H / movement)</div>
     <div style="margin-bottom:11px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="GRAZE ROOM: how deep YOU may be inside a circling snake's body and still live. Raise it to give yourself more room to work around a circler. It does NOT change how far a circler has to be driven into your trail to die — that is fixed at 4.30px at every size, for every snake. These used to be one number, which is why turning this up also made your own kills need more graze.">① Graze room (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.0 px</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="GRAZE ROOM: how deep YOU may be inside a circling snake's body and still live, in LITERAL PIXELS — the number on this slider is the number of px. Raise it to give yourself more room to work around a circler. It does NOT change how far a circler has to be driven into your trail to die — that is fixed at 4.30px at every size, for every snake. These used to be one number, which is why turning this up also made your own kills need more graze.">① Graze room (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.0 px</span></div>
       <input type="range" id="tun-grazePx" min="0" max="20" step="0.01" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0 = no room</span><span>20 = lots of room</span></div>
     </div>
@@ -1283,7 +1283,11 @@ body.mctl #voice-speakers{left:150px;}
       <input type="range" id="tun-grazeReach" min="0.1" max="1.5" step="0.05" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FF66FF;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>near head only</span><span>full body</span></div>
     </div>
-    <div style="margin-bottom:11px;">
+    <!-- RETIRED 2026-07-31: grazeScaleK is read by nothing. Its job was scaling the margin with
+         snake size, and no size-scaling remains in either the kill test or the room test. The
+         FIELD stays (ssTuneCanon signs it, saved files carry it); only the control is gone, so
+         it cannot be dragged into meaning something it does not. -->
+    <div style="display:none;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#00E5FF;" title="SIZE FAIRNESS: how much the graze margin grows with snake size. 0 = flat pixels, so grazing gets much harder as you grow (21% forgiveness at base vs 8% at size 20). 1 = identical feel at every size. 0.75 keeps a small edge for smaller snakes while closing that gap.">ⓕ Graze size fairness</span><span id="tun-grazescalek-val" style="color:#00E5FF;min-width:44px;text-align:right;">0.75</span></div>
       <input type="range" id="tun-grazeScaleK" min="-2" max="1.5" step="0.01" value="0.75" oninput="_onTuning()" style="width:100%;accent-color:#00E5FF;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>shallower when big</span><span>same at all sizes</span></div>
@@ -1935,13 +1939,13 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // SINGLE SOURCE OF TRUTH for test-lobby defaults — RESET restores exactly this, so it always
 // reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
 // bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
-const _TEST_DEFAULTS={grazePx:3.54,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:60,grazeScaleK:1.15,rule:'biggest_wins',dbg:false};
+const _TEST_DEFAULTS={grazePx:4.304,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:60,grazeScaleK:1.15,rule:'biggest_wins',dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
 // THE canonical live combat values — the single definition of "what it is supposed to be".
 // n2nScale is listed explicitly: _pushTuning sends it, so leaving it out of here meant RESET
 // quietly pushed a default this file never stated.
-const _LIVE_TUNING_DEFAULTS={grazePx:3.54,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:1.15,n2nScale:0.30,rule:'biggest_wins',dbg:false};
+const _LIVE_TUNING_DEFAULTS={grazePx:4.304,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:1.15,n2nScale:0.30,rule:'biggest_wins',dbg:false};
 let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
@@ -5315,7 +5319,9 @@ function _wgStatusChip(st){
 function _wgCardHtml(w){
   const me=_wgMyAddr();
   const mine=(w.creator===me);
+  // The open window is 15 MINUTES (WG_OPEN_WINDOW_MS), so a raw seconds count would read "873s left".
   const secs=Math.max(0,Math.ceil((Number(w.lockTs)-Date.now())/1000));
+  const left=secs>=60?(Math.floor(secs/60)+'m '+String(secs%60).padStart(2,'0')+'s'):(secs+'s');
   let h='<div style="background:rgba(255,255,255,.035);border:1px solid #2c2a1f;border-radius:12px;padding:11px;margin-bottom:8px">';
   h+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:7px">';
   h+='<div style="min-width:0"><div style="font-size:12px;font-weight:700;color:#f4e9c8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_wgEsc(_wgTitle(w))+'</div>';
@@ -5325,7 +5331,7 @@ function _wgCardHtml(w){
   h+='<div><div style="font-size:8px;color:#8a7c54">STAKE</div><div style="font-size:14px;font-weight:800;color:#fff">'+_wgUsdStr(w.stake)+'</div>';
   h+='<div style="font-size:8px;color:#6b6142">'+_wgSol(w.stake).toFixed(4)+' SOL</div></div>';
   h+='<div style="text-align:right"><div style="font-size:8px;color:#8a7c54">TO WIN</div><div style="font-size:14px;font-weight:800;color:#39FF14">'+_wgUsdStr(w.potentialWin)+'</div>';
-  h+='<div style="font-size:8px;color:#6b6142">'+(w.status==='open'?secs+'s left':'&nbsp;')+'</div></div></div>';
+  h+='<div style="font-size:8px;color:#6b6142">'+(w.status==='open'?left+' left':'&nbsp;')+'</div></div></div>';
   if(w.status==='open'){
     // No cancel: a placed wager must run to a conclusion. If nobody takes it before the window
     // closes it is returned in full automatically, so the creator is never stuck.
@@ -6491,18 +6497,16 @@ const _GRAZE_NECK_PX=32;
 // and it is both things at once: the depth you see, and the difficulty. Holding it constant is what
 // makes every size play the same. Port of the server's _sinkRef.
 //   sink = (1-gHead)*Ra + (1-gBody)*Rd + margin   ->   margin = S - (1-gHead)*Ra - (1-gBody)*Rd
-function _grazeSinkRef(gPx,gHead,gBody,gScaleK){
-  const _r=ns=>BASE_RADIUS+Math.pow(ns*SIZE_PER_SEGMENT,RADIUS_GROWTH)*RADIUS_SCALE;
-  const Ra0=_r(_GRAZE_ANCHOR_TARGET_NS), Rd0=_r(_GRAZE_ANCHOR_KILLER_NS);
-  return (1-gHead)*Ra0+(1-gBody)*Rd0+gPx*Math.pow(Math.max(1,Ra0+Rd0)/_GRAZE_REF_REACH,gScaleK);
-}
+// ROOM is LITERAL PIXELS now — grazePx IS the number of px you may be inside a circler and live.
+// (grazeScaleK is retired: its only job was size-scaling the margin, and no size-scaling remains.)
+function _grazeSinkRef(gPx){ return gPx; }
 // aCirc = the VICTIM is the circler => this is a KILL, fixed depth. Otherwise the victim is working
 // around a circler => ROOM, which is what grazePx sets.
 function _grazeMargin(RaBase,Rd,gPx,gHead,gBody,gScaleK,aCirc){
-  const want=aCirc?_GRAZE_KILL_SINK:_grazeSinkRef(gPx,gHead,gBody,gScaleK);
+  const want=aCirc?_GRAZE_KILL_SINK:_grazeSinkRef(gPx);
   return want-(1-gHead)*RaBase-(1-gBody)*Rd;
 }
-const _PT={ grazePx:3.54, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
+const _PT={ grazePx:4.304, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
 // per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
 // per-tick @30Hz, so the "not turning" floor is doubled — winding still arms after one full circDeg loop).
