@@ -1269,6 +1269,16 @@ body.mctl #voice-speakers{left:150px;}
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0 = no room</span><span>20 = lots of room</span></div>
     </div>
     <div style="margin-bottom:11px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FF8C00;" title="KILL DEPTH: how far a CIRCLING snake must be driven into YOUR trail before it dies, in literal px. LOWER = kills land sooner. This is the one you turn DOWN to make kills easier. Completely independent of Graze room above — moving either one does not move the other. Identical at every size, for both snakes.">② Kill depth (px)</span><span id="tun-kill-val" style="color:#FF8C00;min-width:44px;text-align:right;">4.30 px</span></div>
+      <input type="range" id="tun-killSink" min="0.1" max="20" step="0.01" value="4.304" oninput="_onTuning()" style="width:100%;accent-color:#FF8C00;">
+      <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0.1 = dies on contact</span><span>20 = almost unkillable</span></div>
+    </div>
+    <div style="font-size:9px;color:#6a6a8a;margin:-4px 0 10px;line-height:1.5;">
+      ① is <b style="color:#FFD700">YOUR</b> survival — how deep you can go into a circler and live.<br>
+      ② is <b style="color:#FF8C00">THEIRS</b> — how deep they must be driven to die. Turn ② DOWN for easier kills.<br>
+      They were one number until 31 Jul, which is why raising ① used to kill your own kills.
+    </div>
+    <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#39FF14;" title="GRAZE HEAD HITBOX: scales the grazing head's radius for the graze check ONLY. Smaller = harder / must be more precise; larger = easier.">② Graze head hitbox (×)</span><span id="tun-grazehead-val" style="color:#39FF14;min-width:44px;text-align:right;">1.00×</span></div>
       <input type="range" id="tun-grazeHead" min="0.2" max="2.0" step="0.01" value="1" oninput="_onTuning()" style="width:100%;accent-color:#39FF14;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0.2 = strict</span><span>2.0 = easy</span></div>
@@ -1939,13 +1949,13 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // SINGLE SOURCE OF TRUTH for test-lobby defaults — RESET restores exactly this, so it always
 // reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
 // bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
-const _TEST_DEFAULTS={grazePx:4.304,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:60,grazeScaleK:1.15,rule:'biggest_wins',dbg:false};
+const _TEST_DEFAULTS={grazePx:4.304,killSink:4.304,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:60,grazeScaleK:1.15,rule:'biggest_wins',dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
 // THE canonical live combat values — the single definition of "what it is supposed to be".
 // n2nScale is listed explicitly: _pushTuning sends it, so leaving it out of here meant RESET
 // quietly pushed a default this file never stated.
-const _LIVE_TUNING_DEFAULTS={grazePx:4.304,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:1.15,n2nScale:0.30,rule:'biggest_wins',dbg:false};
+const _LIVE_TUNING_DEFAULTS={grazePx:4.304,killSink:4.304,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:1.15,n2nScale:0.30,rule:'biggest_wins',dbg:false};
 let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
@@ -6508,10 +6518,10 @@ function _grazeSinkRef(gPx){ return gPx; }
 // aCirc = the VICTIM is the circler => this is a KILL, fixed depth. Otherwise the victim is working
 // around a circler => ROOM, which is what grazePx sets.
 function _grazeMargin(RaBase,Rd,gPx,gHead,gBody,gScaleK,aCirc){
-  const want=aCirc?_GRAZE_KILL_SINK:_grazeSinkRef(gPx);
+  const want=aCirc?(_tuningTest.killSink!=null?+_tuningTest.killSink:_GRAZE_KILL_SINK):_grazeSinkRef(gPx);
   return want-(1-gHead)*RaBase-(1-gBody)*Rd;
 }
-const _PT={ grazePx:4.304, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
+const _PT={ grazePx:4.304, killSink:4.304, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
 // per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
 // per-tick @30Hz, so the "not turning" floor is doubled — winding still arms after one full circDeg loop).
@@ -7570,13 +7580,15 @@ function _pushTuning(){
   _tuneSendT=setTimeout(async()=>{
     _tuneSendT=null;
     const seq=++_tuneSeq;
-    const t={grazePx:_tuningTest.grazePx,grazeHead:_tuningTest.grazeHead,bodyScale:_tuningTest.bodyScale,
+    const t={grazePx:_tuningTest.grazePx,killSink:_tuningTest.killSink,grazeHead:_tuningTest.grazeHead,bodyScale:_tuningTest.bodyScale,
              grazeReach:_tuningTest.grazeReach,grazeScaleK:_tuningTest.grazeScaleK,circDeg:_tuningTest.circDeg,faceDeg:_tuningTest.faceDeg,
              n2nScale:(_tuningTest.n2nScale!=null?_tuningTest.n2nScale:0.30),rule:_tuningTest.rule};
     try{
       // Canonical form MUST match the server's ssTuneCanon byte for byte — fixed key order, and the
       // sha256 is over that text, so any tampering in flight invalidates the signature.
-      const canon=JSON.stringify(['grazePx','grazeHead','bodyScale','grazeReach','circDeg','faceDeg','n2nScale','grazeScaleK','rule']
+      // ⚠️ THIS ARRAY IS THE SIGNATURE. It must match ssTuneCanon on the server key-for-key and in
+      // this exact order — one difference and every push is rejected as unsigned.
+      const canon=JSON.stringify(['grazePx','grazeHead','bodyScale','grazeReach','circDeg','faceDeg','n2nScale','grazeScaleK','rule','killSink']
         .map(k=>(t[k]===undefined||t[k]===null?null:t[k])));
       const hashBuf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canon));
       const hash=[...new Uint8Array(hashBuf)].map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -7592,7 +7604,8 @@ function _onTuning(){
   // the legacy hbs/hhbs branch below only remains for the test-lobby-less past and is server-ignored.
   if(_isTestLobby()||localStorage.getItem('ss_owner')==='1'){
     const g=id=>document.getElementById(id);
-    _tuningTest.grazePx   =+g('tun-grazePx').value;
+    _tuningTest.grazePx   =+g('tun-grazePx').value;                       // ① ROOM (yours)
+    _tuningTest.killSink  =+g('tun-killSink').value;                      // ② KILL DEPTH (theirs)
     _tuningTest.grazeHead =+g('tun-grazeHead').value;
     _tuningTest.bodyScale =+g('tun-bodyScale').value;
     _tuningTest.grazeReach=+g('tun-grazeReach').value;
@@ -7607,6 +7620,7 @@ function _onTuning(){
     g('tun-body-val').textContent     =_tuningTest.bodyScale.toFixed(2)+'×';
     g('tun-grazereach-val').textContent=_tuningTest.grazeReach.toFixed(2)+'×';
     g('tun-grazescalek-val').textContent=_tuningTest.grazeScaleK.toFixed(2);
+    if(g('tun-kill-val'))g('tun-kill-val').textContent=(+_tuningTest.killSink).toFixed(2)+' px';
     g('tun-circ-val').textContent     =_tuningTest.circDeg+'°';
     g('tun-faceT-val').textContent    =_tuningTest.faceDeg+'°';
     if(_isTestLobby()){try{localStorage.setItem('ss_tuning_test8',JSON.stringify(_tuningTest));}catch(_){}} // don't contaminate saved test-lobby values from live tuning
@@ -7636,6 +7650,7 @@ function _syncTuningUI(){
     gv('tun-grazeHead',_tuningTest.grazeHead??1); if(e('tun-grazehead-val'))e('tun-grazehead-val').textContent=(_tuningTest.grazeHead??1).toFixed(2)+'×';
     gv('tun-bodyScale',_tuningTest.bodyScale); if(e('tun-body-val'))e('tun-body-val').textContent=(_tuningTest.bodyScale??1).toFixed(2)+'×';
     gv('tun-grazeReach',_tuningTest.grazeReach??1); if(e('tun-grazereach-val'))e('tun-grazereach-val').textContent=(_tuningTest.grazeReach??1).toFixed(2)+'×';
+    gv('tun-killSink',_tuningTest.killSink??4.304); if(e('tun-kill-val'))e('tun-kill-val').textContent=(+(_tuningTest.killSink??4.304)).toFixed(2)+' px';
     gv('tun-grazeScaleK',_tuningTest.grazeScaleK??0.75); if(e('tun-grazescalek-val'))e('tun-grazescalek-val').textContent=(_tuningTest.grazeScaleK??0.75).toFixed(2);
     gv('tun-circDeg',_tuningTest.circDeg);   if(e('tun-circ-val'))e('tun-circ-val').textContent=(_tuningTest.circDeg||360)+'°';
     gv('tun-faceDegT',_tuningTest.faceDeg);  if(e('tun-faceT-val'))e('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';

@@ -26,7 +26,9 @@ function ssOwnerKey() {
 }
 // Canonical JSON over a FIXED key order — both sides must hash byte-identical text.
 function ssTuneCanon(t) {
-  const k = ['grazePx', 'grazeHead', 'bodyScale', 'grazeReach', 'circDeg', 'faceDeg', 'n2nScale', 'grazeScaleK', 'rule'];
+  // ⚠️ APPEND ONLY, AND THE CLIENT'S ARRAY MUST MATCH THIS EXACTLY. The signature is over this
+  // text; one differing key or a different order and every owner push is rejected as unsigned.
+  const k = ['grazePx', 'grazeHead', 'bodyScale', 'grazeReach', 'circDeg', 'faceDeg', 'n2nScale', 'grazeScaleK', 'rule', 'killSink'];
   return JSON.stringify(k.map((x) => (t[x] === undefined || t[x] === null ? null : t[x])));
 }
 function ssOwnerVerify(lobbyId, tuning, ts, sigB64) {
@@ -86,7 +88,7 @@ const SS_GRAZE_ANCHOR_KILLER_NS = 26;
 const SS_GRAZE_ANCHOR_TARGET_NS = 30;
 // Runtime hitbox changes are refused outright while this is true - see the ss-tune handler.
 const SS_TUNE_LOCKED = false;   // owner panel ENABLED - ssOwnerVerify (ed25519 + 5min replay window) is the gate
-let SS_TUNING_DEFAULT = { n2nScale: 0.30, bodyScale: 0.75, grazePx: 3.3, grazeHead: 1.20, grazeReach: 1.00, grazeScaleK: 0.75, circDeg: 360, faceDeg: 21, rule: 'biggest_wins' };
+let SS_TUNING_DEFAULT = { killSink: 4.304, n2nScale: 0.30, bodyScale: 0.75, grazePx: 3.3, grazeHead: 1.20, grazeReach: 1.00, grazeScaleK: 0.75, circDeg: 360, faceDeg: 21, rule: 'biggest_wins' };
 // Load the owner's saved tuning. This USED to run right here as a bare try-block, and it threw on
 // every single boot: `fs` is declared ~270 lines below and ssClampTuning falls back to SS_CAMP_*_D
 // constants declared ~950 lines below, and a hoisted `const` is not initialised until its line runs.
@@ -119,6 +121,10 @@ function ssClampTuning(t, cur) {
     n2nScale:   num(t.n2nScale,   0.05, 1.00, c.n2nScale   != null ? c.n2nScale   : 0.30),
     bodyScale:  num(t.bodyScale,  0.20, 2.00, c.bodyScale  != null ? c.bodyScale  : 0.75),
     grazePx:    num(t.grazePx,    0.00, 20.0, c.grazePx    != null ? c.grazePx    : 3.3),
+    // KILL DEPTH, in literal px — how far a circling snake must be driven into a trail before it
+    // dies. Separate from grazePx (which is ROOM) on purpose: see the collision site. Floored at
+    // 0.1 so a kill can never fire before the sprites actually touch, capped at 20 like room.
+    killSink:   num(t.killSink,   0.10, 20.0, c.killSink   != null ? c.killSink   : SS_GRAZE_KILL_SINK),
     grazeHead:  num(t.grazeHead,  0.50, 2.50, c.grazeHead  != null ? c.grazeHead  : 1.20),
     grazeReach: num(t.grazeReach, 0.20, 2.00, c.grazeReach != null ? c.grazeReach : 1.00),
     // 0 = flat px (old behaviour), 1 = identical feel at every size. 0.75 keeps a small edge
@@ -3812,7 +3818,11 @@ function ssCheckCollisionsNose(sg, lid, io) {
 
   const grazeReach = T.grazeReach != null ? T.grazeReach : 1.0;
 
-  const grazeScaleK = T.grazeScaleK != null ? T.grazeScaleK : 0.75;
+  // RETIRED 2026-07-31 — read by nothing. Its whole job was making the margin scale with snake
+  // size; there is no size scaling left in either test, so it could only ever have been a silent
+  // multiplier with a name that promised something it no longer did. Kept as a FIELD so existing
+  // ss-tune signatures (ssTuneCanon covers it) still verify and saved files still load.
+  const grazeScaleK = T.grazeScaleK != null ? T.grazeScaleK : 0.75;   // eslint-disable-line no-unused-vars
 
   const DBG = !!T.dbg;   // owner DEBUG toggle — gates ALL per-substep instrumentation. Default OFF so normal play has
 
@@ -3913,14 +3923,13 @@ function ssCheckCollisionsNose(sg, lid, io) {
       // size DEPENDENCE, so that one difficulty now applies at every size, for both snakes.
       // With the locked values this is S = 2.00px. Raise grazePx to make grazing more forgiving
       // (harder to land), lower it to make it easier - exactly as the slider always behaved.
-      const _Ra0 = ssSectionRadius(SS_GRAZE_ANCHOR_TARGET_NS);
-      const _Rd0 = ssSectionRadius(SS_GRAZE_ANCHOR_KILLER_NS);
-      // ROOM: what grazePx buys. Anchored the same way, so it is one number at every size.
-      const _roomSink = (1 - grazeHead) * _Ra0 + (1 - grazeBody) * _Rd0
-        + skimMargin * Math.pow(Math.max(1, _Ra0 + _Rd0) / SS_GRAZE_REF_REACH, grazeScaleK);
-      // aCirc => the victim is the circler => this is a KILL, and its depth is FIXED. Anything
-      // else under skimOn is somebody working around a circler, and gets the room instead.
-      const _sinkWant = aCirc ? SS_GRAZE_KILL_SINK : _roomSink;
+      // BOTH NUMBERS ARE LITERAL PIXELS. grazePx IS the room, in px. SS_GRAZE_KILL_SINK IS the
+      // kill depth, in px. No anchor arithmetic, no exponent, nothing to reinterpret - what the
+      // panel shows is what the geometry does.
+      // aCirc => the victim is the circler => this is a KILL, fixed depth. Anything else under
+      // skimOn is somebody working around a circler, and they get the room instead.
+      const _killSink = T.killSink != null ? T.killSink : SS_GRAZE_KILL_SINK;
+      const _sinkWant = aCirc ? _killSink : skimMargin;
       const margin = skimOn
         ? _sinkWant - (1 - grazeHead) * RaBase - (1 - grazeBody) * Rd
         : 0;
