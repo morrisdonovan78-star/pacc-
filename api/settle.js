@@ -2407,6 +2407,14 @@ module.exports = async function handler(req, res) {
         else returned += lam;
         out.push({ address: to, lamports: lam, ok: !!r.ok, sig: r.sig || null });
       }
+      // Same rule as kart-settle: a refund where nothing moved must not stay flagged as done, or the
+      // entry is stranded in escrow with no path back to the player.
+      if (!out.some((o) => o.ok)) {
+        await kvDel('kartrefund:' + refundId).catch(() => {});
+        betAlert('KART refund returned NOTHING for ' + refundId + ' — flag cleared, safe to retry');
+        clearTimeout(guard); done = true;
+        return res.status(503).json({ error: 'kart refund failed, retryable', retry: true, refundId });
+      }
       if (returned > 0) await kvHincrby(BET_LEDGER, 'betLiability', -returned).catch(() => {});
       clearTimeout(guard); done = true;
       return res.status(200).json({ ok: true, refundId, refunded: out });
@@ -2487,6 +2495,20 @@ module.exports = async function handler(req, res) {
         const r = await wgPayWinnerAndFee(esc2, to, share, Math.floor(fee / winners.length), 'kart:' + raceId);
         if (!r.ok) betAlert('KART payout FAILED ' + raceId + ' -> ' + to.slice(0, 8) + ' : ' + (r.reason || ''));
         paid.push({ address: to, lamports: share, ok: !!r.ok, sig: r.sig || null, reason: r.reason || null });
+      }
+      // ⚠️ IF NOTHING ACTUALLY WENT OUT, UNDO THE "ALREADY PAID" FLAG.
+      // kartpaid:<raceId> is set BEFORE the transfers and has NO TTL, so a race where every send
+      // failed (RPC blip, a solvency hold, escrow briefly short) was marked settled FOREVER: the
+      // kart server's retry would get {already:true}, the winner would never be paid, and nothing
+      // would ever look at it again. Same shape as the blackjack bjpaid bug. Clearing the flag when
+      // not one lamport moved makes the race retryable; a PARTIAL success keeps the flag, because
+      // re-running it would pay the ones that already landed a second time.
+      const anyPaid = paid.some((p) => p.ok);
+      if (!anyPaid) {
+        await kvDel('kartpaid:' + raceId).catch(() => {});
+        betAlert('KART settle paid NOTHING for ' + raceId + ' — flag cleared, safe to retry');
+        clearTimeout(guard); done = true;
+        return res.status(503).json({ error: 'kart payout failed, retryable', retry: true, raceId });
       }
       // The pot has left the building either way; keeping it as liability would block later payouts.
       await kvHincrby(BET_LEDGER, 'betLiability', -potLamports).catch(() => {});
