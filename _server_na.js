@@ -83,12 +83,17 @@ const SS_GRAZE_NECK_PTS = 20;
 // made your kills need that much more graze - the owner's exact complaint, and it was real.
 // Split, grazePx buys room to work with WITHOUT moving how far a circler must be driven to die.
 // Still symmetric: every player gets the same room and every circler dies at the same depth.
-const SS_GRAZE_KILL_SINK = 4.304;   // px, every size — a size-26 snake vs a spawn-size circler
+const SS_GRAZE_KILL_SINK = 2.65;    // px, every size (owner-locked 2026-07-31)
 const SS_GRAZE_ANCHOR_KILLER_NS = 26;
 const SS_GRAZE_ANCHOR_TARGET_NS = 30;
 // Runtime hitbox changes are refused outright while this is true - see the ss-tune handler.
 const SS_TUNE_LOCKED = false;   // owner panel ENABLED - ssOwnerVerify (ed25519 + 5min replay window) is the gate
-let SS_TUNING_DEFAULT = { killSink: 4.304, n2nScale: 0.30, bodyScale: 0.75, grazePx: 3.3, grazeHead: 1.20, grazeReach: 1.00, grazeScaleK: 0.75, circDeg: 360, faceDeg: 21, rule: 'biggest_wins' };
+// ── THE LOCKED COMBAT SET (owner, 2026-07-31) ──────────────────────────────────────────────
+// These are the values every lobby on every node runs, and exactly what the panel's RESET
+// restores. Kept here as well as in ss-tuning.json so a fresh boot, a rebuilt node, or a lobby
+// created before any save has ever happened all start in the same place - the saved file is a
+// cache of the owner's last change, never the only record of what the game is meant to be.
+let SS_TUNING_DEFAULT = { grazePx: 4.2, killSink: 2.65, grazeHead: 1.20, bodyScale: 0.75, grazeReach: 1.00, grazeScaleK: 1.15, circDeg: 360, faceDeg: 21, n2nScale: 0.30, rule: 'biggest_wins' };
 // Load the owner's saved tuning. This USED to run right here as a bare try-block, and it threw on
 // every single boot: `fs` is declared ~270 lines below and ssClampTuning falls back to SS_CAMP_*_D
 // constants declared ~950 lines below, and a hoisted `const` is not initialised until its line runs.
@@ -120,7 +125,7 @@ function ssClampTuning(t, cur) {
   return {
     n2nScale:   num(t.n2nScale,   0.05, 1.00, c.n2nScale   != null ? c.n2nScale   : 0.30),
     bodyScale:  num(t.bodyScale,  0.20, 2.00, c.bodyScale  != null ? c.bodyScale  : 0.75),
-    grazePx:    num(t.grazePx,    0.00, 20.0, c.grazePx    != null ? c.grazePx    : 3.3),
+    grazePx:    num(t.grazePx,    0.00, 20.0, c.grazePx    != null ? c.grazePx    : 4.2),
     // KILL DEPTH, in literal px — how far a circling snake must be driven into a trail before it
     // dies. Separate from grazePx (which is ROOM) on purpose: see the collision site. Floored at
     // 0.1 so a kill can never fire before the sprites actually touch, capped at 20 like room.

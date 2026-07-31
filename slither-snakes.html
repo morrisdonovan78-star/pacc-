@@ -1264,13 +1264,13 @@ body.mctl #voice-speakers{left:150px;}
     </div>
     <div style="color:#FFD700;font-size:9px;margin:2px 0 6px;letter-spacing:1px;border-top:1px solid #2a1a3a;padding-top:8px;">◆ CIRCLE GRAZE — independent knobs (graze kill ONLY; nothing here touches normal body / H2H / movement)</div>
     <div style="margin-bottom:11px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="GRAZE ROOM: how deep YOU may be inside a circling snake's body and still live, in LITERAL PIXELS — the number on this slider is the number of px. Raise it to give yourself more room to work around a circler. It does NOT change how far a circler has to be driven into your trail to die — that is fixed at 4.30px at every size, for every snake. These used to be one number, which is why turning this up also made your own kills need more graze.">① Graze room (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.0 px</span></div>
-      <input type="range" id="tun-grazePx" min="0" max="20" step="0.01" value="1" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FFD700;" title="GRAZE ROOM: how deep YOU may be inside a circling snake's body and still live, in LITERAL PIXELS — the number on this slider is the number of px. Raise it to give yourself more room to work around a circler. It does NOT change how far a circler has to be driven into your trail to die — that is set by ② below and is the same at every size, for every snake. These used to be one number, which is why turning this up also made your own kills need more graze.">① Graze room (px)</span><span id="tun-graze-val" style="color:#FFD700;min-width:44px;text-align:right;">1.0 px</span></div>
+      <input type="range" id="tun-grazePx" min="0" max="20" step="0.01" value="4.2" oninput="_onTuning()" style="width:100%;accent-color:#FFD700;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0 = no room</span><span>20 = lots of room</span></div>
     </div>
     <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FF8C00;" title="KILL DEPTH: how far a CIRCLING snake must be driven into YOUR trail before it dies, in literal px. LOWER = kills land sooner. This is the one you turn DOWN to make kills easier. Completely independent of Graze room above — moving either one does not move the other. Identical at every size, for both snakes.">② Kill depth (px)</span><span id="tun-kill-val" style="color:#FF8C00;min-width:44px;text-align:right;">4.30 px</span></div>
-      <input type="range" id="tun-killSink" min="0.1" max="20" step="0.01" value="4.304" oninput="_onTuning()" style="width:100%;accent-color:#FF8C00;">
+      <input type="range" id="tun-killSink" min="0.1" max="20" step="0.01" value="2.65" oninput="_onTuning()" style="width:100%;accent-color:#FF8C00;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0.1 = dies on contact</span><span>20 = almost unkillable</span></div>
     </div>
     <div style="font-size:9px;color:#6a6a8a;margin:-4px 0 10px;line-height:1.5;">
@@ -1949,13 +1949,16 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // SINGLE SOURCE OF TRUTH for test-lobby defaults — RESET restores exactly this, so it always
 // reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
 // bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
-const _TEST_DEFAULTS={grazePx:4.304,killSink:4.304,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:60,grazeScaleK:1.15,rule:'biggest_wins',dbg:false};
+const _TEST_DEFAULTS={grazePx:4.2, killSink:2.65, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, grazeScaleK:1.15, circDeg:360, faceDeg:60, n2nScale:0.30, rule:'biggest_wins', dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
 // THE canonical live combat values — the single definition of "what it is supposed to be".
 // n2nScale is listed explicitly: _pushTuning sends it, so leaving it out of here meant RESET
 // quietly pushed a default this file never stated.
-const _LIVE_TUNING_DEFAULTS={grazePx:4.304,killSink:4.304,grazeHead:1.20,bodyScale:0.75,grazeReach:1.00,circDeg:360,faceDeg:21,grazeScaleK:1.15,n2nScale:0.30,rule:'biggest_wins',dbg:false};
+// ── THE LOCKED COMBAT SET (owner, 2026-07-31) ────────────────────────────────────────────────
+// What every lobby on every node runs, and EXACTLY what RESET restores — and RESET pushes to
+// every region, not just the one you are on. MUST match SS_TUNING_DEFAULT on the server.
+const _LIVE_TUNING_DEFAULTS={grazePx:4.2, killSink:2.65, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, grazeScaleK:1.15, circDeg:360, faceDeg:21, n2nScale:0.30, rule:'biggest_wins', dbg:false};
 let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
@@ -6505,7 +6508,7 @@ const _GRAZE_ANCHOR_KILLER_NS=26, _GRAZE_ANCHOR_TARGET_NS=30;
 // MUST match SS_GRAZE_KILL_SINK on the server. KILL DEPTH IS FIXED and is NOT what grazePx moves:
 // grazePx buys ROOM (how deep you may be inside a circler's body and live) — see the server's
 // collision site. They are two different tests with a different snake in the victim slot.
-const _GRAZE_KILL_SINK=4.304;
+const _GRAZE_KILL_SINK=2.65;
 // MUST match SS_GRAZE_NECK_PTS * SS_POINT_DIST on the server (20 * 1.6).
 const _GRAZE_NECK_PX=32;
 // sink = (Ra + Rd) - killDist = how deep a graze visibly sinks in before it kills. It is ONE number
@@ -6521,7 +6524,7 @@ function _grazeMargin(RaBase,Rd,gPx,gHead,gBody,gScaleK,aCirc){
   const want=aCirc?(_tuningTest.killSink!=null?+_tuningTest.killSink:_GRAZE_KILL_SINK):_grazeSinkRef(gPx);
   return want-(1-gHead)*RaBase-(1-gBody)*Rd;
 }
-const _PT={ grazePx:4.304, killSink:4.304, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
+const _PT={ grazePx:4.2, killSink:2.65, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
 // per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
 // per-tick @30Hz, so the "not turning" floor is doubled — winding still arms after one full circDeg loop).
@@ -7650,7 +7653,7 @@ function _syncTuningUI(){
     gv('tun-grazeHead',_tuningTest.grazeHead??1); if(e('tun-grazehead-val'))e('tun-grazehead-val').textContent=(_tuningTest.grazeHead??1).toFixed(2)+'×';
     gv('tun-bodyScale',_tuningTest.bodyScale); if(e('tun-body-val'))e('tun-body-val').textContent=(_tuningTest.bodyScale??1).toFixed(2)+'×';
     gv('tun-grazeReach',_tuningTest.grazeReach??1); if(e('tun-grazereach-val'))e('tun-grazereach-val').textContent=(_tuningTest.grazeReach??1).toFixed(2)+'×';
-    gv('tun-killSink',_tuningTest.killSink??4.304); if(e('tun-kill-val'))e('tun-kill-val').textContent=(+(_tuningTest.killSink??4.304)).toFixed(2)+' px';
+    gv('tun-killSink',_tuningTest.killSink??2.65); if(e('tun-kill-val'))e('tun-kill-val').textContent=(+(_tuningTest.killSink??2.65)).toFixed(2)+' px';
     gv('tun-grazeScaleK',_tuningTest.grazeScaleK??0.75); if(e('tun-grazescalek-val'))e('tun-grazescalek-val').textContent=(_tuningTest.grazeScaleK??0.75).toFixed(2);
     gv('tun-circDeg',_tuningTest.circDeg);   if(e('tun-circ-val'))e('tun-circ-val').textContent=(_tuningTest.circDeg||360)+'°';
     gv('tun-faceDegT',_tuningTest.faceDeg);  if(e('tun-faceT-val'))e('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
