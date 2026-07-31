@@ -6478,6 +6478,8 @@ const _GRAZE_REF_REACH=48.34;
 // The graze is now equally hard at every size, for BOTH snakes; these say which size it is equally
 // hard AS. Killer 26 is the owner's own "feels right" size, target 30 is the spawn size.
 const _GRAZE_ANCHOR_KILLER_NS=26, _GRAZE_ANCHOR_TARGET_NS=30;
+// MUST match SS_GRAZE_NECK_PTS * SS_POINT_DIST on the server (20 * 1.6).
+const _GRAZE_NECK_PX=32;
 // sink = (Ra + Rd) - killDist = how deep a graze visibly sinks in before it kills. It is ONE number
 // and it is both things at once: the depth you see, and the difficulty. Holding it constant is what
 // makes every size play the same. Port of the server's _sinkRef.
@@ -6531,7 +6533,13 @@ function _practiceCheckCollisions(){
       const margin=skimOn?_grazeMargin(RaBase,Rd,M,gHead,gBody,gScaleK):0;
       const killDist=reach-margin, killDist2=killDist>0?killDist*killDist:0;
       const segs=segsCache.get(D.id)||[]; if(segs.length<2)continue; const spacing=Rd*SEGMENT_SPACING;
-      const neck=Math.max(2,Math.ceil((RaBase+Rd)/spacing));
+      // Circle graze: a FLAT dead zone behind the target's head (server SS_GRAZE_NECK_PTS = 20 path
+      // points = 32px). It used to scale with both snakes, which is a second size-dependence sitting
+      // exactly where a graze kill is made. Normal body collisions keep the original exclusion.
+      // Expressed in SEGMENTS here (spacing = Rd*0.5 px) against the server's 1.6px path points.
+      const neck=skimOn
+        ? Math.max(2,Math.ceil(_GRAZE_NECK_PX/spacing))
+        : Math.max(2,Math.ceil((RaBase+Rd)/spacing));
       const drawnEnd=Math.min(segs.length-1,D.numSections);
       const end=skimOn?Math.min(drawnEnd,Math.round(drawnEnd*gReach)):drawnEnd;
       const kmax=Math.min(end,segs.length-1);

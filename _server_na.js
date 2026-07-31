@@ -53,6 +53,22 @@ const SS_GRAZE_REF_REACH = 48.34;
 // Graze difficulty anchor (owner 2026-07-31). The graze is now equally hard at EVERY size;
 // these two say WHICH size it is equally hard AS. Killer 26 is the owner's own 'feels right'
 // size, target 30 is the spawn size, i.e. the most common circler you actually meet.
+// GRAZE NECK — the stretch of the TARGET'S trail, right behind their head, that is excluded
+// from the kill test. It exists so a head-on approach resolves as nose-to-nose (bigger wins)
+// instead of a body kill... but N2N IS EXPLICITLY SKIPPED FOR CIRCLING PAIRS, so on a circle
+// graze it defers to nothing and is pure dead ground.
+//
+// It was ceil((RaBase + Rd)/SS_POINT_DIST) — i.e. it GREW WITH BOTH SNAKES. That is a SECOND
+// size-dependence, separate from the sink one: 41.6px of dead trail at ns8 rising to 60.8px at
+// ns63. And it sits exactly where a graze kill is made — you cut a circler off with the trail you
+// JUST LAID, which is the part nearest your head, which is the part that was excluded.
+//
+// Flattened to 20 points (32px) = what the SMALLEST pair of snakes already gets today, so this can
+// only ever be easier than it was, never harder, at any size. ⚠️ This is the ONE lever that moves
+// kill difficulty WITHOUT touching sink: it changes WHERE on the trail a kill counts, not HOW DEEP
+// it must go. Visible graze depth is unchanged at 4.30px. Normal body collisions and N2N keep the
+// original size-scaled exclusion — only the circle graze uses this.
+const SS_GRAZE_NECK_PTS = 20;
 const SS_GRAZE_ANCHOR_KILLER_NS = 26;
 const SS_GRAZE_ANCHOR_TARGET_NS = 30;
 // Runtime hitbox changes are refused outright while this is true - see the ss-tune handler.
@@ -3896,7 +3912,9 @@ function ssCheckCollisionsNose(sg, lid, io) {
 
       const killDist = reach - margin, killDist2 = killDist > 0 ? killDist * killDist : 0;
 
-      const neck = Math.max(2, Math.ceil((RaBase + Rd) / SS_POINT_DIST));
+      const neck = skimOn
+        ? SS_GRAZE_NECK_PTS                                              // circle graze: flat, see above
+        : Math.max(2, Math.ceil((RaBase + Rd) / SS_POINT_DIST));         // normal body: unchanged
 
       const drawnEnd = bodyEndIdx(D);
 
