@@ -1607,7 +1607,22 @@ const ACTIONS = {
   RELOAD:    { name: 'Reload',        kb: ['KeyR'],         pad: 2 },
   INTERACT:  { name: 'Interact / Pick Up', kb: ['KeyE'],    pad: 2 },
   USE:       { name: 'Use Item',      kb: ['KeyQ'] },
-  DROP:      { name: 'Drop Item',     kb: ['KeyG'] },
+  DROP:      { name: 'Drop Item',     kb: ['KeyX'] },   // was G — G is the Fortnite-default EDIT key
+  /*
+   * BUILDING — Fortnite-default layout (owner spec 2026-08-01): every piece has its
+   * own dedicated, rebindable key, plus the controller's single build-mode switch
+   * (Builder-Pro style B). Wired into the build system as it ships; rebindable now
+   * so layouts carry straight over. R doubles as Reload/Rotate and Mouse0 as
+   * Fire/Confirm the same way Fortnite's do: they act by CONTEXT (combat vs build).
+   */
+  BUILD_WALL:  { name: 'Build: Wall',            kb: ['F1'] },
+  BUILD_FLOOR: { name: 'Build: Floor',           kb: ['F2'] },
+  BUILD_STAIRS:{ name: 'Build: Stairs',          kb: ['F3'] },
+  BUILD_ROOF:  { name: 'Build: Pyramid / Roof',  kb: ['F4'] },
+  BUILD_MODE:  { name: 'Build Mode (controller)', kb: ['KeyB'], pad: 1 },
+  EDIT:        { name: 'Edit Build',             kb: ['KeyG'] },
+  EDIT_RESET:  { name: 'Reset Edit',             kb: ['KeyT'] },
+  BUILD_ROT:   { name: 'Rotate Build',           kb: ['KeyR'] },
   SLOT1:     { name: 'Slot 1',        kb: ['Digit1'] },
   SLOT2:     { name: 'Slot 2',        kb: ['Digit2'] },
   SLOT3:     { name: 'Slot 3',        kb: ['Digit3'] },

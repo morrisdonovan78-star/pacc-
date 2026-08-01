@@ -4774,6 +4774,27 @@ async function pkConnect(roomId,gameToken,spectate){
       // default (window._SRVTS_ON=true to trial) until it's validated to beat arrival-stamping FEEL, not
       // just harness numbers. Arrival-time stamping remains the shipped default.
       let _bufT=pktT;
+      /*
+       * DE-BURST the arrival stamps. Arrival-stamping is the shipped default (see the
+       * server-time note below), but it has one provable failure: when the main thread
+       * stalls (GC, a long task), every packet that queued during the stall is processed
+       * in ONE rAF and they all get the SAME Date.now() — ~50-100ms of server time
+       * compressed into ~0ms of buffer timeline. The interpolator then plays the cluster
+       * as an instant lurch and runs DRY until the next real packet: the world stutters
+       * while FPS and ping both read perfect — the exact "counters say good but it looks
+       * and feels bad" report (2026-08-01). Fix: when a packet lands closer than half the
+       * observed median spacing to the previous one, stamp it median-spaced after its
+       * predecessor instead (never past its true arrival). Packets that arrive normally
+       * spaced take the untouched arrival stamp — the healthy path is byte-identical.
+       * Kill switch: window._DEBURST_OFF=true.
+       */
+      if(!window._DEBURST_OFF && _pktGaps.length>=20){
+        const _sg=_pktGaps.slice().sort((a,b)=>a-b), _med=_sg[Math.floor(_sg.length*0.5)];
+        if(window.__ssLastBufT && pktT-window.__ssLastBufT<_med*0.5){
+          _bufT=Math.min(pktT+_med, window.__ssLastBufT+_med);
+        }
+      }
+      window.__ssLastBufT=_bufT;
       if(window._SRVTS_ON && typeof d.t==='number' && isFinite(d.t)){
         const _off=pktT-d.t;
         let E=window.__ssTsEst;
