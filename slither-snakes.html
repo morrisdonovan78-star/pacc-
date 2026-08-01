@@ -1860,6 +1860,50 @@ function _perfFrameStart(ts){ if(!_perf.on)return; _perf.fStart=performance.now(
   if(_perf.lastTs){const dt=ts-_perf.lastTs; if(dt>0){_perf.dtAcc+=dt;_perf.dtN++; if(dt>_perf.dtMax)_perf.dtMax=dt; if(_perf.dtN>10&&dt>2*(_perf.dtAcc/_perf.dtN))_perf.jank++;}}
   _perf.lastTs=ts; _perf.snakes=0;_perf.segs=0;_perf.food=0; }
 function _perfFrameEnd(){ if(!_perf.on)return; _pmk(null); _perf.jsSum+=performance.now()-_perf.fStart; _perf.frames++; if(performance.now()-_perf.lastUpdate>500)_perfUpdate(); }
+/*
+ * ── ALWAYS-ON STALL RECORDER ──────────────────────────────────────────────────────────────────
+ *
+ * "Ping is twice as bad at times and the FPS drops" is ONE symptom, not two: the ping shown in game
+ * is measured with performance.now() on this thread, so any long task inflates the reading and drops
+ * frames at the same moment. The hard part has never been believing the reports, it is that the
+ * stall is INTERMITTENT and the panel only shows the last half second — by the time anyone opens it
+ * the stall is long gone.
+ *
+ * PerformanceObserver('longtask') reports every task that blocked this thread for >50ms, with no
+ * polling and no cost when nothing is stalling. It runs from load, ALWAYS, so the history is already
+ * there whenever somebody presses F2 — a player can then screenshot the actual stalls instead of
+ * being asked to catch one live.
+ *
+ * `attribution` names the frame/container responsible where the browser can tell, which is what
+ * separates "the game's own render" from an iframe, an extension or the clip encoder.
+ */
+let _stalls=[], _stallObs=null;
+function _stallStart(){
+  if(_stallObs||typeof PerformanceObserver==='undefined')return;
+  try{
+    if((PerformanceObserver.supportedEntryTypes||[]).indexOf('longtask')<0)return;
+    _stallObs=new PerformanceObserver(list=>{
+      for(const e of list.getEntries()){
+        let who='';
+        try{ const a=(e.attribution&&e.attribution[0]); if(a) who=(a.containerType||a.name||''); }catch(_){}
+        _stalls.push({ms:Math.round(e.duration),at:Math.round(e.startTime),who:who});
+      }
+      if(_stalls.length>40)_stalls=_stalls.slice(-40);   // bounded: this must never become the leak
+    });
+    _stallObs.observe({entryTypes:['longtask']});
+  }catch(_){}
+}
+try{ _stallStart(); }catch(_){}
+function _stallRows(){
+  const now=performance.now(), recent=_stalls.filter(s=>now-s.at<60000);
+  if(!recent.length)return [['stalls (60s)','none']];
+  const worst=recent.reduce((a,b)=>b.ms>a.ms?b:a);
+  const rows=[['stalls >50ms (60s)',''+recent.length],
+              ['worst stall','<span style="color:#f66">'+worst.ms+' ms</span>'+(worst.who?' ('+worst.who+')':'')],
+              ['total blocked',recent.reduce((n,s)=>n+s.ms,0)+' ms']];
+  recent.slice(-3).reverse().forEach((s,i)=>rows.push(['&nbsp;&nbsp;last '+(i+1),s.ms+' ms'+(s.who?' '+s.who:'')]));
+  return rows;
+}
 function _perfUpdate(){
   const f=Math.max(1,_perf.frames), dtN=Math.max(1,_perf.dtN);
   const frameInt=_perf.dtAcc/dtN, fps=1000/frameInt, js=_perf.jsSum/f, b=_perf.b, g=k=>((b[k]||0)/f);
@@ -1874,6 +1918,9 @@ function _perfUpdate(){
     // that mixed a single frame's count with a multi-frame denominator and under-reported ~30-60x.)
     ['snakes / segs',_perf.snakes.toFixed(0)+' / '+_perf.segs.toFixed(0)],['food',_perf.food.toFixed(0)],['ping',_ping+' ms']];
   if(performance.memory)rows.push(['JS heap',(performance.memory.usedJSHeapSize/1048576).toFixed(0)+' MB']);
+  // The stall history is the part that explains an intermittent problem — a frozen 300ms task shows
+  // up here long after the frame counters have moved on.
+  rows.push(['&nbsp;','']); _stallRows().forEach(r=>rows.push(r));
   const bound=js>frameInt*0.7?'CPU/JS-bound':'GPU/composite-bound';
   _perf.dom.innerHTML=`<b style="color:#8cf">⚡ PERF</b> <span style="color:${js>frameInt*0.7?'#f66':'#6f6'}">${bound}</span> <span style="color:#555">(F2 toggle)</span><table style="border-collapse:collapse;margin-top:3px">`
     +rows.map(r=>`<tr><td style="padding:0 10px 0 0">${r[0]}</td><td style="text-align:right">${r[1]}</td></tr>`).join('')+'</table>';
