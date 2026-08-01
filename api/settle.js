@@ -875,10 +875,16 @@ function verifyMarketDescriptor(m, sig) {
 // Confirm a bet deposit tx paid ≥ lamports into the escrow from walletAddress (mirrors join.js
 // verifyWagerTx exactly — same escrow, same checks). Throws a descriptive error on any shortfall.
 async function verifyBetDepositTx(txSig, walletAddress, lamports, escrowB58) {
+  // Did ANY node actually answer us? "the chain says this tx isn't there yet" and "we never got to
+  // ask" both end this loop the same way, but they are completely different events: the first is the
+  // ordinary state of a transfer a second old, the second is an outage. The caller turns this
+  // distinction into the HTTP status, so a normal pending ante stops being counted as a server error
+  // while a real RPC failure still is. Without it, an outage hides inside routine retry traffic.
+  let answered = false;
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt > 0) await sleep(1500);
     let tx;
-    try { tx = await rpcFound('getTransaction', [txSig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]); }
+    try { tx = await rpcFound('getTransaction', [txSig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]); answered = true; }
     catch (_) { continue; } // transient RPC error — retry
     if (!tx) continue;      // not indexed yet — retry
     if (tx.meta && tx.meta.err) throw new Error('Deposit tx failed on-chain');
@@ -892,7 +898,14 @@ async function verifyBetDepositTx(txSig, walletAddress, lamports, escrowB58) {
     if (senderIdx < 0) throw new Error('Sender not found in deposit tx');
     return; // verified ✓
   }
-  throw new Error('Deposit not confirmed yet — try again in a moment');
+  // The flag rides on the Error rather than in its text: five other call sites surface `e.message`
+  // straight to a player, and none of them should grow a marker they have to strip.
+  if (answered) {
+    const e = new Error('Deposit not confirmed yet — try again in a moment');
+    e.pending = true;                 // read by the bj-deposit catch to pick the HTTP status
+    throw e;
+  }
+  throw new Error('Deposit could not be checked — no Solana RPC answered. Your SOL is safe; try again.');
 }
 
 // Enumerate every individual bet on a market. Keys are `bet:<mkt>:<outcome>:<addr>` → lamports.
@@ -2119,7 +2132,35 @@ module.exports = async function handler(req, res) {
       } catch (e) {
         await kvDel(key).catch(() => {});                                                    // release so a real deposit can retry
         clearTimeout(guard); done = true;
-        return res.status(503).json({ error: (e && e.message) || 'deposit not verified', retry: true });
+        /*
+         * THREE DIFFERENT THINGS USED TO SHARE ONE 503, AND ONLY ONE OF THEM IS A FAULT.
+         *
+         * A player's ante is deposited on chain and registered here immediately afterwards, so the
+         * FIRST call routinely arrives before the transfer is indexed. That is the normal course of
+         * events, not an error — but answering it 503 meant every ordinary ante counted as a server
+         * error. Measured on 2026-07-31, pulp's /api/blackjack -> /api/settle ran at a 29.5% error
+         * rate, which is why the platform kept raising 5xx anomalies on a day nobody was playing, and
+         * why a REAL outage had nowhere to stand out from.
+         *
+         *   pending      -> 202 Accepted. The chain answered and simply does not have it yet. The
+         *                   client already retries on the body's `retry` flag (readyRetry in
+         *                   table.jsx tests `last.retry`, never the status), so nothing about the
+         *                   player's experience changes.
+         *   no RPC       -> 503. Genuinely our problem, and now the ONLY thing on this path that
+         *                   shows up as one.
+         *   anything else-> 400. 'Deposit too small', 'Escrow not found in deposit tx', 'Sender not
+         *                   found', 'Deposit tx failed on-chain' — the deposit is wrong, and no
+         *                   amount of retrying fixes it. Marked retry:false so the client stops
+         *                   instead of hammering a verdict that will never change.
+         *
+         * ⚠️ 202 is a 2xx, so `r.ok` is now TRUE for a pending ante. The caller MUST test the body's
+         * `ok`, not the HTTP status, or it will seat a player whose money has not been verified.
+         * That is done — see the bj-deposit branch of app/api/blackjack/route.js.
+         */
+        const msg = (e && e.message) || 'deposit not verified';
+        if (e && e.pending)            return res.status(202).json({ ok: false, pending: true, error: msg, retry: true });
+        if (/no Solana RPC answered/.test(msg)) return res.status(503).json({ ok: false, error: msg, retry: true });
+        return res.status(400).json({ ok: false, error: msg, retry: false });
       }
     }
 
