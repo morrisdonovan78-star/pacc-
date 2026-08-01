@@ -7053,7 +7053,7 @@ _applyGfx();
 // ~24fps and record THAT. On save we finalize the CURRENT segment so the clip ENDS at your keypress
 // (the ~20s leading up to it) instead of a stale window. Opt-in + PC-only; zero cost when off.
 const CLIP_SEG_MS=20000, CLIP_W=1280, CLIP_H=720, CLIP_FPS=24;
-let _clipStream=null,_clipMime='',_clipRec=null,_clipChunks=[],_clipSegStart=0,_clipPrev=null,_clipPendingSave=false,
+let _clipStream=null,_clipMime='',_clipRec=null,_clipChunks=[],_clipSegStart=0,_clipPrevChunks=null,_clipPendingSave=false,
     _clipCanvas=null,_clipCtx=null,_clipRaf=0,_clipLastDraw=0,_clipRestartTimer=null;
 // Clip audio: the canvas stream is video-only, which is why clips were silent. Voice chat is mixed
 // in through a MediaStreamDestination built on _voicePlayCtx (the context the remote peers already
@@ -7074,9 +7074,21 @@ function _clipBeginSegment(){
     _clipRec=new MediaRecorder(_clipStream,_clipMime?{mimeType:_clipMime,videoBitsPerSecond:2500000,audioBitsPerSecond:96000}:undefined);
     _clipRec.ondataavailable=e=>{ if(e.data&&e.data.size)_clipChunks.push(e.data); };
     _clipRec.onstop=()=>{
-      const blob=_clipChunks.length?new Blob(_clipChunks,{type:_clipMime||'video/mp4'}):null;
-      if(blob)_clipPrev=blob;
-      if(_clipPendingSave){ _clipPendingSave=false; if(blob)_clipUpload(blob); }
+      /*
+       * ⚠️ DO NOT BUILD A BLOB HERE UNLESS SOMEBODY IS ACTUALLY SAVING.
+       *
+       * This used to run `new Blob(_clipChunks)` on EVERY segment roll — that is every 20 seconds,
+       * for every PC player, because clips default to on. At 2.5 Mbit/s a segment is about 6 MB, so
+       * the main thread stopped to assemble a 6 MB blob (which Chrome copies into blob storage, and
+       * may spill to disk) twice a minute, all game, and then threw it away unread. That is a
+       * periodic freeze that leaves the AVERAGE frame rate looking perfectly healthy — which is
+       * exactly how it was reported: "fps and ping look good but I get freezes/microstutters".
+       *
+       * Keeping the chunk ARRAY costs nothing: it is the same buffers the recorder already handed
+       * us, held by reference. The blob is now assembled once, at the moment a clip is saved.
+       */
+      _clipPrevChunks=_clipChunks.length?_clipChunks:null;
+      if(_clipPendingSave){ _clipPendingSave=false; const b=_clipBlob(_clipPrevChunks); if(b)_clipUpload(b); }
       if(_clipStream)_clipBeginSegment(); // roll straight into the next segment
     };
     _clipRec.start();
@@ -7121,7 +7133,7 @@ function _clipStart(){
     // voice track silently, which looks exactly like the old no-sound bug.
     const types=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
     _clipMime=(MediaRecorder.isTypeSupported?types.find(t=>MediaRecorder.isTypeSupported(t)):'')||'';
-    _clipPrev=null; _clipLastDraw=0;
+    _clipPrevChunks=null; _clipLastDraw=0;
     _clipRaf=requestAnimationFrame(_clipDrawLoop);
     _clipBeginSegment();
     _clipWireAudio(); // no-op unless voice chat is already running
@@ -7134,13 +7146,18 @@ function _clipStop(){
   if(_clipRaf){ cancelAnimationFrame(_clipRaf); _clipRaf=0; }
   const s=_clipStream; _clipStream=null; _clipPendingSave=false; // null first so onstop won't restart
   try{ if(_clipRec){ _clipRec.onstop=null; if(_clipRec.state!=='inactive')_clipRec.stop(); } }catch(_){}
-  _clipRec=null; _clipChunks=[]; _clipPrev=null; _clipCanvas=null; _clipCtx=null;
+  _clipRec=null; _clipChunks=[]; _clipPrevChunks=null; _clipCanvas=null; _clipCtx=null;
   // Tear the audio mix down but leave _voicePlayCtx alone — voice chat keeps running without clips.
   try{ _voiceAnalysers.forEach(an=>{ try{ an.disconnect(_clipMixDest); }catch(_){} }); }catch(_){}
   if(_clipMicSrc){ try{_clipMicSrc.disconnect();}catch(_){} _clipMicSrc=null; }
   if(_clipMicGain){ try{_clipMicGain.disconnect();}catch(_){} _clipMicGain=null; }
   _clipMixDest=null;
   if(s){ try{s.getTracks().forEach(t=>t.stop());}catch(_){} }
+}
+// Assemble the recorded chunks into a playable file. Called ONLY when a clip is actually being
+// saved — see the note in _clipBeginSegment about why this must not run on every segment roll.
+function _clipBlob(chunks){
+  try{ return (chunks&&chunks.length)?new Blob(chunks,{type:_clipMime||'video/mp4'}):null; }catch(_){ return null; }
 }
 function _clipSave(){
   if(!SS_IS_PC){ addToast('Clips are PC-only','#FFD700'); return; }
@@ -7149,13 +7166,13 @@ function _clipSave(){
   const elapsed=Date.now()-_clipSegStart;
   // Finalize the CURRENT segment so the clip ends at the keypress. If it only just restarted (<4s in),
   // fall back to the previous full segment so the clip isn't tiny.
-  if(elapsed<4000 && _clipPrev){ _clipUpload(_clipPrev); return; }
+  if(elapsed<4000 && _clipPrevChunks){ const b=_clipBlob(_clipPrevChunks); if(b){ _clipUpload(b); return; } }
   _clipPendingSave=true;
   try{
     if(_clipRec && _clipRec.state==='recording'){ _clipRec.stop(); }
-    else if(_clipPrev){ _clipPendingSave=false; _clipUpload(_clipPrev); }
+    else if(_clipPrevChunks){ _clipPendingSave=false; const b=_clipBlob(_clipPrevChunks); if(b)_clipUpload(b); }
     else{ _clipPendingSave=false; addToast('Clip warming up — give it a few seconds','#FFD700'); }
-  }catch(_){ _clipPendingSave=false; if(_clipPrev)_clipUpload(_clipPrev); }
+  }catch(_){ _clipPendingSave=false; const b=_clipBlob(_clipPrevChunks); if(b)_clipUpload(b); }
 }
 function _clipUpload(blob){
   const ext=(_clipMime && _clipMime.indexOf('mp4')!==-1) ? 'mp4' : 'webm';
