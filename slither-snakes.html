@@ -1920,6 +1920,16 @@ function _perfUpdate(){
   if(performance.memory)rows.push(['JS heap',(performance.memory.usedJSHeapSize/1048576).toFixed(0)+' MB']);
   // The stall history is the part that explains an intermittent problem — a frozen 300ms task shows
   // up here long after the frame counters have moved on.
+  /*
+   * The two numbers that explain a freeze the FPS counter cannot see. A world that stops while the
+   * renderer runs at 180fps is the interpolation buffer running dry, so show the buffer and the real
+   * packet spacing next to it.
+   */
+  (function(){
+    const g=_pktGaps.slice().sort((a,b)=>a-b);
+    rows.push(['interp buffer',_interpDelay().toFixed(0)+' ms'+(_interpNow>_INTERP_MIN+0.5?' (adaptive)':'')]);
+    if(g.length>=20) rows.push(['packet gap p50/p95',g[Math.floor(g.length*0.5)].toFixed(0)+' / '+g[Math.floor(g.length*0.95)].toFixed(0)+' ms']);
+  })();
   rows.push(['&nbsp;','']); _stallRows().forEach(r=>rows.push(r));
   const bound=js>frameInt*0.7?'CPU/JS-bound':'GPU/composite-bound';
   _perf.dom.innerHTML=`<b style="color:#8cf">⚡ PERF</b> <span style="color:${js>frameInt*0.7?'#f66':'#6f6'}">${bound}</span> <span style="color:#555">(F2 toggle)</span><table style="border-collapse:collapse;margin-top:3px">`
@@ -1978,6 +1988,57 @@ const _INTERP_DELAY=28; // ms: render remotes this far behind the latest snapsho
 // direct-connection latency; the existing frac-cap(1.5) extrapolation covers rare packet-loss
 // underruns → no rubber-band, no desync.
 let _ssRtt=null; // rolling RTT (ms) from ss-ping/ss-pong, for death-replay network timing
+/*
+ * ── HOW FAR BEHIND TO RENDER: MEASURED, NOT ASSUMED ────────────────────────────────────────────
+ *
+ * `_INTERP_DELAY` (28ms) is the buffer that absorbs network JITTER. Remote snakes are drawn that far
+ * behind the newest snapshot, so a packet arriving a little late still has something to interpolate
+ * toward. When the buffer runs dry there is nothing to move toward and THE WORLD SIMPLY STOPS.
+ *
+ * ⚠️ That is what "it says 180 FPS but it feels like it drops to 0" actually is, and it is why the
+ * perf panel looks perfect while it happens: the renderer is fine (0.70ms of JS, no long tasks) and
+ * the SERVER is fine (event-loop latency 0.20ms, 3% CPU, both measured 2026-08-01). Frames keep being
+ * drawn at 180/s — they just contain an unchanged scene. Nothing about FPS or CPU can show that.
+ *
+ * 28ms is about 1.7 packets at the 60Hz broadcast, which is ample on a clean local connection and
+ * far too little for anyone whose packets arrive unevenly. A player at 200ms RTT routinely sees gaps
+ * well past 28ms, so their buffer empties several times a second.
+ *
+ * So the delay now follows the connection instead of being one number for everybody: we measure the
+ * REAL spacing between arriving snapshots and keep enough buffer to cover the slow ones.
+ *
+ * ⚠️ IT MUST STAY SMALL FOR PLAYERS WHO DO NOT NEED IT. A larger delay draws other snakes further
+ * behind their true position, which widens the render-vs-collision gap — you die into a body drawn
+ * where it no longer is. Hence the floor is exactly the old 28ms (a clean connection behaves EXACTLY
+ * as it does today, no regression) and the ceiling is capped.
+ */
+const _INTERP_MIN=28, _INTERP_MAX=110;
+let _pktGaps=[], _pktLastT=0, _interpNow=_INTERP_MIN, _interpTarget=_INTERP_MIN;
+function _notePacket(){
+  const now=performance.now();
+  if(_pktLastT){
+    const gap=now-_pktLastT;
+    // Ignore absurd gaps (tab throttled, alt-tabbed, a stall): they are not jitter and would
+    // permanently inflate everyone's delay after one background moment.
+    if(gap<600){ _pktGaps.push(gap); if(_pktGaps.length>90)_pktGaps.shift(); }
+  }
+  _pktLastT=now;
+  if(_pktGaps.length>=20){
+    const s=_pktGaps.slice().sort((a,b)=>a-b);
+    const p95=s[Math.floor(s.length*0.95)];
+    // Cover the 95th-percentile gap. Anything rarer than that is worth one brief stall rather than
+    // making every frame permanently later for everyone.
+    _interpTarget=Math.max(_INTERP_MIN,Math.min(_INTERP_MAX,Math.ceil(p95)+8));
+  }
+}
+// Ease toward the target. A step change in how far behind we render would be a visible jump in every
+// other player's position, so it is walked there ~1ms per frame instead.
+function _interpDelay(){
+  if(typeof window._INTERP_DELAY==='number')return window._INTERP_DELAY; // manual override still wins
+  if(_interpNow<_interpTarget)_interpNow=Math.min(_interpTarget,_interpNow+1);
+  else if(_interpNow>_interpTarget)_interpNow=Math.max(_interpTarget,_interpNow-0.25);
+  return _interpNow;
+}
 // Local-head server-reconciliation gain: each 30Hz snapshot, nudge own drawn head this fraction
 // toward the authoritative head (advanced to ~present so we don't inject lag). Was effectively 0
 // below a 96px hard-snap deadzone → own head drifted freely (measured 31.7px median / 82.8px max
@@ -4553,7 +4614,7 @@ async function pkConnect(roomId,gameToken,spectate){
       // ── DEATH_FRAME instrumentation (logging only; no gameplay/render effect) ──
       try{
         if(data.diag && (data.id===myPid || data.killerId===myPid)){
-          const nowT=Date.now(), renderT=nowT-_INTERP_DELAY, D=data.diag;
+          const nowT=Date.now(), renderT=nowT-_interpDelay(), D=data.diag;
           const vic=SG.snakes.get(data.id), kil=data.killerId?SG.snakes.get(data.killerId):null;
           const vh=vic&&vic.path&&vic.path[0]?vic.path[0]:null;   // rendered victim head
           const kh=kil&&kil.path&&kil.path[0]?kil.path[0]:null;   // interp head (path[0]) — INTERP_DELAY signal
@@ -4568,7 +4629,7 @@ async function pkConnect(roomId,gameToken,spectate){
             for(let i=0;i<sn.path.length&&o.length<n;i+=st)o.push({x:+sn.path[i].x.toFixed(1),y:+sn.path[i].y.toFixed(1)}); return o; };
           const report={
             role:data.id===myPid?'VICTIM':'KILLER',
-            renderTs:nowT, renderFrameTs:nowT, interpDelayMs:_INTERP_DELAY, renderT, lastServerTick:SG.tick, rttMs:(typeof _ssRtt==='number'?_ssRtt:null),
+            renderTs:nowT, renderFrameTs:nowT, interpDelayMs:_interpDelay(), renderT, lastServerTick:SG.tick, rttMs:(typeof _ssRtt==='number'?_ssRtt:null),
             renderedVictimHead:vh?{x:+vh.x.toFixed(1),y:+vh.y.toFixed(1)}:null,
             renderedKillerHead:kh?{x:+kh.x.toFixed(1),y:+kh.y.toFixed(1)}:null,   // interp head (path[0])
             drawnKillerHead:kdh?{x:+kdh.x.toFixed(1),y:+kdh.y.toFixed(1)}:null,   // actual drawn head (_exHead||path[0])
@@ -4577,7 +4638,7 @@ async function pkConnect(roomId,gameToken,spectate){
             displayedKillerSnapshot:ba&&bb?{aT:ba.t,bT:bb.t,ageMs:nowT-bb.t}:null,
             latestKillerSnapshot:kLatest?{ageMs:nowT-kLatest.t,x:+kLatest.x.toFixed(1),y:+kLatest.y.toFixed(1)}:null,
             // shared key: server death tick <-> the render frame + the snapshot ticks it was built from
-            tickMapping:{ serverDeathTick:D.tick, clientLastServerTick:SG.tick, renderFrameTs:nowT, renderT, interpDelayMs:_INTERP_DELAY,
+            tickMapping:{ serverDeathTick:D.tick, clientLastServerTick:SG.tick, renderFrameTs:nowT, renderT, interpDelayMs:_interpDelay(),
               displayedSnapshotTicks:(ba&&bb)?{aTick:(ba.tick!=null?ba.tick:null),bTick:(bb.tick!=null?bb.tick:null),aT:ba.t,bT:bb.t}:null },
             offset:{killer_rendered_vs_server:off(kh,D.killerHead),   // interp head vs server (INTERP lag component)
                     killer_drawn_vs_server:off(kdh,D.killerHead),     // ACTUAL drawn head vs server (extrapolation/render-to-authority)
@@ -4631,6 +4692,7 @@ async function pkConnect(roomId,gameToken,spectate){
 
     // Server-authoritative state: head pos + angle per tick, no body segs
     _sio.on('ss-state',d=>{
+      _notePacket();   // measure real snapshot spacing — drives the adaptive interpolation buffer
       if(!SG||SG.over)return;
       if(typeof d.ar==='number'&&d.ar>0)_arenaR=d.ar; // live (shrinking/expanding) border radius
       if(typeof d.acx==='number')_arenaCX=d.acx;         // anti-camp push — the ring itself moves
@@ -8695,7 +8757,7 @@ document.addEventListener('keydown',function(e){
       MODEL_GAP:cnt('MODEL_GAP')+cnt('MODEL_GAP_norawSrv'), INTERP_GAP:cnt('INTERP_GAP'), VERDICT_SPLIT:cnt('VERDICT_SPLIT'),
       avgDefHeadRenderOffsetPx:+avgOff.toFixed(1), maxDefHeadRenderOffsetPx:+maxOff.toFixed(1),
       worstSurviveFrame: worst?{drawnHeadBodyOverlapPx:worst.ren.headBodyOverlap, noseBodyOverlapPx:worst.ren.noseBodyOverlap, won:worst.ren.won, srvWon:worst.srv&&worst.srv.won, DIAG:worst.DIAG}:null,
-      interpDelayMs:(typeof window._INTERP_DELAY==='number'?window._INTERP_DELAY:_INTERP_DELAY)};
+      interpDelayMs:_interpDelay()};
     console.log('[CIRCLE_PROBE] '+JSON.stringify(summary));
     try{const blob=new Blob([JSON.stringify({summary,trace:_cpBuf},null,2)],{type:'application/json'});
       const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='circle_probe_'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}catch(_e){}
@@ -8927,7 +8989,7 @@ function rafDraw(ts){
 
   // Remote snake advancement: snapshot interpolation (live) or dead-reckoning (practice bots)
   if(SG&&!SG.over){
-    const _renderT=Date.now()-(typeof window._INTERP_DELAY==='number'?window._INTERP_DELAY:_INTERP_DELAY);
+    const _renderT=Date.now()-_interpDelay();
     SG.snakes.forEach(s=>{
       if((s.id===myPid&&(window._OWN_PRED_ON||_isPractice))||!s.alive)return;
       const buf=_ssBuf.get(s.id);
