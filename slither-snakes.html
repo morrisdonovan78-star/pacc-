@@ -1918,6 +1918,34 @@ function _perfUpdate(){
     // that mixed a single frame's count with a multi-frame denominator and under-reported ~30-60x.)
     ['snakes / segs',_perf.snakes.toFixed(0)+' / '+_perf.segs.toFixed(0)],['food',_perf.food.toFixed(0)],['ping',_ping+' ms']];
   if(performance.memory)rows.push(['JS heap',(performance.memory.usedJSHeapSize/1048576).toFixed(0)+' MB']);
+  /*
+   * THE "WHY ONLY ME" ROWS. Two players in the same lobby can have wildly different
+   * experiences for reasons no FPS counter shows: one is stuck on HTTP long-polling
+   * (AV/proxy blocked the websocket), one is on a 3x-DPR screen, one's client is
+   * reconnecting under the surface. These rows make an affected player's screenshot
+   * directly comparable against an unaffected one. Reads only — nothing here can
+   * change gameplay, and the packet counters only run while the overlay is open.
+   */
+  (function(){
+    try{
+      const en=_sio&&_sio.io&&_sio.io.engine, tn=en&&en.transport&&en.transport.name;
+      if(tn)rows.push(['transport',tn==='websocket'?'websocket':'<span style="color:#f66">'+tn+' (slow — WS blocked?)</span>']);
+      if(typeof _ssRtt==='number')rows.push(['net RTT (ss-pong)',_ssRtt+' ms'+(_ping>_ssRtt*2+40?' <span style="color:#f66">(felt ping is client jank)</span>':'')]);
+      if(_netStat.t0){
+        const sec=Math.max(0.5,(performance.now()-_netStat.t0)/1000);
+        rows.push(['packets in /s',(_netStat.pkts/sec).toFixed(1)],['data in',(_netStat.bytes/sec/1024).toFixed(1)+' KB/s']);
+      }
+      if(_netStat.reconnects)rows.push(['reconnects','<span style="color:#f66">'+_netStat.reconnects+'</span>']);
+      const cv=document.getElementById('cv');
+      if(cv)rows.push(['canvas / DPR',cv.width+'×'+cv.height+' @ '+(window.devicePixelRatio||1).toFixed(2)]);
+      if(_netStat.gpu===undefined){
+        _netStat.gpu=null;
+        try{ const gl=document.createElement('canvas').getContext('webgl'); const ext=gl&&gl.getExtension('WEBGL_debug_renderer_info');
+          if(ext)_netStat.gpu=String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)).slice(0,42); }catch(_){}
+      }
+      if(_netStat.gpu)rows.push(['GPU',_netStat.gpu]);
+    }catch(_){}
+  })();
   // The stall history is the part that explains an intermittent problem — a frozen 300ms task shows
   // up here long after the frame counters have moved on.
   /*
@@ -1988,6 +2016,30 @@ const _INTERP_DELAY=28; // ms: render remotes this far behind the latest snapsho
 // direct-connection latency; the existing frac-cap(1.5) extrapolation covers rare packet-loss
 // underruns → no rubber-band, no desync.
 let _ssRtt=null; // rolling RTT (ms) from ss-ping/ss-pong, for death-replay network timing
+/*
+ * Network counters for the F2 overlay's "why only me" rows. Counting is armed ONLY
+ * while the overlay is open (togglePerf resets t0), so zero work happens in normal
+ * play. reconnects counts every connect after the first on the same socket — the
+ * signature of a flapping connection that a player experiences as random ping spikes.
+ */
+const _netStat={t0:0,pkts:0,bytes:0,reconnects:0,gpu:undefined};
+function _netStatHook(sio){
+  try{
+    let first=true;
+    sio.on('connect',()=>{ if(first){first=false;return;} _netStat.reconnects++; });
+    const arm=()=>{ const en=sio.io&&sio.io.engine; if(!en)return;
+      en.on('packet',(p)=>{ if(!_perf||!_perf.on)return;
+        if(!_netStat.t0){_netStat.t0=performance.now();_netStat.pkts=0;_netStat.bytes=0;}
+        _netStat.pkts++;
+        if(p&&typeof p.data==='string')_netStat.bytes+=p.data.length;
+        else if(p&&p.data&&p.data.byteLength)_netStat.bytes+=p.data.byteLength;
+        // 5s rolling window so the rate reflects NOW, not the whole session
+        if(performance.now()-_netStat.t0>5000){_netStat.t0=performance.now();_netStat.pkts=0;_netStat.bytes=0;}
+      });
+    };
+    sio.on('connect',arm); arm();
+  }catch(_){}
+}
 /*
  * ── HOW FAR BEHIND TO RENDER: MEASURED, NOT ASSUMED ────────────────────────────────────────────
  *
@@ -4606,6 +4658,7 @@ async function pkConnect(roomId,gameToken,spectate){
 
     // ── RTT probe for death-replay network timing (instrumentation only) ──
     _sio.on('ss-pong',(d)=>{ if(d&&d.t)_ssRtt=Date.now()-d.t; });
+    _netStatHook(_sio);   // F2 overlay's transport/packet/reconnect rows — armed only while the overlay is open
     try{ clearInterval(window._ssPingIv); }catch(e){}
     window._ssPingIv=setInterval(()=>{ try{ if(_sio&&_sio.connected)_sio.emit('ss-ping',{t:Date.now()}); }catch(e){} },1000);
 
