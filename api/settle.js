@@ -482,12 +482,27 @@ const RENT_MIN        = 890880; // lamports — used only for the sub-rent safet
 //
 // Until then we fall back to public nodes with batching + skip-preflight
 // to reduce calls from ~10 down to ~4 per cashout.
+//
+// ⚠️ THIS LIST HAD THREE DEAD NODES IN IT — ON THE PAYOUT PATH.
+//
+// api/rpc.js measured all three BROKEN on 2026-07-18 and dropped them there; this file, which is the
+// one that actually MOVES MONEY, was never updated to match:
+//   try-rpc.mainnet-beta.solana.com      -> connection timeouts
+//   solana.public-rpc.com                -> non-JSON garbage
+//   solana-mainnet.g.alchemy.com/v2/demo -> shared demo key, unusable under any load
+// So the "five endpoints" here were really two, and the moment Helius hit its rate limit and the one
+// official node was busy, EVERY endpoint failed at once and /api/settle returned 503 — a cashout or
+// payout refused outright. Vercel's own alert on 2026-07-31 named these exact three hosts as the
+// external failures behind that 503 spike (solana.public-rpc.com alone: 287 failures).
+//
+// Replaced with the list api/rpc.js verified healthy, so the fallbacks are real ones. Order is
+// deliberate: dedicated capacity first, then the free node with no shared rate limit, then the
+// official node that rate-limits under load.
 const RPCS = [
   process.env.HELIUS_RPC_URL,                        // PRIMARY: set in Vercel env vars
-  'https://api.mainnet-beta.solana.com',              // Solana official (rate-limited under load)
-  'https://try-rpc.mainnet-beta.solana.com',          // Solana second official node
-  'https://solana.public-rpc.com',                    // community public
-  'https://solana-mainnet.g.alchemy.com/v2/demo',     // Alchemy demo
+  process.env.SOLANA_RPC_URL,                        // optional second private endpoint (same as rpc.js)
+  'https://solana-rpc.publicnode.com',               // free, no key, verified healthy
+  'https://api.mainnet-beta.solana.com',             // Solana official (rate-limited under load)
 ].filter(Boolean); // drop undefined (HELIUS_RPC_URL not set yet)
 
 // ── tiny helpers ─────────────────────────────────────────────────────────────

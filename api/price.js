@@ -32,12 +32,15 @@ let _cacheTs = 0;     // timestamp of last successful fetch
 const CACHE_TTL = 30_000; // 30-second server cache
 
 // Sources tried in order — first success wins.
+//
+// ⚠️ BINANCE IS GONE, AND MUST NOT COME BACK. It was first in this list, and from here it can only
+// ever fail: `api.binance.com` geo-blocks the United States with HTTP 451, and this function is
+// pinned to `iad1` (see vercel.json) — Virginia. Every single cache miss therefore spent a full
+// round trip on a request that was guaranteed to be refused before falling through to Coinbase,
+// which is what filled the logs with `[price] Binance failed: HTTP 451` every ~35 seconds forever.
+// Nothing was ever broken for players (Coinbase answered and the price was right), but it added
+// latency to every refresh and buried real errors under noise. Coinbase leads now.
 const SOURCES = [
-  {
-    name: 'Binance',
-    url:  'https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT',
-    parse: d => parseFloat(d?.price),
-  },
   {
     name: 'Coinbase',
     url:  'https://api.coinbase.com/v2/prices/SOL-USD/spot',
