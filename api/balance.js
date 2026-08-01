@@ -12,11 +12,13 @@ module.exports = async function handler(req, res) {
   }
 
   // Ankr removed free access — use official Solana RPC (works server-side)
+  // solana.public-rpc.com fails TLS and the Alchemy demo key is shared/throttled — both measured
+  // dead or unreliable on 2026-08-01. publicnode is free, keyless and healthy.
   const rpcs = [
+    process.env.HELIUS_RPC_URL,
+    'https://solana-rpc.publicnode.com',
     'https://api.mainnet-beta.solana.com',
-    'https://solana.public-rpc.com',
-    'https://solana-mainnet.g.alchemy.com/v2/demo',
-  ];
+  ].filter(Boolean);
 
   const INFRA_CODES = new Set([-32052, -32055, -32029, -32603]);
 

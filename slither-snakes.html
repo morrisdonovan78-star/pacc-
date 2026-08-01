@@ -1453,7 +1453,8 @@ const GAME_SERVERS = {
 const FOOD_COLORS=['#FF6B6B','#FFD700','#39FF14','#00FFFF','#FF69B4','#FF8C00','#CC44FF','#00FF80','#FF4500','#80FFFF'];
 const KILL_FOOD_COLOR='#FFD700'; // gold — food dropped from a killed player (carries their wager); slightly bigger than regular food
 const SNAKE_COLORS=['#FFD700','#FF69B4','#00BFFF','#FF4500','#39FF14','#FF1493','#00FFFF','#DA70D6'];
-const RPC_REGIONS={'US':'https://api.mainnet-beta.solana.com','EU':'https://solana.public-rpc.com'};
+// EU was solana.public-rpc.com, which fails TLS verification (measured 2026-08-01).
+const RPC_REGIONS={'US':'https://api.mainnet-beta.solana.com','EU':'https://solana-rpc.publicnode.com'};
 
 // ══ MENU BACKGROUND — space/hex backdrop + animated attract-mode snakes ═══════
 // Static layer: same hex-grid math/style as the in-game arena (drawArena(), further down) so

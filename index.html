@@ -805,9 +805,10 @@ const USE_MAINNET   = true;
 
 // RPC endpoints by region — used only for direct fallback (file:// mode)
 // Normal play always goes through /api/rpc proxy — no CORS issues
+// EU was solana.public-rpc.com, which fails TLS verification (measured 2026-08-01).
 const RPC_REGIONS = {
   'US': 'https://api.mainnet-beta.solana.com',
-  'EU': 'https://solana.public-rpc.com',
+  'EU': 'https://solana-rpc.publicnode.com',
 };
 let REGION = localStorage.getItem('pa_region') || 'US';
 function getRpc(){ return RPC_REGIONS[REGION] || RPC_REGIONS['US']; }
@@ -1036,8 +1037,7 @@ async function fetchBalanceLamports(address){
   // ── Direct RPC fallback (only used if proxy unreachable) ────────────────
   const endpoints=[
     'https://api.mainnet-beta.solana.com',
-    'https://solana.public-rpc.com',
-    'https://solana-mainnet.g.alchemy.com/v2/demo',
+    'https://solana-rpc.publicnode.com',
     getRpc(),
   ];
   const tried=new Set();

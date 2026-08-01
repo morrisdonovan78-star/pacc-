@@ -203,11 +203,25 @@ async function issueAblyLobbyToken(clientId, lobbyId) {
     return d.token || null;
   } catch (_) { return null; }
 }
+/*
+ * ⚠️ THE DEPOSIT SEARCH IS ONLY AS GOOD AS THIS LIST, and half of it was dead.
+ *
+ * Measured 2026-08-01:
+ *   try-rpc.mainnet-beta.solana.com  -> DNS does not resolve at all (getaddrinfo failed)
+ *   solana.public-rpc.com            -> TLS certificate verification fails
+ * settle.js and rpc.js were repaired when that was found; join.js was missed, so the one path that
+ * decides whether a player who has ALREADY PAID gets into the game was still asking four nodes of
+ * which only two could answer. rpcCallFound concludes "not found" once every node has answered, so
+ * fewer live nodes means a deposit that one of them simply has not indexed yet reads as missing —
+ * and the player watches "Still verifying deposit… (2/2)" and then gets nothing.
+ *
+ * Same list as settle.js. Keep them in step.
+ */
 const RPCS = [
-  process.env.HELIUS_RPC_URL,
-  'https://api.mainnet-beta.solana.com',
-  'https://try-rpc.mainnet-beta.solana.com',
-  'https://solana.public-rpc.com',
+  process.env.HELIUS_RPC_URL,                        // PRIMARY: set in Vercel env vars
+  process.env.SOLANA_RPC_URL,                        // optional second private endpoint
+  'https://solana-rpc.publicnode.com',               // free, no key, verified healthy (121ms)
+  'https://api.mainnet-beta.solana.com',             // Solana official (rate-limited under load)
 ].filter(Boolean);
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
