@@ -1958,6 +1958,20 @@ function _perfUpdate(){
     rows.push(['interp buffer',_interpDelay().toFixed(0)+' ms'+(_interpNow>_INTERP_MIN+0.5?' (adaptive)':'')]);
     if(g.length>=20) rows.push(['packet gap p50/p95',g[Math.floor(g.length*0.5)].toFixed(0)+' / '+g[Math.floor(g.length*0.95)].toFixed(0)+' ms']);
   })();
+  /*
+   * WHAT IS ACTUALLY RUNNING. A stall count on its own says "something blocked the thread" but not
+   * what. These two rows make one screenshot from an affected player decisive instead of suggestive:
+   * the rolling clip recorder is the heaviest thing the client runs that the player never asked for
+   * (continuous canvas capture + a 2.5 Mbit/s encode, the WHOLE match), and Brave is the browser
+   * that makes canvas access expensive. If stalls are high with the recorder ON, that is the answer;
+   * if stalls are high with it OFF, it is not, and we look elsewhere with real evidence.
+   */
+  (function(){
+    let clip='off';
+    try{ clip=_clipEnabled()?(_clipRec&&_clipRec.state==='recording'?'ON (recording)':'ON (idle)'):'off'; }catch(_){}
+    rows.push(['clip recorder',clip==='off'?clip:'<span style="color:#fa0">'+clip+'</span>']);
+    rows.push(['browser',_isBrave?'Brave (canvas farbling)':'other']);
+  })();
   rows.push(['&nbsp;','']); _stallRows().forEach(r=>rows.push(r));
   const bound=js>frameInt*0.7?'CPU/JS-bound':'GPU/composite-bound';
   _perf.dom.innerHTML=`<b style="color:#8cf">⚡ PERF</b> <span style="color:${js>frameInt*0.7?'#f66':'#6f6'}">${bound}</span> <span style="color:#555">(F2 toggle)</span><table style="border-collapse:collapse;margin-top:3px">`
@@ -7244,7 +7258,35 @@ let _clipStream=null,_clipMime='',_clipRec=null,_clipChunks=[],_clipSegStart=0,_
 // play into) — nodes cannot be connected across AudioContexts, so the mix has to live there.
 let _clipMixDest=null,_clipMicSrc=null,_clipMicGain=null;
 function _clipMicOn(){ return localStorage.getItem('ss_clip_mic')!=='0'; } // your own mic, default ON
-function _clipEnabled(){ return SS_IS_PC && localStorage.getItem('ss_clip_on')!=='0'; } // default ON (owner 2026-07-26); '0' = explicitly off
+/*
+ * ⚠️ BRAVE: THE ROLLING CLIP RECORDER IS OFF BY DEFAULT.
+ *
+ * Clips default ON for PC, which means every PC player continuously runs a canvas->canvas
+ * drawImage downscale plus a 2.5 Mbit/s MediaRecorder encode of captureStream(), for the whole
+ * match, whether or not they ever save a clip.
+ *
+ * Brave FARBLES canvas pixel access to defeat canvas fingerprinting — canvas reads go through its
+ * farbling helper. A one-off read is unnoticeable; a CONTINUOUS capture pipeline pays it forever,
+ * which is why the stutter reports are Brave-specific, PC-only, and happen to players who are not
+ * using voice chat and never touched the clip feature. Chrome does no such work, so the identical
+ * code is nearly free there.
+ *
+ * Brave players can still switch clips on — this only changes the DEFAULT, and only on Brave.
+ * `_isBrave` starts false and is set by the official navigator.brave.isBrave() probe at load; the
+ * probe resolves long before a match begins, and if it never resolves nothing changes for anyone.
+ */
+let _isBrave=false;
+try{
+  if(navigator.brave && typeof navigator.brave.isBrave==='function'){
+    navigator.brave.isBrave().then(v=>{ _isBrave=!!v; if(v)console.info('[perf] Brave detected — rolling clip recorder defaults OFF (canvas farbling makes continuous capture expensive). Enable it in settings if you want clips.'); }).catch(()=>{});
+  }
+}catch(_){}
+function _clipEnabled(){
+  const ls=localStorage.getItem('ss_clip_on');
+  if(ls==='0') return false;                 // explicitly off, any browser
+  if(_isBrave && ls!=='1') return false;     // Brave: opt-IN rather than opt-out
+  return SS_IS_PC;
+} // default ON for PC (owner 2026-07-26); '0' = explicitly off; Brave defaults off unless '1'
 function _clipDrawLoop(ts){
   if(!_clipStream){ _clipRaf=0; return; }
   _clipRaf=requestAnimationFrame(_clipDrawLoop);
