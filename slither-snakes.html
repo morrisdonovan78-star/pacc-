@@ -1889,9 +1889,45 @@ function _stallStart(){
         _stalls.push({ms:Math.round(e.duration),at:Math.round(e.startTime),who:who});
       }
       if(_stalls.length>40)_stalls=_stalls.slice(-40);   // bounded: this must never become the leak
+      _stallAutoShed();
     });
     _stallObs.observe({entryTypes:['longtask']});
   }catch(_){}
+}
+/*
+ * ── SELF-POLICING: SHED THE HEAVIEST OPTIONAL LOAD WHEN THIS CLIENT IS ACTUALLY STALLING ──
+ *
+ * Every previous attempt at the "some players stutter" reports has been a THEORY about which
+ * browser, extension, AV or driver is to blame, and a theory cannot be shipped as a fix. This can:
+ * the client already knows, from the longtask observer, when its own main thread is being blocked.
+ * If it is, drop the most expensive thing it is doing that the player never asked for.
+ *
+ * That is the rolling clip recorder — a canvas->canvas downscale plus a continuous 2.5 Mbit/s
+ * MediaRecorder encode, running the WHOLE match for every PC player, when almost nobody ever saves
+ * a clip. It is by far the biggest optional cost in the client.
+ *
+ * Trigger: >350ms of main-thread blocking inside any 20s window while the recorder is running.
+ * A healthy client never gets close (a whole match usually logs no longtasks at all), so this
+ * cannot fire on someone who is fine. It shuts off ONCE per session, never silently re-arms, and
+ * says why — so an affected player gets a smooth game AND we find out it was the recorder, without
+ * anyone having to catch a stall live or send a screenshot.
+ */
+let _shedDone=false;
+function _stallAutoShed(){
+  if(_shedDone)return;
+  let rec=false;
+  try{ rec=!!(_clipStream||(_clipRec&&_clipRec.state==='recording')); }catch(_){ return; }
+  if(!rec)return;
+  const now=performance.now();
+  let blocked=0;
+  for(const s of _stalls) if(now-s.at<20000) blocked+=s.ms;
+  if(blocked<350)return;
+  _shedDone=true;
+  try{ localStorage.setItem('ss_clip_on','0'); }catch(_){}
+  try{ _clipStop(); }catch(_){}
+  console.warn('[perf] auto-disabled the rolling clip recorder: '+Math.round(blocked)+'ms of main-thread stalls in 20s while it was running. Re-enable it in settings if you want clips back.');
+  try{ addToast('Stutter detected — clip recording turned OFF to keep the game smooth. Re-enable in settings.','#fa0',7000); }catch(_){}
+  try{ _renderSettings(); }catch(_){}   // keep the settings toggle honest if it happens to be open
 }
 try{ _stallStart(); }catch(_){}
 function _stallRows(){
@@ -7551,7 +7587,7 @@ function _keyLabel(k){
 function _openSettings(){ _renderSettings(); document.getElementById('settings-modal').style.display='flex'; }
 function _closeSettings(){ _cancelRebind(); _gpCapAct=null; document.getElementById('settings-modal').style.display='none'; }
 function _renderSettings(){
-  const on = SS_IS_PC && localStorage.getItem('ss_clip_on')!=='0';
+  const on = _clipEnabled();   // ask the real gate — it also knows about Brave and the auto-shed
   const tb=document.getElementById('clip-toggle-btn');
   if(tb){
     tb.textContent = !SS_IS_PC ? 'PC ONLY' : (on?'ON':'OFF');
