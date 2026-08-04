@@ -10273,13 +10273,40 @@ function _playVoiceChunk(from,ab){
     src.start(t);s.nextTime=t+audioBuf.duration;
   }catch(e){console.warn('[voice-play]',e);}
 }
+/*
+ * ⚠️ THIS RUNS FROM THE RENDER LOOP — IT USED TO DO ALL OF THIS EVERY SINGLE FRAME.
+ *
+ * Per frame, per voice analyser, it allocated a Uint8Array, called getByteFrequencyData, and ran a
+ * closure-allocating reduce over it; and while ANYONE was speaking it rebuilt the speaker chips'
+ * innerHTML every frame too. Voice arms itself by default, so every player in a lobby paid this.
+ *
+ * That is why the stutter reports were BRAVE-SPECIFIC. Brave "farbles" Web Audio to defeat audio
+ * fingerprinting — AnalyserNode reads go through its farbling helper on every call, and Brave's own
+ * tracker carries performance bugs against that check/callback path. On Chrome the read is nearly
+ * free, so the same code costs Brave players a chunk of every frame and costs Chrome players almost
+ * nothing. Classic "good FPS average, visible hitches".
+ *
+ * A speaking indicator does not need 144Hz. Scan at ~12Hz, reuse one buffer, sum with a plain loop,
+ * and only touch the DOM when the set of speakers actually CHANGES.
+ */
+const _VOICE_BUF=new Uint8Array(128);
+let _voiceNextScan=0,_voiceSpkSig='';
+function _voiceRms(an){
+  an.getByteFrequencyData(_VOICE_BUF);
+  let s=0; for(let i=0;i<128;i++)s+=_VOICE_BUF[i];
+  return s/128;
+}
 function _voiceUpdateSpeaking(){
+  const now=performance.now();
+  if(now<_voiceNextScan)return;
+  _voiceNextScan=now+80;
   _voiceSpeaking.clear();
-  const buf=new Uint8Array(128);
-  const rms=an=>{an.getByteFrequencyData(buf);return buf.reduce((s,v)=>s+v,0)/buf.length;};
-  _voiceAnalysers.forEach((an,pid)=>{if(rms(an)>18)_voiceSpeaking.add(pid);});
-  if(_voiceLocalAnalyser&&myPid&&rms(_voiceLocalAnalyser)>18)_voiceSpeaking.add(myPid);
+  _voiceAnalysers.forEach((an,pid)=>{if(_voiceRms(an)>18)_voiceSpeaking.add(pid);});
+  if(_voiceLocalAnalyser&&myPid&&_voiceRms(_voiceLocalAnalyser)>18)_voiceSpeaking.add(myPid);
   const vs=document.getElementById('voice-speakers');if(!vs)return;
+  const sig=[..._voiceSpeaking].join(',');
+  if(sig===_voiceSpkSig)return;                 // unchanged — do not re-parse HTML
+  _voiceSpkSig=sig;
   if(_voiceSpeaking.size>0){
     vs.style.display='flex';
     vs.innerHTML=[..._voiceSpeaking].map(pid=>{
@@ -10370,7 +10397,7 @@ function voiceCleanup(){
   if(_voiceProc){try{_voiceProc.disconnect();}catch(_){}_voiceProc=null;}
   if(_voiceCapCtx){try{_voiceCapCtx.close();}catch(_){}_voiceCapCtx=null;}
   if(_voicePlayCtx){try{_voicePlayCtx.close();}catch(_){}_voicePlayCtx=null;}
-  _peerAudioCtxs.clear();_voiceAnalysers.clear();_voiceSpeaking.clear();_voiceLocalAnalyser=null;_voiceReadyPids.clear();_voiceHearFirst.clear();
+  _peerAudioCtxs.clear();_voiceAnalysers.clear();_voiceSpeaking.clear();_voiceLocalAnalyser=null;_voiceReadyPids.clear();_voiceHearFirst.clear();_voiceSpkSig='';_voiceNextScan=0;
   if(_voiceStream){_voiceStream.getTracks().forEach(t=>t.stop());_voiceStream=null;}
   _voiceEnabled=false;
   // _voicePlayCtx is closed above, so the master gain is dead with it — drop the ref or the next
