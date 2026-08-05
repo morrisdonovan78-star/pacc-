@@ -2375,6 +2375,15 @@ function _freezeWatch(ts,camX,camY){
 let _gapWorst=0,_gapWorstT=0;
 function _noteGapWorst(gap){
   const now=performance.now();
+  /*
+   * ⚠️ ONLY WHILE A GAME IS ACTUALLY BEING PLAYED. `_notePacket()` is called at the very top of the
+   * ss-state handler, BEFORE its own `if(!SG||SG.over)return` guard — so without this test the row
+   * also counted silence from the menu, the game-over screen and the gap between rounds, when the
+   * server legitimately is not ticking (an empty/over lobby does not tick at all). That is how it
+   * came to read 740ms while `coasting longest` was only 67ms: the two numbers were not describing
+   * the same period. A gap that nobody was looking at is not a freeze.
+   */
+  if(!SG||SG.over||_localDead)return;
   if(gap<2000&&gap>_gapWorst)_gapWorst=gap;          // <2s: a retransmit stall, not an alt-tab
   if(now-_gapWorstT>60000){_gapWorst=gap<2000?gap:0;_gapWorstT=now;}
 }
@@ -5090,8 +5099,9 @@ async function pkConnect(roomId,gameToken,spectate){
       // changed the whole timeline STEPPED a few ms → a once-per-second HEAD LURCH (user-reported). This
       // version instead SLEWS the offset smoothly (delay-locked loop: EMA toward the observed transit),
       // so the mapping never jumps — no lurch — while still removing most arrival jitter. Kept OFF by
-      // default (window._SRVTS_ON=true to trial) until it's validated to beat arrival-stamping FEEL, not
-      // just harness numbers. Arrival-time stamping remains the shipped default.
+      // ⚠️ THIS NOTE IS NOW OUT OF DATE AND KEPT ONLY FOR THE HISTORY: server-time stamping was
+      // parked here as "unvalidated" and is now the DEFAULT — arrival stamping was measured to
+      // teleport the head up to 182px and drag it back after a stall. See the block below.
       let _bufT=pktT;
       /*
        * DE-BURST the arrival stamps. Arrival-stamping is the shipped default (see the
@@ -5123,8 +5133,34 @@ async function pkConnect(roomId,gameToken,spectate){
           _bufT=Math.min(pktT+_per, window.__ssLastBufT+_per);
         }
       }
-      window.__ssLastBufT=_bufT;
-      if(window._SRVTS_ON && typeof d.t==='number' && isFinite(d.t)){
+      /*
+       * ⚠️⚠️ SERVER-TIME STAMPING IS NOW THE DEFAULT. THIS IS THE "FREEZE, JUMP SOMEWHERE ELSE,
+       * THEN COME BACK" FIX — and that symptom is a POSITION fault, not a freeze.
+       *
+       * Arrival-time stamping breaks after a head-of-line stall. The backlog lands in one burst:
+       * the FIRST packet of it carries a server state from a whole stall-length later than anything
+       * buffered, so the interpolator slides the head straight across that gap (THE JUMP) — and the
+       * rest of the burst carries the OLDER in-between states but gets stamped as if they had just
+       * happened, dragging the head back (COMING BACK). Chronological data is replayed out of order
+       * because the stamp records when it ARRIVED, not when it HAPPENED.
+       *
+       * The server already sends `t: Date.now()` in every packet (verified in prod), so the true
+       * spacing is available and simply was not being used.
+       *
+       * Measured (scratchpad/jump.js, 180s @240fps, jump = one frame moving >4x what the snake
+       * physically can, reversal = the head going backwards):
+       *   740ms stall/20s : biggest jump 182px -> 72px,  worst reversal 182px -> 9px
+       *   300ms stall/8s  : biggest jump  86px -> 21px,  worst reversal  79px -> 21px
+       *   clean connection: 0 jumps / 0 reversals BOTH ways - unchanged
+       * A 182px teleport-and-return on a snake whose head is ~24px is the reported symptom exactly.
+       * Kill switch: window._SRVTS_OFF=true.
+       *
+       * ⚠️ `__ssLastBufT` is assigned AFTER this branch, not before it. It used to be set from the
+       * de-bursted ARRIVAL stamp while the buffer received the SERVER-TIME stamp — two different
+       * clocks — which would have made the margin reading and the next de-burst test compare
+       * against a timeline nothing was actually played back on.
+       */
+      if(!window._SRVTS_OFF && typeof d.t==='number' && isFinite(d.t)){
         const _off=pktT-d.t;
         let E=window.__ssTsEst;
         if(!E || Math.abs(_off-E.off)>5000){ E=window.__ssTsEst={off:_off}; } // init / clock-jump (reconnect) reset
@@ -5134,6 +5170,7 @@ async function pkConnect(roomId,gameToken,spectate){
         E.off+=(_off-E.off)*k;
         _bufT=d.t+E.off;                        // server timeline slewed onto the client clock (no steps)
       }
+      window.__ssLastBufT=_bufT;                // AFTER every branch — see the ordering note above
       // AFTER every branch that can move the stamp, so the buffer is always sized off the timeline
       // actually played back — whichever of the two stamping modes produced it.
       _noteStamp(_bufT);
