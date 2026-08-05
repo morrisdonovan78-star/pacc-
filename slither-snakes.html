@@ -2059,6 +2059,20 @@ function _perfUpdate(){
     // How much of the last minute your own head had no server data left and was coasting. The camera
     // is glued to that head, so this is literally "how much of the last minute the screen was
     // running on inference". >0 is normal on a lossy path; before the coast fix this was FROZEN time.
+    /*
+     * ⚠️ THE ROWS THAT DIAGNOSE A FREEZE AFTER THE FACT. Everything else here is a rolling window
+     * and therefore useless for a rare event — you had to screenshot within 60s of one. These
+     * persist for the whole session and name the cause, so ONE screenshot taken at any time is
+     * decisive instead of suggestive.
+     */
+    if(_FRZ.length){
+      rows.push(['<span style="color:#f66">FREEZES (worst this session)</span>','']);
+      _FRZ.slice(0,4).forEach(f=>rows.push(['&nbsp;&nbsp;'+f.at,
+        '<span style="color:#f66">'+f.ms+' ms</span> — <b>'+f.cause+'</b>'+
+        ' · frames '+f.frames+' · worst frame '+f.maxDt+'ms · pkts '+f.pkts+
+        (f.conn?'':' · <span style="color:#f66">SOCKET DOWN</span>')+
+        (f.rtt!=null?' · rtt '+f.rtt+'ms':'')]));
+    }
     if(_dryPrev!==null) rows.push(['coasting (no data)',
       (_dryPrev>2?'<span style="color:#f66">':'<span>')+_dryPrev.toFixed(2)+'% of frames</span>'+
       ' · longest '+(_dryWorstPrev>60?'<span style="color:#f66">':'<span>')+_dryWorstPrev.toFixed(0)+' ms</span>'+
@@ -2220,6 +2234,7 @@ function _notePacket(){
     // percentiles cannot see it. See _noteGapWorst.
     _noteGapWorst(gap);
   }
+  _pktSeq++;                        // monotonic — the freeze recorder needs "did ANY packet land"
   _pktLastT=now;
 }
 /*
@@ -2298,6 +2313,65 @@ function _noteMargin(m){
  * had a MAX gap of 177ms and froze the world 4% of all frames. So record the MAX, and record how
  * often the renderer actually had nothing left to draw.
  */
+/*
+ * ── AUTOMATIC FREEZE RECORDER — CATCH THE EVENT, WITH ITS CAUSE ATTACHED ──────────────────────
+ *
+ * ⚠️ WHY THIS EXISTS: every row in this panel is a ROLLING WINDOW, so diagnosing a freeze depended
+ * on the player screenshotting inside 60s of one. Two captured panels showed `WORST gap 190ms`,
+ * `stalls none`, `reconnects` absent — i.e. no 1-2s freeze happened while they were recording, and
+ * the reported multi-second freezes were never actually observed. A rolling average cannot diagnose
+ * a rare event. This records EVERY freeze as it happens and keeps the worst ones.
+ *
+ * A freeze is defined by what the player sees: THE DRAWN WORLD STOPPED. So it is detected from the
+ * camera, not from any network or CPU counter — those are what we then attribute it to.
+ *
+ * THE THREE CAUSES ARE MUTUALLY EXCLUSIVE AND THIS SEPARATES THEM:
+ *   • the renderer itself stopped  -> a single huge frame delta (tab throttle, main-thread block,
+ *     GPU stall, a long GC). `maxDt` is large.
+ *   • the renderer kept running but NO PACKETS ARRIVED -> data starvation (retransmit stall,
+ *     reconnect, server silence). `pkts` during the freeze is 0.
+ *   • the renderer ran AND packets arrived, yet the world stood still -> a LOGIC fault: state is
+ *     being received and not applied. Nothing network-side would ever fix that.
+ * Guessing between those three is exactly what has been going wrong; this measures it.
+ */
+const _FRZ=[];                       // worst freezes seen this session
+let _frzStill=0,_frzMaxDt=0,_frzFrames=0,_frzPkt0=0,_frzPktEnd=0,_frzPrevTs=0,_frzX=0,_frzY=0,_frzWasConn=true;
+let _pktSeq=0;                       // monotonic packet counter (F2's _netStat.pkts resets every 5s)
+function _freezeWatch(ts,camX,camY){
+  const dt=_frzPrevTs?ts-_frzPrevTs:0; _frzPrevTs=ts;
+  // Only meaningful while our own snake is actually supposed to be moving.
+  if(!SG||SG.over||_localDead||isSpectating||!dt){_frzStill=0;_frzMaxDt=0;_frzFrames=0;return;}
+  const moved=Math.hypot(camX-_frzX,camY-_frzY); _frzX=camX; _frzY=camY;
+  if(moved<0.05){                                    // world is not advancing this frame
+    if(!_frzStill){_frzPkt0=_pktSeq;_frzMaxDt=0;_frzFrames=0;_frzWasConn=!!(_sio&&_sio.connected);}
+    _frzStill+=dt; if(dt>_frzMaxDt)_frzMaxDt=dt; _frzFrames++;
+    /*
+     * ⚠️ Sampled on every STILL frame, not when the freeze ends. The packet that ARRIVES and ends
+     * the freeze must not be counted as having arrived during it — that off-by-one made a pure
+     * starvation freeze read `pkts 1` and misclassify as "DATA ARRIVED, WORLD STATIC", i.e. it
+     * blamed a logic fault for a network stall. Caught by the harness, not by reading the code.
+     */
+    _frzPktEnd=_pktSeq;
+  }else{
+    /*
+     * ⚠️ 100ms, NOT 250. The first version used 250 and the harness caught it: the freezes actually
+     * being reported measure ~150ms (the panel's own `coasting longest 150 ms`), so a 250ms bar
+     * silently recorded NOTHING for the exact fault it was built to find. 80ms stays unrecorded —
+     * that is a hiccup, not a freeze.
+     */
+    if(_frzStill>=100){                              // a tenth of a second of a still world IS a freeze
+      const pkts=_frzPktEnd-_frzPkt0;
+      const cause=(_frzMaxDt>200)?'RENDERER STALLED'
+                 :(pkts===0)?'NO DATA ARRIVED'
+                 :'DATA ARRIVED, WORLD STATIC';
+      _FRZ.push({ms:Math.round(_frzStill),maxDt:Math.round(_frzMaxDt),frames:_frzFrames,pkts,
+                 cause,conn:_frzWasConn,rtt:(typeof _ssRtt==='number'?Math.round(_ssRtt):null),
+                 at:new Date().toISOString().slice(11,19)});
+      _FRZ.sort((a,b)=>b.ms-a.ms); if(_FRZ.length>6)_FRZ.length=6;
+    }
+    _frzStill=0;_frzMaxDt=0;_frzFrames=0;
+  }
+}
 let _gapWorst=0,_gapWorstT=0;
 function _noteGapWorst(gap){
   const now=performance.now();
@@ -9655,6 +9729,10 @@ function rafDraw(ts){
     if(_spFound){_specPanInit=false;}
     else{ if(!_specPanInit){_specPanX=_camX;_specPanY=_camY;_specPanInit=true;} _camX=_specPanX;_camY=_specPanY; }
   }
+  // Records any stretch where the DRAWN WORLD stopped, and attributes it. Must sit here, after the
+  // camera is final for this frame, and must run every frame — including the frames where nothing
+  // moved, which are the ones being measured.
+  _freezeWatch(ts,_camX,_camY);
   // Zoom formula matched to MoneySlither's effective zoom level at 288 px/s.
   // Divisors 928/522 ≈ 1920/2.07 / 1080/2.07 — gives ~2.07× base vs damnbruh's 1/1920 formula,
   // so 288 px/s world speed looks as fast on screen as MoneySlither does.
