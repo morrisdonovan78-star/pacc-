@@ -1861,6 +1861,34 @@ function _perfFrameStart(ts){ if(!_perf.on)return; _perf.fStart=performance.now(
   _perf.lastTs=ts; _perf.snakes=0;_perf.segs=0;_perf.food=0; }
 function _perfFrameEnd(){ if(!_perf.on)return; _pmk(null); _perf.jsSum+=performance.now()-_perf.fStart; _perf.frames++; if(performance.now()-_perf.lastUpdate>500)_perfUpdate(); }
 /*
+ * ── THE TIME THE PANEL COULD NOT SEE ──────────────────────────────────────────────────────────
+ *
+ * ⚠️ `JS / frame` and every row under it are measured between _perfFrameStart and _perfFrameEnd —
+ * i.e. INSIDE rafDraw ONLY. Handling an incoming ss-state packet does not happen inside rafDraw; it
+ * happens in a socket.io callback, on the same main thread, at up to 60 times a second. So all of
+ * that work has always been invisible here, and `GPU/composite/idle` (frameInterval − JS) silently
+ * counted it as IDLE.
+ *
+ * That is why the panel kept reading perfectly healthy — "FPS 180, JS 0.70ms, stalls NONE" — for
+ * players who were plainly not having a healthy game, and why pressing F2 never got anyone closer
+ * to an answer. A number that is structurally incapable of showing the suspected cost cannot clear
+ * it. This row can, so the next screenshot from an affected player is decisive either way.
+ *
+ * Always on (two performance.now() calls per packet, ~120/s) so the history is already there the
+ * moment somebody opens the panel, exactly like the stall recorder.
+ */
+let _sockMs=0,_sockN=0,_sockT=0,_sockMax=0,_sockRate=0,_sockPeak=0,_sockPps=0;
+function _sockNote(ms){
+  const now=performance.now();
+  if(!_sockT)_sockT=now;
+  _sockMs+=ms; _sockN++; if(ms>_sockMax)_sockMax=ms;
+  const el=now-_sockT;
+  if(el>=1000){                       // 1s rolling window: report ms of main thread burned per second
+    _sockRate=_sockMs*1000/el; _sockPeak=_sockMax; _sockPps=_sockN*1000/el;
+    _sockMs=0; _sockN=0; _sockMax=0; _sockT=now;
+  }
+}
+/*
  * ── ALWAYS-ON STALL RECORDER ──────────────────────────────────────────────────────────────────
  *
  * "Ping is twice as bad at times and the FPS drops" is ONE symptom, not two: the ping shown in game
@@ -1992,7 +2020,34 @@ function _perfUpdate(){
   (function(){
     const g=_pktGaps.slice().sort((a,b)=>a-b);
     rows.push(['interp buffer',_interpDelay().toFixed(0)+' ms'+(_interpNow>_INTERP_MIN+0.5?' (adaptive)':'')]);
-    if(g.length>=20) rows.push(['packet gap p50/p95',g[Math.floor(g.length*0.5)].toFixed(0)+' / '+g[Math.floor(g.length*0.95)].toFixed(0)+' ms']);
+    if(g.length>=20){
+      const p50=g[Math.floor(g.length*0.5)], p95=g[Math.floor(g.length*0.95)], per=_pktPeriod();
+      rows.push(['packet gap p50/p95',p50.toFixed(0)+' / '+p95.toFixed(0)+' ms']);
+      /*
+       * THE ROW THAT NAMES THE PROBLEM. The server emits evenly, so if arrivals were even too, p50
+       * would sit at the period. p50 far BELOW the mean period means packets are coming out of a
+       * queue in clumps — the thing that makes a 60ms connection feel far worse than 60ms, because
+       * the state stream waits in that queue while the tiny ss-ping probe skips it.
+       */
+      const clumped=p50<per*0.6;
+      rows.push(['arrival',(clumped
+        ? '<span style="color:#f66">CLUMPED — '+p50.toFixed(0)+'ms bursts on a '+per.toFixed(0)+'ms stream</span>'
+        : 'even ('+per.toFixed(0)+' ms cadence)')]);
+      // The de-burst is the thing that repairs clumping. Say whether it is actually firing: it used
+      // to be spaced by the MEDIAN gap, which on a clumped stream is ~1ms, so it silently never did.
+      const stampG=_stampGaps.slice().sort((a,b)=>a-b);
+      if(stampG.length>=20) rows.push(['&nbsp;&nbsp;after de-burst',
+        stampG[Math.floor(stampG.length*0.5)].toFixed(0)+' / '+stampG[Math.floor(stampG.length*0.95)].toFixed(0)+' ms p50/p95']);
+    }
+    /*
+     * Socket work is main-thread work that rafDraw's timers cannot see (see _sockNote). At 240Hz the
+     * whole frame budget is 4.17ms, so a clumped connection delivering several queued packets into
+     * ONE task is enough to miss a vsync even though every row above still reads healthy.
+     */
+    if(_sockPps) rows.push(['socket JS (off-frame)',
+      (_sockRate>8?'<span style="color:#f66">':'<span>')+_sockRate.toFixed(1)+' ms/s</span>'+
+      ' · worst pkt '+(_sockPeak>2?'<span style="color:#f66">':'<span>')+_sockPeak.toFixed(2)+' ms</span>'+
+      ' · '+_sockPps.toFixed(0)+' pkt/s']);
   })();
   /*
    * WHAT IS ACTUALLY RUNNING. A stall count on its own says "something blocked the thread" but not
@@ -2116,17 +2171,58 @@ function _netStatHook(sio){
  */
 const _INTERP_MIN=28, _INTERP_MAX=110;
 let _pktGaps=[], _pktLastT=0, _interpNow=_INTERP_MIN, _interpTarget=_INTERP_MIN;
+let _pktGapSum=0;                 // running sum of _pktGaps → MEAN gap without re-walking the array
+/*
+ * ⚠️ THE MEAN GAP, NOT THE MEDIAN, IS THE BROADCAST PERIOD.
+ *
+ * Arrivals on a queued path are BIMODAL: packets come out of the bottleneck in clumps, so the gap
+ * distribution is a pile near 0 and a pile at the clump interval — measured on a real client as
+ * p50 = 1ms, p95 = 43ms, for a stream the server emits every 16.6ms. The median sits INSIDE the
+ * near-zero mode, so it reads ~1ms and is not the period at all. The mean is: total elapsed over
+ * total packets recovers 16.6ms whatever shape the clumping takes, because no packet is lost, only
+ * displaced in time. Kept as a running sum so this costs nothing per packet.
+ */
+function _pktPeriod(){ return _pktGaps.length?_pktGapSum/_pktGaps.length:1000/60; }
 function _notePacket(){
   const now=performance.now();
   if(_pktLastT){
     const gap=now-_pktLastT;
     // Ignore absurd gaps (tab throttled, alt-tabbed, a stall): they are not jitter and would
     // permanently inflate everyone's delay after one background moment.
-    if(gap<600){ _pktGaps.push(gap); if(_pktGaps.length>90)_pktGaps.shift(); }
+    if(gap<600){ _pktGaps.push(gap); _pktGapSum+=gap;
+      if(_pktGaps.length>90)_pktGapSum-=_pktGaps.shift(); }
   }
   _pktLastT=now;
-  if(_pktGaps.length>=20){
-    const s=_pktGaps.slice().sort((a,b)=>a-b);
+}
+/*
+ * ── HOW BIG THE BUFFER HAS TO BE: MEASURE THE PLAYOUT, NOT THE ARRIVALS ───────────────────────
+ *
+ * This used to size the buffer off the p95 of RAW ARRIVAL gaps. On a clumped connection that p95 is
+ * the SILENCE BETWEEN CLUMPS — but the clump is de-bursted back onto an even timeline below, so
+ * that silence is never something the interpolator actually has to survive. The buffer was being
+ * padded for a gap that no longer exists by the time anything is drawn, and the player pays for it
+ * in render lag: every remote snake is shown that much further behind where it really is.
+ *
+ * Harness (60s replay of the measured p50-1/p95-48ms clumping signature, client's own code):
+ *     sizing off raw arrivals → buffer 56ms, state shown 152ms old
+ *     sizing off the stamps   → buffer 40ms, state shown 147ms old, dry frames UNCHANGED (0.2%)
+ * 16ms of pure self-inflicted lag removed with no extra starvation — and that is on top of the
+ * queueing delay the food fix takes out of the connection itself.
+ *
+ * So the target is driven by the spacing of the stamps we will actually PLAY BACK. A connection
+ * that genuinely drops or reorders packets still leaves holes in the stamped timeline and still
+ * gets a bigger buffer; one that merely clumps no longer does.
+ * ⚠️ The floor is still exactly _INTERP_MIN — a clean connection is unchanged, byte for byte.
+ */
+let _stampGaps=[], _stampLastT=0;
+function _noteStamp(t){
+  if(_stampLastT){
+    const gap=t-_stampLastT;
+    if(gap<600){ _stampGaps.push(gap); if(_stampGaps.length>90)_stampGaps.shift(); }
+  }
+  _stampLastT=t;
+  if(_stampGaps.length>=20){
+    const s=_stampGaps.slice().sort((a,b)=>a-b);
     const p95=s[Math.floor(s.length*0.95)];
     // Cover the 95th-percentile gap. Anything rarer than that is worth one brief stall rather than
     // making every frame permanently later for everyone.
@@ -4796,6 +4892,8 @@ async function pkConnect(roomId,gameToken,spectate){
     // Server-authoritative state: head pos + angle per tick, no body segs
     _sio.on('ss-state',d=>{
       _notePacket();   // measure real snapshot spacing — drives the adaptive interpolation buffer
+      const _sockT0=performance.now();
+      try{
       if(!SG||SG.over)return;
       if(typeof d.ar==='number'&&d.ar>0)_arenaR=d.ar; // live (shrinking/expanding) border radius
       if(typeof d.acx==='number')_arenaCX=d.acx;         // anti-camp push — the ring itself moves
@@ -4807,9 +4905,13 @@ async function pkConnect(roomId,gameToken,spectate){
       if(_campPushing!==!!d.cpush){ _campPushing=!!d.cpush; if(_campPushing){ try{
         addToast(lobbyModeOf(pkRoomId)==='OG'?'⚠ ANTI-CAMP: THE ARENA IS MOVING':'⚠ ARENA ON THE MOVE','#FF6600',3000);
       }catch(_){} } }
-      // Sync food (sent every ~250ms or when changed)
+      // Food. `food` = full array (join, and the 250ms resync that heals any missed delta);
+      // `fa`/`fr` = the incremental adds-or-moves / removals that carry every change in between.
+      // A full array supersedes any deltas in the same packet, so it is checked first.
       if(d.food){
         SG.food=_mapServerFood(d.food);
+      }else if(d.fa||d.fr){
+        _applyFoodDelta(d.fa,d.fr);
       }
       if(d.tick!=null&&SG)SG.tick=d.tick; // keep SG.tick in sync so the elim dedup guard resets each server tick
       const pktT=Date.now(); // client receive-time — the buffer timestamp by default (known-good feel)
@@ -4837,11 +4939,21 @@ async function pkConnect(roomId,gameToken,spectate){
        * predecessor instead (never past its true arrival). Packets that arrive normally
        * spaced take the untouched arrival stamp — the healthy path is byte-identical.
        * Kill switch: window._DEBURST_OFF=true.
+       *
+       * ⚠️⚠️ IT WAS SPACING THE CLUMP BY THE MEDIAN GAP, WHICH ON A CLUMPED CONNECTION IS ~1ms —
+       * SO IT DID NOTHING, ON EXACTLY THE CONNECTIONS IT WAS WRITTEN FOR.
+       * Proved by replaying the measured arrival signature (p50 1ms / p95 48ms) through this very
+       * code: _DEBURST_OFF true vs false produced IDENTICAL output — 56ms buffer, state 152ms old,
+       * 0.2% dry frames, both ways. The trigger `gap < median*0.5` is `gap < 0.5ms`, which no packet
+       * ever satisfies, and even when it did the re-stamp moved it by the same useless ~1ms.
+       * The median is not the period (see _pktPeriod). Using the MEAN makes the trigger
+       * `gap < ~8ms` — a real test for "these two arrived together" — and re-stamps to the real
+       * ~16.6ms cadence, which is what actually spreads the clump back out.
        */
       if(!window._DEBURST_OFF && _pktGaps.length>=20){
-        const _sg=_pktGaps.slice().sort((a,b)=>a-b), _med=_sg[Math.floor(_sg.length*0.5)];
-        if(window.__ssLastBufT && pktT-window.__ssLastBufT<_med*0.5){
-          _bufT=Math.min(pktT+_med, window.__ssLastBufT+_med);
+        const _per=_pktPeriod();
+        if(window.__ssLastBufT && pktT-window.__ssLastBufT<_per*0.5){
+          _bufT=Math.min(pktT+_per, window.__ssLastBufT+_per);
         }
       }
       window.__ssLastBufT=_bufT;
@@ -4855,6 +4967,9 @@ async function pkConnect(roomId,gameToken,spectate){
         E.off+=(_off-E.off)*k;
         _bufT=d.t+E.off;                        // server timeline slewed onto the client clock (no steps)
       }
+      // AFTER every branch that can move the stamp, so the buffer is always sized off the timeline
+      // actually played back — whichever of the two stamping modes produced it.
+      _noteStamp(_bufT);
       const seen=new Set();
       (d.snakes||[]).forEach(sd=>{
         seen.add(sd.id);
@@ -4940,6 +5055,7 @@ async function pkConnect(roomId,gameToken,spectate){
           if(s._missedPkts>=2){s.alive=false;s.path=[];s._rtKf=null;_ssBuf.delete(id);s._missedPkts=0;}
         }else{s._missedPkts=0;}
       });
+      }finally{ _sockNote(performance.now()-_sockT0); }
     });
 
     _sio.on('gameover',()=>{
@@ -6153,7 +6269,8 @@ function getBodyPoints(snake,headAnchor){
   for(let o=0;o+1<vlen&&pts.length<target;o++){
     const pA=get(o),pB=get(o+1);
     const dx=pB.x-pA.x,dy=pB.y-pA.y;
-    const d=Math.hypot(dx,dy);
+    // sqrt, not Math.hypot — see the note above trimPath. Same value at these magnitudes, ~4x faster.
+    const d=Math.sqrt(dx*dx+dy*dy);
     if(d>0){
       while(pts.length<target&&cum+d>=spacing*pts.length){
         const frac=(spacing*pts.length-cum)/d;
@@ -6185,6 +6302,27 @@ function msThick(s){
 // points 2× farther apart, so the identical count suddenly covered 2× the distance → body
 // rendered fuller/longer; releasing boost truncated it again. Trimming by accumulated
 // distance keeps the rendered body length identical at any framerate and any boost state.
+/*
+ * ⚠️ Math.hypot IS NOT FREE, AND THIS LOOP RUNS OVER THE WHOLE PATH.
+ *
+ * trimPath, getBodyPoints and _getSegsFromPath each walk every stored path point, per snake, per
+ * frame. Measured in isolation at realistic densities, Math.hypot costs 4.4x what sqrt(dx*dx+dy*dy)
+ * costs for the identical result: at ns=300, 0.436ms vs 0.099ms per call.
+ *
+ * hypot exists to avoid overflow/underflow when the operands are near the limits of a double. These
+ * operands are the distance between two ADJACENT path points — about 1px, in a 3000px world. There
+ * is nothing to protect against, so all that is being bought is the slow path.
+ *
+ * ⚠️ AND THE WORK GROWS WITH REFRESH RATE. A path point is stored per rendered frame once the head
+ * has moved >0.3px, and the path is trimmed by DISTANCE — so at 288 px/s a 60Hz client stores points
+ * 4.8px apart and a 240Hz client stores them 1.2px apart: 4x the points over the same body, walked
+ * 4x as often. Measured for the three loops together, one snake, one frame:
+ *     ns=150:  60Hz  853 pts 0.048ms   |  240Hz 2909 pts 0.143ms
+ *     ns=300:  60Hz 2133 pts 0.104ms   |  240Hz 5869 pts 0.291ms
+ * so the highest-refresh players pay the most for it. Worst realistic case measured (4 snakes at
+ * ns=300, 240Hz) is 1.11ms/frame of a 4.17ms budget → 0.78ms after this change. Real, and worth
+ * having, but be honest about the size: this is headroom, NOT a fix for someone stuck at half rate.
+ */
 function trimPath(snake){
   const p=snake.path; if(!p||p.length<3)return;
   const r=sectionRadius(snake),spacing=r*SEGMENT_SPACING;
@@ -6194,7 +6332,8 @@ function trimPath(snake){
   const keep=maxSegs*spacing+spacing;
   let cum=0;
   for(let i=0;i+1<p.length;i++){
-    cum+=Math.hypot(p[i+1].x-p[i].x,p[i+1].y-p[i].y);
+    const dx=p[i+1].x-p[i].x, dy=p[i+1].y-p[i].y;
+    cum+=Math.sqrt(dx*dx+dy*dy);
     if(cum>=keep){p.length=i+2;return;}
   }
 }
@@ -6533,7 +6672,8 @@ function _getSegsFromPath(snake){
   let cum=0;
   for(let o=0;o+1<snake.path.length&&pts.length<maxSegs;o++){
     const dx=snake.path[o+1].x-snake.path[o].x,dy=snake.path[o+1].y-snake.path[o].y;
-    const d=Math.hypot(dx,dy);
+    // sqrt, not Math.hypot — see the note above trimPath. Same value at these magnitudes, ~4x faster.
+    const d=Math.sqrt(dx*dx+dy*dy);
     if(d>0){
       while(pts.length<maxSegs&&cum+d>=spacing*pts.length){
         const f=(spacing*pts.length-cum)/d;
@@ -9092,15 +9232,57 @@ function _guestPredictiveEat(my){
 
 // Map a raw server food packet to client objects, dropping regular pebbles we already predictively
 // ate locally so a stale snapshot can't flicker them back in. Money/kill orbs (f[4]) are ALWAYS kept.
+function _foodFromRow(f){
+  return {x:f[0],y:f[1],ci:f[2]||0,size:f[3]||6,k:f[4]||0,w:f[5]?f[5]/1e6:0,o:f[6]||0,ne:f[7]||0,id:f[8]||0};
+}
 function _mapServerFood(arr){
   const now=Date.now();
   for(const [k,v] of _eatenLocal)if(now>v)_eatenLocal.delete(k); // expire
   const out=[];
   for(const f of arr){
     if(!f[4]&&_eatenLocal.has(Math.round(f[0])+'_'+Math.round(f[1])))continue;
-    out.push({x:f[0],y:f[1],ci:f[2]||0,size:f[3]||6,k:f[4]||0,w:f[5]?f[5]/1e6:0,o:f[6]||0,ne:f[7]||0});
+    out.push(_foodFromRow(f));
   }
   return out;
+}
+/*
+ * ── FOOD DELTAS: THE SAME PICTURE, ~99% LESS OF IT ON THE WIRE ────────────────────────────────
+ *
+ * The server used to re-send the WHOLE ~68-133 orb array every time ONE pebble changed, at 60Hz —
+ * measured 108-206 KB/s per client. It now sends only what changed: `fa` = added-or-moved rows,
+ * `fr` = removed ids, with a full `food` array every 250ms as the heal path.
+ *
+ * ⚠️ THIS MUST NOT CHANGE WHAT ANYONE SEES. Every food change still arrives on the very same
+ * broadcast it always did — a pebble somebody else eats disappears on exactly the same packet as
+ * before, a gold orb dragged by the ring moves on exactly the same packet as before. Nothing is
+ * delayed, batched or throttled; the packet just no longer repeats the ~100 orbs that did not
+ * change. Positions, sizes, colours and pulse phase all key off the same fields as before.
+ *
+ * Ordering: a row in `fa` wins over `fr` for the same id in the same packet (removals are applied
+ * first), which is the only way an id could be recycled within one tick.
+ * Locally-predicted pickups keep their existing guard — the SAME `_eatenLocal` test the full-array
+ * path uses — so a delta cannot flicker back a pebble this client already ate. Money orbs (f[4])
+ * are never suppressed by it, exactly as before.
+ */
+function _applyFoodDelta(fa,fr){
+  if(!SG||!SG.food)return;
+  const now=Date.now();
+  for(const [k,v] of _eatenLocal)if(now>v)_eatenLocal.delete(k); // expire, same as the full path
+  if(fr&&fr.length){
+    const gone=new Set(fr);
+    for(let i=SG.food.length-1;i>=0;i--)if(gone.has(SG.food[i].id))SG.food.splice(i,1);
+  }
+  if(fa&&fa.length){
+    // index once: applying N changes to M orbs must not be N*M
+    const byId=new Map();
+    for(let i=0;i<SG.food.length;i++)byId.set(SG.food[i].id,i);
+    for(const row of fa){
+      if(!row[4]&&_eatenLocal.has(Math.round(row[0])+'_'+Math.round(row[1])))continue;
+      const f=_foodFromRow(row), at=byId.get(f.id);
+      if(at===undefined){ byId.set(f.id,SG.food.length); SG.food.push(f); }
+      else SG.food[at]=f;
+    }
+  }
 }
 
 // ══ RENDERING ════════════════════════════════════════════════
