@@ -1270,7 +1270,7 @@ body.mctl #voice-speakers{left:150px;}
     </div>
     <div style="margin-bottom:11px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span style="color:#FF8C00;" title="KILL DEPTH: how far a CIRCLING snake must be driven into YOUR trail before it dies, in literal px. LOWER = kills land sooner. This is the one you turn DOWN to make kills easier. Completely independent of Graze room above — moving either one does not move the other. Identical at every size, for both snakes.">② Kill depth (px)</span><span id="tun-kill-val" style="color:#FF8C00;min-width:44px;text-align:right;">4.30 px</span></div>
-      <input type="range" id="tun-killSink" min="0.1" max="20" step="0.01" value="2.65" oninput="_onTuning()" style="width:100%;accent-color:#FF8C00;">
+      <input type="range" id="tun-killSink" min="0.1" max="20" step="0.01" value="2.55" oninput="_onTuning()" style="width:100%;accent-color:#FF8C00;">
       <div style="display:flex;justify-content:space-between;font-size:9px;color:#333;"><span>0.1 = dies on contact</span><span>20 = almost unkillable</span></div>
     </div>
     <div style="font-size:9px;color:#6a6a8a;margin:-4px 0 10px;line-height:1.5;">
@@ -2038,7 +2038,31 @@ function _perfUpdate(){
       const stampG=_stampGaps.slice().sort((a,b)=>a-b);
       if(stampG.length>=20) rows.push(['&nbsp;&nbsp;after de-burst',
         stampG[Math.floor(stampG.length*0.5)].toFixed(0)+' / '+stampG[Math.floor(stampG.length*0.95)].toFixed(0)+' ms p50/p95']);
+      /*
+       * THE ROW THAT SHOWS A FREEZE. Everything above can read perfectly while the world stops:
+       * margin is how much real data is still ahead of the render clock, and if it reaches 0 there
+       * is nothing left to interpolate toward. This is what the adaptive buffer now steers on.
+       */
+      if(_marginPrev!==null) rows.push(['&nbsp;&nbsp;worst data margin',
+        (_marginPrev<2?'<span style="color:#f66">':'<span>')+_marginPrev.toFixed(0)+' ms</span>'+
+        (_marginPrev<0?' <span style="color:#f66">— WORLD RAN DRY</span>':'')]);
+      /*
+       * ⚠️ THE ROW THE PERCENTILES CANNOT REPLACE. The high-ping freeze is a TCP retransmit holding
+       * the whole stream for ~1 RTT — roughly 0.5% of packets, so it never reaches p95. A player can
+       * show a screenshot reading p50 16 / p95 19ms while the screen is visibly freezing. This is the
+       * number that tells them apart.
+       */
+      rows.push(['&nbsp;&nbsp;WORST gap (60s)',
+        (_gapWorst>90?'<span style="color:#f66">':'<span>')+_gapWorst.toFixed(0)+' ms</span>'+
+        (_gapWorst>90?' <span style="color:#f66">— stream stalled ~1 RTT (TCP retransmit)</span>':'')]);
     }
+    // How much of the last minute your own head had no server data left and was coasting. The camera
+    // is glued to that head, so this is literally "how much of the last minute the screen was
+    // running on inference". >0 is normal on a lossy path; before the coast fix this was FROZEN time.
+    if(_dryPrev!==null) rows.push(['coasting (no data)',
+      (_dryPrev>2?'<span style="color:#f66">':'<span>')+_dryPrev.toFixed(2)+'% of frames</span>'+
+      ' · longest '+(_dryWorstPrev>60?'<span style="color:#f66">':'<span>')+_dryWorstPrev.toFixed(0)+' ms</span>'+
+      (window._COAST_OFF?' <span style="color:#f66">(COAST OFF — these were freezes)</span>':'')]);
     /*
      * Socket work is main-thread work that rafDraw's timers cannot see (see _sockNote). At 240Hz the
      * whole frame budget is 4.17ms, so a clumped connection delivering several queued packets into
@@ -2191,6 +2215,10 @@ function _notePacket(){
     // permanently inflate everyone's delay after one background moment.
     if(gap<600){ _pktGaps.push(gap); _pktGapSum+=gap;
       if(_pktGaps.length>90)_pktGapSum-=_pktGaps.shift(); }
+    // ⚠️ Recorded OUTSIDE the <600ms filter above and outside the percentile window: the gap that
+    // actually freezes the screen is a rare TCP retransmit stall, and the whole point is that the
+    // percentiles cannot see it. See _noteGapWorst.
+    _noteGapWorst(gap);
   }
   _pktLastT=now;
 }
@@ -2229,6 +2257,71 @@ function _noteStamp(t){
     _interpTarget=Math.max(_INTERP_MIN,Math.min(_INTERP_MAX,Math.ceil(p95)+8));
   }
 }
+/*
+ * ── MARGIN: THE NUMBER THAT SHOWS A FREEZE. MEASUREMENT ONLY — IT DOES NOT STEER ANYTHING. ────
+ *
+ * MARGIN = (newest stamp we hold − the render clock) = how much real data is still ahead of what we
+ * are drawing. If it reaches 0 the world has nothing left to move toward and stops, while FPS, JS
+ * time and packet spacing all keep reading perfectly. So it is worth showing in F2.
+ *
+ * ⚠️ I TRIED TO DRIVE THE ADAPTIVE BUFFER FROM THIS AND IT WAS WRONG BOTH TIMES — DO NOT RETRY IT
+ * WITHOUT READING THIS.
+ *  1. Symmetric gain-1 correction against a window-lagged measurement is an OSCILLATOR: when the
+ *     margin looked comfortable it cut the delay by the whole surplus, ran dry, climbed back.
+ *     Measured WORSE than doing nothing — dry frames 0.3% -> 0.9% on 4-packet bursts.
+ *  2. Fast-attack/slow-decay fixed the hunting but still did not beat the shipped stamp-p95 sizing:
+ *     3-packet bursts, min margin 8.7ms -> 1.7ms; 4-packet, 8.6ms -> 4.6ms with MORE delay (56 ->
+ *     64ms). Worse on both axes.
+ * And the premise was wrong anyway. The negative margins that started this (-0.5 / -20 / -35.7ms)
+ * were measured across the buffer's initial CONVERGENCE. ⚠️ Excluding the warm-up, the shipped
+ * stamp-p95 sizing already holds 0.0% dry frames with min margin 8.6-11.4ms on every burst pattern
+ * tested. There was no steady-state defect to fix.
+ * ⚠️ LESSON: measure steady state separately from warm-up before calling a control loop broken.
+ */
+const _MARGIN_WIN_MS=1500;       // how far back "worst recent margin" looks
+let _marginCur=1e9, _marginPrev=null, _marginT=0;
+function _noteMargin(m){
+  // A huge swing is a stall/alt-tab catching up, not jitter. Same reasoning as the 600ms gap cut-off.
+  if(m<-600||m>600)return;
+  if(m<_marginCur)_marginCur=m;
+  const now=performance.now();
+  if(!_marginT){_marginT=now;return;}
+  if(now-_marginT>=_MARGIN_WIN_MS){ _marginPrev=_marginCur; _marginCur=1e9; _marginT=now; }
+}
+/*
+ * ── THE TWO NUMBERS THAT MAKE THE HIGH-PING FREEZE VISIBLE ────────────────────────────────────
+ *
+ * ⚠️ PERCENTILES ARE STRUCTURALLY BLIND TO THIS FAULT — same lesson as `JS / frame` being unable to
+ * see socket time. The freeze is a TCP retransmit stalling the stream for ~1 RTT. At 60 pkt/s a
+ * 0.5%-loss connection does that about 18 times a minute, which is ~0.5% of packets: it never
+ * reaches p95. Measured on the real code, a connection whose gaps read a healthy p50 16 / p95 19ms
+ * had a MAX gap of 177ms and froze the world 4% of all frames. So record the MAX, and record how
+ * often the renderer actually had nothing left to draw.
+ */
+let _gapWorst=0,_gapWorstT=0;
+function _noteGapWorst(gap){
+  const now=performance.now();
+  if(gap<2000&&gap>_gapWorst)_gapWorst=gap;          // <2s: a retransmit stall, not an alt-tab
+  if(now-_gapWorstT>60000){_gapWorst=gap<2000?gap:0;_gapWorstT=now;}
+}
+// How much of the last 60s the LOCAL player's own head had no data to move toward and was coasting.
+// Own snake matters most: the camera is glued to it, so its dry frames are the whole screen.
+let _dryFrames=0,_dryTotal=0,_dryRunT=0,_dryWorst=0,_dryT=0,_dryPrev=null,_dryWorstPrev=0,_dryLastTs=0;
+function _noteDry(isOwn,dry,ts){
+  if(!isOwn)return;
+  const dt=_dryLastTs?Math.min(100,ts-_dryLastTs):0; _dryLastTs=ts;
+  _dryTotal++;
+  // Measure the outage in WALL TIME, not frames: a frame count means nothing without the refresh
+  // rate, and this number has to be comparable between a 60Hz and a 240Hz player.
+  if(dry){_dryFrames++;_dryRunT+=dt;if(_dryRunT>_dryWorst)_dryWorst=_dryRunT;}else _dryRunT=0;
+  const now=performance.now();
+  if(!_dryT){_dryT=now;return;}
+  if(now-_dryT>=60000){
+    _dryPrev=_dryTotal?100*_dryFrames/_dryTotal:0;
+    _dryWorstPrev=_dryWorst;
+    _dryFrames=0;_dryTotal=0;_dryWorst=0;_dryT=now;
+  }
+}
 // Ease toward the target. A step change in how far behind we render would be a visible jump in every
 // other player's position, so it is walked there ~1ms per frame instead.
 function _interpDelay(){
@@ -2256,7 +2349,7 @@ let _tuning={hbs:1.07,hhbs:1.18,faceDeg:75,rule:'smallest_wins'};
 // SINGLE SOURCE OF TRUTH for test-lobby defaults — RESET restores exactly this, so it always
 // reflects the CURRENT code defaults (bump these when the mechanic's defaults change).
 // bodyScale = circle skim HITBOX scale (×circler head); grazePx = circle skim MARGIN px.
-const _TEST_DEFAULTS={grazePx:4.2, killSink:2.65, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, grazeScaleK:1.15, circDeg:360, faceDeg:60, n2nScale:0.30, rule:'biggest_wins', dbg:false};
+const _TEST_DEFAULTS={grazePx:4.2, killSink:2.55, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, grazeScaleK:1.15, circDeg:360, faceDeg:60, n2nScale:0.30, rule:'biggest_wins', dbg:false};
 // The LIVE locked collision values (server ssGames tuning) — what every lobby actually runs. The owner
 // panel seeds from these so the sliders show the REAL current settings, not the test-lobby defaults.
 // THE canonical live combat values — the single definition of "what it is supposed to be".
@@ -2265,7 +2358,7 @@ const _TEST_DEFAULTS={grazePx:4.2, killSink:2.65, grazeHead:1.20, bodyScale:0.75
 // ── THE LOCKED COMBAT SET (owner, 2026-07-31) ────────────────────────────────────────────────
 // What every lobby on every node runs, and EXACTLY what RESET restores — and RESET pushes to
 // every region, not just the one you are on. MUST match SS_TUNING_DEFAULT on the server.
-const _LIVE_TUNING_DEFAULTS={grazePx:4.2, killSink:2.65, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, grazeScaleK:1.15, circDeg:360, faceDeg:21, n2nScale:0.30, rule:'biggest_wins', dbg:false};
+const _LIVE_TUNING_DEFAULTS={grazePx:4.2, killSink:2.55, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, grazeScaleK:1.15, circDeg:360, faceDeg:21, n2nScale:0.30, rule:'biggest_wins', dbg:false};
 let _ownerTuneSeeded=false; // seeded the owner panel with the live values yet this page-load?
 let _tuningTest={..._TEST_DEFAULTS};
 let _grazeViz=false; // owner on-screen graze debug visualization toggle (test lobby)
@@ -6882,7 +6975,7 @@ const _GRAZE_ANCHOR_KILLER_NS=26, _GRAZE_ANCHOR_TARGET_NS=30;
 // MUST match SS_GRAZE_KILL_SINK on the server. KILL DEPTH IS FIXED and is NOT what grazePx moves:
 // grazePx buys ROOM (how deep you may be inside a circler's body and live) — see the server's
 // collision site. They are two different tests with a different snake in the victim slot.
-const _GRAZE_KILL_SINK=2.65;
+const _GRAZE_KILL_SINK=2.55;
 // MUST match SS_GRAZE_NECK_PTS * SS_POINT_DIST on the server (20 * 1.6).
 const _GRAZE_NECK_PX=32;
 // sink = (Ra + Rd) - killDist = how deep a graze visibly sinks in before it kills. It is ONE number
@@ -6898,7 +6991,7 @@ function _grazeMargin(RaBase,Rd,gPx,gHead,gBody,gScaleK,aCirc){
   const want=aCirc?(_tuningTest.killSink!=null?+_tuningTest.killSink:_GRAZE_KILL_SINK):_grazeSinkRef(gPx);
   return want-(1-gHead)*RaBase-(1-gBody)*Rd;
 }
-const _PT={ grazePx:4.2, killSink:2.65, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
+const _PT={ grazePx:4.2, killSink:2.55, grazeHead:1.20, bodyScale:0.75, grazeReach:1.00, circDeg:360, faceDeg:21, grazeScaleK:1.15, rule:'biggest_wins' };
 const _PNOSE_ARC=20.1*Math.PI/180;
 // per-tick circle detection (port of server ssUpdateCircleState; server runs per-substep @60Hz, practice
 // per-tick @30Hz, so the "not turning" floor is doubled — winding still arms after one full circDeg loop).
@@ -8072,7 +8165,7 @@ function _syncTuningUI(){
     gv('tun-grazeHead',_tuningTest.grazeHead??1); if(e('tun-grazehead-val'))e('tun-grazehead-val').textContent=(_tuningTest.grazeHead??1).toFixed(2)+'×';
     gv('tun-bodyScale',_tuningTest.bodyScale); if(e('tun-body-val'))e('tun-body-val').textContent=(_tuningTest.bodyScale??1).toFixed(2)+'×';
     gv('tun-grazeReach',_tuningTest.grazeReach??1); if(e('tun-grazereach-val'))e('tun-grazereach-val').textContent=(_tuningTest.grazeReach??1).toFixed(2)+'×';
-    gv('tun-killSink',_tuningTest.killSink??2.65); if(e('tun-kill-val'))e('tun-kill-val').textContent=(+(_tuningTest.killSink??2.65)).toFixed(2)+' px';
+    gv('tun-killSink',_tuningTest.killSink??2.55); if(e('tun-kill-val'))e('tun-kill-val').textContent=(+(_tuningTest.killSink??2.55)).toFixed(2)+' px';
     gv('tun-grazeScaleK',_tuningTest.grazeScaleK??0.75); if(e('tun-grazescalek-val'))e('tun-grazescalek-val').textContent=(_tuningTest.grazeScaleK??0.75).toFixed(2);
     gv('tun-circDeg',_tuningTest.circDeg);   if(e('tun-circ-val'))e('tun-circ-val').textContent=(_tuningTest.circDeg||360)+'°';
     gv('tun-faceDegT',_tuningTest.faceDeg);  if(e('tun-faceT-val'))e('tun-faceT-val').textContent=_tuningTest.faceDeg+'°';
@@ -9324,6 +9417,10 @@ function rafDraw(ts){
   // Remote snake advancement: snapshot interpolation (live) or dead-reckoning (practice bots)
   if(SG&&!SG.over){
     const _renderT=Date.now()-_interpDelay();
+    // How much real data is still ahead of the render clock. `__ssLastBufT` is the newest stamp we
+    // have assigned, in the same Date.now() domain as _renderT, and every snake rides the same
+    // packet — so one reading per frame describes the whole world. Drives the adaptive buffer.
+    if(window.__ssLastBufT)_noteMargin(window.__ssLastBufT-_renderT);
     SG.snakes.forEach(s=>{
       if((s.id===myPid&&(window._OWN_PRED_ON||_isPractice))||!s.alive)return;
       const buf=_ssBuf.get(s.id);
@@ -9414,13 +9511,82 @@ function rafDraw(ts){
         // clamped trail point for frac≤1), so drawing the head there de-quantizes it to a smooth 60fps
         // glide with NO timing change, NO added input delay, and NO collision change (trail/body still
         // accumulate on the gated s.path; only the transient rendered head slot moves).
-        if(window._EXTRAP_ON){
-          const _snapAge=Math.min(Math.max(0,Date.now()-latest.t),TICK_MS);
-          const _exSpd=(latest.boost?BOOST_SPD:SNAKE_SPD)*(_snapAge/TICK_MS);
-          s._exHead={x:ix+Math.cos(latest.angle)*_exSpd,y:iy+Math.sin(latest.angle)*_exSpd};
-        } else {
-          s._exHead={x:ix,y:iy};
+        /*
+         * ── COAST: NEVER LET THE RENDERED HEAD STOP. THIS IS THE HIGH-PING HITCH FIX. ───────────
+         *
+         * THE BUG: `frac` is hard-capped at 1.5, i.e. the head may extrapolate at most half a
+         * broadcast (~8ms) past the newest snapshot and then it simply STOPS. Own-snake local
+         * prediction is off by default (see the _OWN_PRED_ON note above), so EVERY snake — including
+         * your own — and therefore `_camX/_camY`, which is glued to this exact `_exHead`, is driven
+         * solely by this buffer. One silent gap longer than the interp buffer and THE WHOLE SCREEN
+         * FREEZES while FPS, JS/frame and stalls all keep reading perfect.
+         *
+         * ⚠️ WHAT MAKES THE GAP: WebSocket rides TCP, and TCP is IN-ORDER. One lost segment holds
+         * every segment behind it in the kernel until the retransmit lands — about one RTT. So the
+         * freeze is ~1 RTT long: at 15ms ping it is an invisible blip, at 119ms ping it is a
+         * SPLIT-SECOND FULL-SCREEN FREEZE. That is why this is a high-ping-only symptom, and why
+         * "the server isn't good enough" is the wrong read — the server sent those packets on time.
+         *
+         * ⚠️ p50/p95 CANNOT SHOW THIS and neither can a bigger buffer. Measured on the real client
+         * code (scratchpad/hitch5.js, 180s, 119ms RTT, 0.5% loss): raw gaps read p50 16ms / p95 19ms
+         * — perfectly healthy — while the MAX gap was 177ms. A 1-in-200 event never reaches p95, so
+         * sizing the buffer off p95 can never cover it; covering it by buffer alone would mean
+         * adding ~150ms of permanent lag for every player on every connection.
+         *
+         * THE FIX: when the render clock passes the newest snapshot, keep moving along the last
+         * KNOWN-GOOD server heading at the server's own speed constant, budget-capped. This is not
+         * input prediction and it does not touch server authority — it continues the last thing the
+         * server actually told us, for the length of the outage only, and stops the instant real
+         * data resumes. Same thing slither-likes do: high ping feels DELAYED, never frozen.
+         *
+         * ⚠️ COAST ON HEADING x SPEED, NOT ON A FINITE-DIFFERENCE VELOCITY. The first version used
+         * (latest - a)/(latest.t - a.t); on a CLUMPED stream that denominator collapses toward ~1ms
+         * while the numerator is a whole broadcast of travel, so the implied speed exploded and the
+         * head flew 459px off truth. Heading x the same constant the server integrates is
+         * physically incapable of outrunning the snake.
+         *
+         * Measured, shipped code vs this, 119ms RTT + 0.5% loss, 180s at 240fps:
+         *     frozen frames   4.03%  -> 0.03%      worst freeze  138ms -> 4ms
+         *     freezes/min      18.7  -> 0.0        speed CV       1.13 -> 1.08
+         *     err vs truth    20.3px -> 18.1px mean, 25.7 -> 21.7 p95, 64 -> 40px MAX
+         * ⚠️ Note the error columns: coasting is CLOSER to the server's true position than freezing
+         * is, so this NARROWS the render-vs-collision gap rather than widening it. A frozen head is
+         * not a safe head — it is a head that is wrong and standing still.
+         * Clean LAN connection is byte-identical on every metric (regression guard in hitch5.js).
+         * Kill switch: window._COAST_OFF=true.
+         */
+        const _over=_renderT-latest.t;
+        if(_over>0 && !window._COAST_OFF){
+          /*
+           * 360ms of outage covered. Swept 120/200/280/360/500 against the real block: on the
+           * reported 119ms-RTT connection everything >=200 is identical, and on a 250ms-RTT /1.5%-loss
+           * path 360 is strictly better than 200 on EVERY column (frozen 5.37%->0.10%, worst freeze
+           * 121->21ms, err p95 57.6->44.8px, err MAX unchanged at 135px) with clean-LAN untouched.
+           * 500 measured identical to 360, so 360 is the knee — past it nothing is left to cover.
+           */
+          const _budget=(typeof window._COAST_MS==='number')?window._COAST_MS:360; // ms of outage we cover
+          const _k=Math.min(_over,_budget);
+          const _spd=(latest.boost?BOOST_SPD:SNAKE_SPD)/TICK_MS;                    // px per ms, server's own constant
+          s._exHead={x:latest.x+Math.cos(latest.angle)*_spd*_k,y:latest.y+Math.sin(latest.angle)*_spd*_k};
+          s._coastDry=true;
+        }else{
+          /*
+           * Real data again. Do NOT snap: adopt the visual error we accumulated while coasting as an
+           * offset and bleed it out ~10%/frame, so catching up is a glide. Without this the head
+           * teleports back the instant the retransmit lands — trading one freeze for one lurch,
+           * which is the sawtooth every earlier extrapolation attempt died on.
+           */
+          if(s._coastDry&&s._exHead){s._coastOffX=s._exHead.x-_bx;s._coastOffY=s._exHead.y-_by;}
+          s._coastDry=false;
+          if(s._coastOffX||s._coastOffY){
+            const _d=Math.pow(0.90,Math.max(0.25,Math.min(4,(ts-(s._coastTs||ts))/16.667)));
+            s._coastOffX*=_d;s._coastOffY*=_d;
+            if(Math.abs(s._coastOffX)<0.05&&Math.abs(s._coastOffY)<0.05){s._coastOffX=0;s._coastOffY=0;}
+          }
+          s._exHead={x:ix+(s._coastOffX||0),y:iy+(s._coastOffY||0)};
         }
+        s._coastTs=ts;
+        _noteDry(s.id===myPid, s._coastDry, ts);
       }else if(buf&&buf.length===1){
         // 1 snapshot — extrapolate forward from snapshot so snake appears + moves immediately.
         // Without this, new snakes are frozen at their seed position until the 2nd packet.

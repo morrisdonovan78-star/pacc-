@@ -83,7 +83,7 @@ const SS_GRAZE_NECK_PTS = 20;
 // made your kills need that much more graze - the owner's exact complaint, and it was real.
 // Split, grazePx buys room to work with WITHOUT moving how far a circler must be driven to die.
 // Still symmetric: every player gets the same room and every circler dies at the same depth.
-const SS_GRAZE_KILL_SINK = 2.65;    // px, every size (owner-locked 2026-07-31)
+const SS_GRAZE_KILL_SINK = 2.55;    // px, every size (owner-locked 2026-07-31)
 const SS_GRAZE_ANCHOR_KILLER_NS = 26;
 const SS_GRAZE_ANCHOR_TARGET_NS = 30;
 // Runtime hitbox changes are refused outright while this is true - see the ss-tune handler.
@@ -93,7 +93,7 @@ const SS_TUNE_LOCKED = false;   // owner panel ENABLED - ssOwnerVerify (ed25519 
 // restores. Kept here as well as in ss-tuning.json so a fresh boot, a rebuilt node, or a lobby
 // created before any save has ever happened all start in the same place - the saved file is a
 // cache of the owner's last change, never the only record of what the game is meant to be.
-let SS_TUNING_DEFAULT = { grazePx: 4.2, killSink: 2.65, grazeHead: 1.20, bodyScale: 0.75, grazeReach: 1.00, grazeScaleK: 1.15, circDeg: 360, faceDeg: 21, n2nScale: 0.30, rule: 'biggest_wins' };
+let SS_TUNING_DEFAULT = { grazePx: 4.2, killSink: 2.55, grazeHead: 1.20, bodyScale: 0.75, grazeReach: 1.00, grazeScaleK: 1.15, circDeg: 360, faceDeg: 21, n2nScale: 0.30, rule: 'biggest_wins' };
 // Load the owner's saved tuning. This USED to run right here as a bare try-block, and it threw on
 // every single boot: `fs` is declared ~270 lines below and ssClampTuning falls back to SS_CAMP_*_D
 // constants declared ~950 lines below, and a hoisted `const` is not initialised until its line runs.
@@ -275,6 +275,8 @@ function ssRoamDepart(sg, maxOff, baseShrink) {
   // the border jump mid-flight whenever someone died or joined, and would break the guarantee
   // that the squeeze lands exactly on arrival (it is driven by fraction-of-distance-covered).
   sg.roamShrinkMax = ssRoamDepth(sg, baseShrink);   // recomputed live each tick too
+  sg.roamShrinkCur = sg.roamShrinkMax;   // the PACED value the ring actually uses (ssCampPush)
+  sg.roamDepthT = Date.now();
   sg.roamPhase = 'moving';
   sg.roamT = 0;
 }
@@ -410,7 +412,32 @@ function ssCampPush(sg, dt) {
   const baseShrink = SS_CAMP_SHRINKMAX_D;
   // LIVE depth - answers a join/quit/cash-out on the very next tick. During 'hold' the squeeze
   // is forced to 0 regardless, so this only has an effect while moving or regrowing.
-  const shrinkMax = ssRoamDepth(sg, baseShrink);
+  // DEPTH STILL SCALES WITH THE LIVE PLAYER COUNT, unchanged - a death deepens the ring, a join
+  // opens it up, and the hop ends at exactly the depth the count says it should. What is capped
+  // is how fast it may DEEPEN. A border kill used to move the target in a single step and
+  // arenaR, chasing at SS_ROAM_TRACK while roaming, lunged after it at ~360px/s - that lurch is
+  // the 'the border speeds up when someone dies to it' report. Deepening now runs at
+  // SS_ROAM_DEPTH_RATE, the pace the cycle closes at anyway, so the ring lands on the SAME
+  // radius without ever moving faster than normal. Shallower is still instant, so a JOIN opens
+  // the map on the very next tick.
+  // Deepening is deferred until the hop has ARRIVED. While 'moving' the squeeze is already
+  // ramping with distance covered, so adding to it there stacks two closings on top of each
+  // other; done from 'settle' onward the ring simply carries on closing at the speed it was
+  // already doing, and 'settle' below waits for the ease to land before handing off to regrow.
+  let shrinkMax = ssRoamDepth(sg, baseShrink);
+  if (sg.roamPhase && sg.roamPhase !== 'hold') {
+    // WALL CLOCK, not dt - ssTick hands this function dt=1/60 while really running at ~30Hz,
+    // so anything integrating dt runs at about half real time (see the phase-timer note below).
+    const _dms = Math.min(250, Math.max(0, now - (sg.roamDepthT || now)));
+    sg.roamDepthT = now;
+    if (sg.roamShrinkCur == null || shrinkMax <= sg.roamShrinkCur) sg.roamShrinkCur = shrinkMax;
+    else if (sg.roamPhase !== 'moving')
+      sg.roamShrinkCur = Math.min(shrinkMax, sg.roamShrinkCur + SS_ROAM_DEPTH_RATE * _dms / 1000);
+    sg.roamDepthWant = shrinkMax;   // where the count says it is going; 'settle' waits for it
+    shrinkMax = sg.roamShrinkCur;
+  } else {
+    sg.roamShrinkCur = shrinkMax; sg.roamDepthWant = shrinkMax; sg.roamDepthT = now;
+  }
   const regrowMs  = Math.max(100, ssCampTune(sg, 'roamRegrowSec', SS_ROAM_REGROW_D) * 1000);
   const holdMs    = Math.max(0, ssCampTune(sg, 'roamHoldSec', SS_ROAM_HOLD_D) * 1000);
 
@@ -456,7 +483,8 @@ function ssCampPush(sg, dt) {
     sg.cvx = 0; sg.cvy = 0;
     sg.campPushing = false;
     const want = SS_ARENA_R * (1 - Math.min(0.8, (sg.shrinkPct || 0) + shrinkMax));
-    if ((sg.arenaR || SS_ARENA_R) <= want + 3 || now >= (sg.roamUntil || 0)) {
+    const _depthLanded = sg.roamDepthWant == null || shrinkMax >= sg.roamDepthWant - 1e-6;
+    if (((sg.arenaR || SS_ARENA_R) <= want + 3 && _depthLanded) || now >= (sg.roamUntil || 0)) {
       sg.roamPhase = 'regrow'; sg.roamUntil = now + regrowMs;
     }
   } else if (sg.roamPhase === 'regrow') {
@@ -503,7 +531,8 @@ function ssCampPush(sg, dt) {
           const _rr = _fullR * Math.sqrt(0.18 + 0.82 * Math.random());
           f.x = _cx2 + Math.cos(_a) * _rr; f.y = _cy2 + Math.sin(_a) * _rr;
         }
-        if (_idx.length > _keep) sg._foodDirty = true;
+        // No _foodDirty: the diff ships every moved pebble on the next broadcast, so the respread
+        // lands on screen exactly when it always did - just as ~N changed rows, not the whole array.
       } catch (e) { /* a respread must never break the sim */ }
     }
   } else {
@@ -994,7 +1023,11 @@ const SS_BORDER_SHRINK_OUT   = SS_ARENA_R * 0.0009; // outward ease-back/tick (~
 // clamps to targetR, so a faster rate can never overshoot. Applies ONLY while roaming, so the
 // death-shrink ease-back keeps its original gentle feel.
 const SS_ROAM_TRACK     = SS_ARENA_R * 0.004;   // px/tick (~325px/s) while the arena is roaming
-const SS_ROAM_SETTLE_MS = 3000;                 // safety cap on the 'settle' wait (see ssCampPush)
+const SS_ROAM_SETTLE_MS = 6000;                 // safety cap on the 'settle' wait (see ssCampPush)
+// How fast the live-count depth may DEEPEN, in shrink-fraction per SECOND. 0.04 is ~120px/s at
+// SS_ARENA_R, which is the pace the cycle closes at anyway - so a death changes WHERE the ring
+// ends up (same as always) but never HOW FAST it gets there. Getting shallower is not paced.
+const SS_ROAM_DEPTH_RATE = 0.04;
 
 const SS_MAX_TURN      = 0.274;   // rad/tick — client MAX_TURN
 
@@ -1228,6 +1261,15 @@ function ssAngleDiff(a, b) {
 
 // `lam` is the orb's share of a dead player's stake in LAMPORTS — the authoritative money figure.
 // `w` is the same value in USD and exists only so the client can draw it; see the lamport ledger note.
+/*
+ * ── EVERY FOOD ITEM CARRIES A STABLE ID ──────────────────────────────────────────────────────
+ * Only so ssBroadcastState can DIFF the array and send what changed instead of all of it (see the
+ * long note there). Nothing reads it for gameplay, it is never used for collision or payout, and
+ * it is monotonic per process so two orbs can never collide even across lobby resets.
+ * EVERY food object in the game is built here - ssMakeFoodSpread ends in `return ssMakeFood(...)`
+ * and every other site calls ssMakeFood directly - so stamping it here cannot miss one.
+ */
+let _ssFoodSeq = 1;
 function ssMakeFood(x, y, k, w, o, ne, lam) {
 
   if (x == null) {
@@ -1244,7 +1286,7 @@ function ssMakeFood(x, y, k, w, o, ne, lam) {
 
   const _sz = (4 + Math.random() * 3) * (k ? 1.2 : 1);
 
-  return { x, y, ci: Math.floor(Math.random() * 20), size: _sz,
+  return { id: _ssFoodSeq++, x, y, ci: Math.floor(Math.random() * 20), size: _sz,
 
            k: k || 0, w: w || 0, o: o || null, ne: ne || 0, lam: lam || 0 };
 
@@ -2282,9 +2324,17 @@ function ssStepMovement(sn, sg, lid, io, now) {
 
       // Death to the border → close the arena in a bit more (capped), and (re)start the hold clock.
 
-      sg.shrinkPct = Math.min(SS_BORDER_SHRINK_MAX, (sg.shrinkPct || 0) + SS_BORDER_SHRINK_STEP);
-
-      sg.shrinkResetAt = now + SS_BORDER_SHRINK_HOLD;
+      // ZONE WARS: NOT while the ring is mid-cycle. The roam squeeze already rides in
+      // campShrinkPct and, while roaming, arenaR chases its target at SS_ROAM_TRACK (~2x
+      // SS_BORDER_SHRINK_IN), so stacking the death shrink on top made the wall lurch inward
+      // fast - and a moving border kills several players in one sweep, so it hit the cap at
+      // once. Parked ('hold', full size) it behaves exactly as it always has, and ORIGINAL
+      // (sg.og, which never sets roamPhase) is untouched.
+      const _zwRoaming = !sg.og && sg.roamPhase && sg.roamPhase !== 'hold';
+      if (!_zwRoaming) {
+        sg.shrinkPct = Math.min(SS_BORDER_SHRINK_MAX, (sg.shrinkPct || 0) + SS_BORDER_SHRINK_STEP);
+        sg.shrinkResetAt = now + SS_BORDER_SHRINK_HOLD;
+      }
 
       ssKill(sn, null, lid, io); return;
 
@@ -2395,7 +2445,9 @@ function ssStepMovement(sn, sg, lid, io, now) {
           tail.y + _sdy * SS_SHED_DROP_BACK + (Math.random()-0.5)*6,
           0, 0, sn.pid, 0));   // ne = 0 -> never blocked by the shed cooldown
 
-        sg._foodDirty = true;
+        // No flag: the diff ships this new pebble on the next broadcast, so shed food appears exactly
+        // as instantly as before. Flagging pushed the WHOLE array out at 60Hz for the entire duration
+        // of every boost, because every boosting player sheds every SS_FOOD_GROW ticks.
 
       }
 
@@ -2520,7 +2572,10 @@ function ssTick(lid, io) {
 
             f.x = _fcx + _dx * _s; f.y = _fcy + _dy * _s;
 
-            sg._foodDirty = true;
+            // No flag needed: the diff in ssBroadcastState sees this orb's new x/y and ships it on the
+            // very next broadcast, so a dragged gold orb tracks the ring EXACTLY as smoothly as before.
+            // Flagging here would force the whole ~100-orb array out every tick for as long as the ring
+            // travels with gold outside it - the last remaining 60Hz full-array path, now gone too.
 
             continue;
 
@@ -2554,7 +2609,10 @@ function ssTick(lid, io) {
 
           f.x = _fcx + Math.cos(_ra) * _rr; f.y = _fcy + Math.sin(_ra) * _rr;
 
-          sg._foodDirty = true;
+          // No flag: the diff ships this pebble's new position on the next broadcast, so the scatter
+          // looks identical. Flagging ran for EVERY out-of-bounds pebble EVERY tick while the ring
+          // moved - precisely the "full array at 30-60Hz for ~10s of every ~30s" the 2026-07-30 note
+          // describes, and it was still there because only the flag's SOURCE had been narrowed.
 
         }
 
@@ -2766,7 +2824,10 @@ function ssTick(lid, io) {
 
         sg.food.splice(i, 1);
 
-        sg._foodDirty = true;
+        // The diff in ssBroadcastState removes ANY eaten item on the next broadcast, pebble or orb, so
+        // pickups vanish exactly as instantly as they always have. Belt and braces on MONEY only: also
+        // force a full resync, so a gold discrepancy can never outlive one packet. Rare by definition.
+        if (f.k) sg._foodDirty = true;
 
       }
 
@@ -2941,7 +3002,12 @@ function ssBroadcastState(sg, lid, io) {
 
       if (kf) { const a = []; for (const p of sn._rt) { a.push(p[0], p[1]); } pk.rk = a; sn._rtNeedKf = false; }
 
-      else if (sn._rtNew && sn._rtNew.length) { const a = []; for (const p of sn._rtNew) { a.push(p[0], p[1]); } pk.rd = a; }
+      // `rd` (per-tick body delta) IS NOT SENT ANY MORE. The client has never read it: grep the whole
+      // of slither-snakes.html for `rd` and there is not one reference - it takes the `rk` keyframe and
+      // accumulates the interpolated head between keyframes, and its own comment says the deltas are
+      // "intentionally ignored". So this was serialised for every snake on every one of 60 broadcasts
+      // a second and thrown away on arrival. Keyframes (`rk`) are unchanged, so body-sync behaves
+      // exactly as before.
 
       sn._rtNew = [];
 
@@ -2971,30 +3037,74 @@ function ssBroadcastState(sg, lid, io) {
 
   // pickups locally, so nothing is visibly slower; the sweep just stops spamming.
 
-  if (sg._foodDirty || !sg._lastFoodSend || now - sg._lastFoodSend > 250) {
-
-    pkt.food = sg.food.map(f => [
-
-      Math.round(f.x), Math.round(f.y),
-
-      f.ci || 0, Math.round((f.size || 6) * 10) / 10,
-
-      f.k ? 1 : 0, f.w ? Math.round(f.w * 1e6) : 0,
-
-      // SHED OWNER + NO-EAT DEADLINE. Computed server-side but never transmitted, so the client
-
-      // predictor could not know a pebble was off-limits: it "ate" it, the pebble vanished from the
-
-      // screen, and the server went on refusing it. Sending them makes both sides apply one rule.
-
-      f.o || 0, f.ne || 0
-
-    ]);
-
+  // ── WHAT _foodDirty IS ALLOWED TO MEAN (measured 2026-08-05) ────────────────────────────────
+  // This flag bypasses the 250ms cadence and pushes the ENTIRE food array on the very next
+  // broadcast - and broadcasts run at 60Hz (mid-tick + end-tick). Every ordinary pebble change was
+  // setting it: every eat, every boost-shed drop, every pebble the roaming ring re-scattered. In a
+  // live lobby that is almost every tick, so the throttle below effectively never held and the full
+  // ~68-133 orb array shipped 60x/s instead of 4x/s. NOTE the flag was never the real problem - the
+  // problem is that ONE pebble changing re-sent ALL of them. Narrowing what sets the flag would only
+  // have moved the spam around; the diff below removes it.
+  //
+  // MEASURED, at the real SS_FOOD_TARGET/CEIL sizes and this exact encoding:
+  //     68 orbs -> 1835 B/pkt -> 108 KB/s @60Hz   vs   7 KB/s @4Hz
+  //    133 orbs -> 3513 B/pkt -> 206 KB/s @60Hz   vs  14 KB/s @4Hz
+  // ~15x the downstream every player pays, all match. A player on a short fat path absorbs it and
+  // notices nothing. A player further out does not: ~1.6 Mbit/s of 60Hz writes fills the bottleneck
+  // queue, so packets stop arriving as sent and arrive in CLUMPS - which is exactly the p50 1ms /
+  // p95 43ms arrival signature captured from a real client. That queueing delay is on top of
+  // propagation delay, so the state stream is later than the ss-ping probe says (a tiny packet that
+  // skips the queue) - "it plays worse than the ping shown". Same lobby, same code: fine at 15ms,
+  // bad at 60ms. THAT is the ping asymmetry.
+  //
+  // ⚠️⚠️ THE FIX IS NOT A THROTTLE. Delaying food changes the game: a pebble somebody else ate would
+  // linger on your screen, and a 100ms floor tried on 2026-07-30 made gold visibly lag the moving
+  // border and was rightly reverted. So EVERY food change still goes out on the VERY NEXT broadcast,
+  // exactly as it always did - what changes is that we send ONLY WHAT CHANGED instead of all ~100
+  // orbs. Same instant, same positions, same everything on screen; ~99% less of it on the wire.
+  //
+  // HOW: diff the array against what this lobby last sent. Doing it here rather than at the ~10
+  // mutation sites is deliberate - a diff CANNOT MISS a change, whereas hand-flagging every
+  // push/splice/filter/respread site is exactly the kind of thing that silently rots. Cost is a walk
+  // of ~100 items per broadcast (~48k int compares/sec), which is nothing.
+  //
+  // A FULL array still goes every 250ms (and whenever _foodDirty marks a wholesale change: lobby
+  // reset, gold restore, admin clear). That is the heal path: if a delta were ever missed or a
+  // client joined mid-stream, it is corrected within 250ms and can never drift permanently.
+  const _fEnc = f => [
+    Math.round(f.x), Math.round(f.y),
+    f.ci || 0, Math.round((f.size || 6) * 10) / 10,
+    f.k ? 1 : 0, f.w ? Math.round(f.w * 1e6) : 0,
+    // SHED OWNER + NO-EAT DEADLINE. Computed server-side but never transmitted, so the client
+    // predictor could not know a pebble was off-limits: it "ate" it, the pebble vanished from the
+    // screen, and the server went on refusing it. Sending them makes both sides apply one rule.
+    f.o || 0, f.ne || 0,
+    f.id || 0
+  ];
+  const _full = sg._foodDirty || !sg._lastFoodSend || now - sg._lastFoodSend > 250;
+  if (_full) {
+    pkt.food = sg.food.map(_fEnc);
+    sg._fSent = new Map();
+    for (let i = 0; i < sg.food.length; i++) sg._fSent.set(sg.food[i].id, pkt.food[i]);
     sg._lastFoodSend = now;
-
     sg._foodDirty = false;
-
+  } else {
+    if (!sg._fSent) sg._fSent = new Map();
+    const _add = [], _seen = new Set();
+    for (const f of sg.food) {
+      _seen.add(f.id);
+      const e = _fEnc(f), p = sg._fSent.get(f.id);
+      // new, or any field moved (the ring drags orbs, ne expires, w changes on a merge)
+      if (!p || p[0] !== e[0] || p[1] !== e[1] || p[2] !== e[2] || p[3] !== e[3] ||
+          p[4] !== e[4] || p[5] !== e[5] || p[6] !== e[6] || p[7] !== e[7]) {
+        _add.push(e); sg._fSent.set(f.id, e);
+      }
+    }
+    const _rem = [];
+    for (const id of sg._fSent.keys()) if (!_seen.has(id)) _rem.push(id);
+    for (const id of _rem) sg._fSent.delete(id);
+    if (_add.length) pkt.fa = _add;   // added or changed
+    if (_rem.length) pkt.fr = _rem;   // removed (eaten, swept away, expired)
   }
 
   io.to(lid).emit('ss-state', pkt);
@@ -3041,13 +3151,19 @@ function ssBroadcastStateTo(socket, sg) {
 
     acx: Math.round(sg.cx || 0), acy: Math.round(sg.cy || 0), cpush: !!sg.campPushing,
 
+    // Same 9-field encoding as the room broadcast. It used to stop at 6 fields, so a spectator's
+    // very first snapshot carried no shed-owner/no-eat-deadline - and now it must also carry the
+    // food ID, or their delta stream below would be keyed against ids of 0 until the next full
+    // resync. Identical shape everywhere is the only version of this that stays correct.
     food: sg.food.map(f => [
 
       Math.round(f.x), Math.round(f.y),
 
       f.ci || 0, Math.round((f.size || 6) * 10) / 10,
 
-      f.k ? 1 : 0, f.w ? Math.round(f.w * 1e6) : 0
+      f.k ? 1 : 0, f.w ? Math.round(f.w * 1e6) : 0,
+
+      f.o || 0, f.ne || 0, f.id || 0
 
     ])
 
