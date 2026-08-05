@@ -5160,7 +5160,24 @@ async function pkConnect(roomId,gameToken,spectate){
        * clocks — which would have made the margin reading and the next de-burst test compare
        * against a timeline nothing was actually played back on.
        */
-      if(!window._SRVTS_OFF && typeof d.t==='number' && isFinite(d.t)){
+      /*
+       * ⚠️⚠️ REVERTED TO OPT-IN — I SHIPPED THIS ON BY DEFAULT AND IT REGRESSED, LIVE.
+       * Owner's panel immediately after: coasting 0.23% -> 11.21% of frames, longest 233ms,
+       * jank frames 4-15 -> 98. The harness above measured the JUMP correctly and I never measured
+       * STARVATION, which is the axis this trades against.
+       *
+       * WHY IT STARVES: with server-time stamps the buffer timeline becomes perfectly uniform
+       * (16.6ms apart, by construction), so `_noteStamp`'s p95 sizing collapses to the 28ms FLOOR —
+       * while the thing that now has to be absorbed is TRANSIT JITTER, which those stamps no longer
+       * contain any information about. The offset EMA slews fast toward a fresher mapping (k=0.20
+       * down vs 0.03 up), so it converges near MINIMUM transit: every packet slower than the
+       * minimum then arrives AFTER its own playout time and there is nothing to interpolate toward.
+       *
+       * ⚠️ To ship this properly the buffer must be sized off transit VARIATION (p95 of
+       * `pktT - d.t` minus its running minimum), NOT off stamp spacing. Do not re-enable it by
+       * flipping this flag alone — that is exactly the mistake above.
+       */
+      if(window._SRVTS_ON && typeof d.t==='number' && isFinite(d.t)){
         const _off=pktT-d.t;
         let E=window.__ssTsEst;
         if(!E || Math.abs(_off-E.off)>5000){ E=window.__ssTsEst={off:_off}; } // init / clock-jump (reconnect) reset
