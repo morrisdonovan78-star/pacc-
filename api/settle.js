@@ -354,6 +354,10 @@ async function settleRecruiter(wk, opts) {
 // Minimum accrued referral balance a referrer can withdraw. Keeps a single payout worth many times
 // its own ~5000-lamport network fee instead of dribbling out cent-sized transactions. ~0.002 SOL.
 const REF_MIN_CLAIM   = 2_000_000;
+// ⚠️ KEEP IN SYNC with REFERRAL_REWARDS_ENABLED in api/join.js — that flag stops rewards accruing,
+// this one stops them being withdrawn from escrow. Both must be true for the program to run at all;
+// leaving either half on is what would let money keep moving after the owner switched it off.
+const REFERRAL_REWARDS_ENABLED = false;
 
 // ── Discord "wall of winners" ─────────────────────────────────────────────────────────────────
 // When a paid cashout confirms, we post a small embed to a Discord channel via an incoming webhook.
@@ -2825,6 +2829,15 @@ module.exports = async function handler(req, res) {
     // platform fees sitting in escrow) and can NEVER touch a player deposit or a bettor's stake. If
     // there isn't enough surplus yet, the claim is refused and the balance stays intact to try later.
     if (action === 'ref-claim') {
+      /* ⚠️ PROGRAM OFF — the withdrawal half of the same switch as REFERRAL_REWARDS_ENABLED in
+       * api/join.js. Disabling only the accrual would leave this endpoint able to move escrow money
+       * on demand, which is the whole thing the owner asked to stop. Every `refbal:` balance was
+       * verified ZERO before this went in, so no genuinely-earned reward is being refused; nothing is
+       * deleted either, so re-enabling both flags resumes exactly where it left off. */
+      if (!REFERRAL_REWARDS_ENABLED) {
+        clearTimeout(guard); done = true;
+        return res.status(403).json({ error: 'The referral reward program is not running.' });
+      }
       if (!playerAddress) { clearTimeout(guard); done = true; return res.status(400).json({ error: 'playerAddress required' }); }
       // One claim at a time per wallet, so two concurrent claims can't both read the balance and pay.
       const rcLock = await kvSetNX('lock:rc:' + playerAddress, '1', 20);

@@ -112,9 +112,25 @@ function activeGrindEvent(now) {
   return (now >= e.start && now < e.end) ? e : null;
 }
 
+/* ⚠️ REFERRAL REWARDS ARE OFF. Owner's decision, 2026-08-07 — no payout leaves escrow that the owner
+ * did not schedule, and this one accrued forever on every paid join without ever being scheduled.
+ *
+ * It was the last automatic giveaway left after the Recruiter-of-the-Week drain (see
+ * SCHEDULED_RECRUIT_WEEKS in api/settle.js): REF_REWARD_LAMPORTS banked to a referrer on EVERY paid
+ * join, withdrawable from the SAME escrow account that holds live players' stakes. Switched off with
+ * every outstanding `refbal:` balance verified at ZERO across all known referrers, so nothing is
+ * stranded and nobody is owed anything.
+ *
+ * Returning here disables the whole program in one place — no accrual, no first-touch bind, and no
+ * recruit-qualification counting into `recruit:<week>`. Nothing else is deleted: existing keys are
+ * left untouched so flipping this back on later resumes exactly where it stopped. Set to true only if
+ * you actually want to run the program again. */
+const REFERRAL_REWARDS_ENABLED = false;
+
 // First-touch bind + per-join accrual. Fully wrapped by the caller's try/catch AND its own — the
 // referral program must NEVER be able to fail a legitimate paid join.
 async function accrueReferral(playerWallet, refCodeRaw, wagerLamports) {
+  if (!REFERRAL_REWARDS_ENABLED) return;
   // Resolve who (if anyone) this player is referred by. First touch wins and is permanent.
   let bind = null;
   try { const raw = await kvGet('refby:' + playerWallet); if (raw) bind = JSON.parse(raw); } catch (_) {}
