@@ -113,8 +113,13 @@ const CREATOR_FEE_PCT = 0.10;
  *
  * KEEP IN SYNC with the 'grind' schedule in api/join.js and window.SNAKE_EVENTS in
  * slither-snakes.html (the in-game card). SATURDAY_ANCHOR is the same instant as RECRUIT_ANCHOR
- * below — one weekly deadline across the whole platform. Recruiter of the Week is NOT on this
- * schedule: it is a rolling weekly contest that always runs. */
+ * below — one weekly deadline across the whole platform.
+ *
+ * Recruiter of the Week used to be exempt from this rule ("a rolling weekly contest that always
+ * runs"). That exemption is GONE — it is the exact hole this whole comment warns about, and on
+ * 2026-08-07 it paid an unscheduled $10 out of escrow mid-match and stranded a player's cash-out.
+ * It now has its own explicit list, SCHEDULED_RECRUIT_WEEKS. Owner's rule, no exceptions: prize
+ * money is committed one occurrence at a time, by hand, or it is not committed. */
 const SCHEDULED_SATURDAYS = ['2026-07-25'];                // ← the only Saturdays an event exists on
 const SATURDAY_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0);   // Sat Jul 25 2026 14:00 ET
 const SAT_UTC_HOUR    = 18;                                // time-of-day of SATURDAY_ANCHOR, in UTC
@@ -178,6 +183,26 @@ const RECRUIT_WEEK_MS = 7 * 24 * 3600 * 1000;
 function recruitWeek(now) { now = now || Date.now();
   const i = Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS);
   return { id: 'rw' + i, start: RECRUIT_ANCHOR + i * RECRUIT_WEEK_MS, end: RECRUIT_ANCHOR + (i + 1) * RECRUIT_WEEK_MS }; }
+
+/* ⚠️ WHICH RECRUITER WEEKS ACTUALLY PAY A PRIZE — the owner's schedule, not the calendar.
+ *
+ * recruitWeek() is pure arithmetic: it mints a fresh week id every 7 days, FOREVER. Bounty Hour has
+ * always been gated by an explicit SCHEDULED_SATURDAYS list precisely so a window can never open on a
+ * week the operator did not schedule (giving away real money). Recruiter of the Week had NO such
+ * gate — so every rolling week automatically owed somebody $10 out of escrow, indefinitely, with the
+ * operator never having scheduled a single one of them.
+ *
+ * That is what happened on 2026-08-07: week rw0 (25 Jul → 1 Aug) had ended days earlier, and the
+ * first person to open the referral board — six days later, mid-match — triggered its $10 payout.
+ * It took escrow from 146,245,330 to 10,389,223 lamports and the next player cash-out (36,688,110
+ * owed) had nothing left behind it. rw1 would have done the same thing the following week, and rw2
+ * after that, unprompted.
+ *
+ * A week not listed here pays NOTHING. rw0 is listed because it has already been paid (recpaid:rw0 is
+ * set, so listing it changes nothing and keeps its result page honest). ADD A WEEK ID HERE ONLY WHEN
+ * YOU ACTUALLY WANT TO RUN THAT CONTEST — same rule, same reason, as SCHEDULED_SATURDAYS. */
+const SCHEDULED_RECRUIT_WEEKS = ['rw0'];
+function recruitWeekIsScheduled(id) { return SCHEDULED_RECRUIT_WEEKS.indexOf(String(id)) >= 0; }
 // Stable 6-char code from a wallet (no I/O/0/1 → unambiguous, human-typeable).
 function refCodeFor(seed) {
   const h = crypto.createHash('sha256').update('refcode|' + seed).digest();
@@ -284,7 +309,7 @@ async function settleBounty(ev, opts) {
   for (const w of plan.winners) {
     const lk = await kvSetNX('evtpaid:' + ev.id + ':' + w.place, String(Date.now()));
     if (!lk) { paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, already: true }); continue; }
-    const r = await wgPayOne(esc, w.addr, w.lamports, 'bounty:' + ev.id + ':' + w.place);
+    const r = await wgPayOne(esc, w.addr, w.lamports, 'bounty:' + ev.id + ':' + w.place, { protectPlayers: true });
     if (!r.ok) { await kvDel('evtpaid:' + ev.id + ':' + w.place).catch(() => {});
       betAlert('bounty payout FAILED ' + ev.id + ' place ' + w.place + ' -> ' + String(w.addr).slice(0, 8) + ' : ' + (r.reason || '')); }
     paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, lamports: w.lamports, ok: r.ok, sig: r.sig || null, reason: r.reason || null });
@@ -308,12 +333,16 @@ async function settleRecruiter(wk, opts) {
   try { esc = getEscrow(); const bh = await fetchBalAndHash(esc.pubkeyB58); bal = bh.bal; }
   catch (e) { return { ok: false, reason: 'escrow load: ' + (e && e.message) }; }
   const plan = PAYOUT.planRecruiterPayout({ board, solPriceUsd: price || 0, escrowLamports: bal, floorLamports: RENT_MIN, prizeUsd: 10 });
-  if (dryRun) return { dryRun: true, week: wk.id, solPriceUsd: price || 0, escrowSol: bal / 1e9, recruiters: board.length, plan };
+  if (dryRun) return { dryRun: true, week: wk.id, solPriceUsd: price || 0, escrowSol: bal / 1e9,
+    recruiters: board.length, scheduled: recruitWeekIsScheduled(wk.id), plan };
+  // NOT ON THE SCHEDULE → NOT A CONTEST → NO PRIZE. Checked before the pay-lock so an unscheduled week
+  // never even reserves one, and the moment it IS scheduled the payout runs normally.
+  if (!recruitWeekIsScheduled(wk.id)) return { ok: false, reason: 'week ' + wk.id + ' is not a scheduled contest — add it to SCHEDULED_RECRUIT_WEEKS to run it' };
   if (!plan.ok) return { ok: false, reason: plan.reason, plan };
   const lk = await kvSetNX('recpaid:' + wk.id, String(Date.now()));
   if (!lk) { const prev = await kvGet('recresult:' + wk.id).catch(() => null); return { already: true, result: prev ? JSON.parse(prev) : null }; }
   const w = plan.winners[0];
-  const r = await wgPayOne(esc, w.addr, w.lamports, 'recruiter:' + wk.id);
+  const r = await wgPayOne(esc, w.addr, w.lamports, 'recruiter:' + wk.id, { protectPlayers: true });
   if (!r.ok) { await kvDel('recpaid:' + wk.id).catch(() => {});
     betAlert('recruiter payout FAILED ' + wk.id + ' -> ' + String(w.addr).slice(0, 8) + ' : ' + (r.reason || '')); }
   const paid = [{ place: 1, addr: w.addr, name: w.name, usd: w.usd, lamports: w.lamports, ok: r.ok, sig: r.sig || null, reason: r.reason || null }];
@@ -834,20 +863,46 @@ async function sumWagerLiability() {
 // THE gate. Fetches live escrow balance + all liabilities and asks the pure engine whether paying
 // `payoutLamports` now keeps escrow solvent for EVERYONE (players + bettors + house fee). Returns the
 // invariant result plus the figures used, so callers can log/alert. Fail-closed on any error.
-async function assertSolvency(escPubkeyB58, payoutLamports) {
-  let onChainBalance = 0, wagerLiability = Number.MAX_SAFE_INTEGER, betLiability = 0, accruedFee = 0;
+// Gold orbs a dead player's stake was converted into are STILL that money — the SOL sits in escrow and
+// only whoever eats the orb can draw it out — but the victim's `pw:` is deleted the instant they die,
+// so sumWagerLiability() cannot see a lamport of it. Parked orbs (a paid lobby that emptied) are the
+// part we CAN count, and they must be counted, or a house-funded payout treats other players' money as
+// spare change. Fail-CLOSED to MAX on a read error, same rule as sumWagerLiability.
+async function sumParkedFoodLiability() {
+  const keys = await kvScan('foodpark:*');
+  if (!keys.length) return 0;
+  let total = 0;
+  for (let i = 0; i < keys.length; i += 64) {
+    const vals = await kvMget(keys.slice(i, i + 64));
+    for (const v of vals) {
+      if (!v) continue;
+      try {
+        const p = JSON.parse(v);
+        for (const o of (p && p.orbs) || []) total += Math.max(0, Math.floor(Number(o.lam) || 0));
+      } catch (_) {}
+    }
+  }
+  return total;
+}
+
+// `opts.protectPlayers` makes player deposits (and parked gold food) SENIOR to this payout — set it for
+// every house-funded giveaway. See the seniority note in lib/betting.js checkInvariant.
+async function assertSolvency(escPubkeyB58, payoutLamports, opts) {
+  const protectPlayers = !!(opts && opts.protectPlayers);
+  let onChainBalance = 0, wagerLiability = Number.MAX_SAFE_INTEGER, betLiability = 0, accruedFee = 0, parkedFood = 0;
   try {
     const bal = await rpc('getBalance', [escPubkeyB58, { commitment: 'confirmed' }]);
     onChainBalance = (bal && typeof bal.value === 'number') ? bal.value : (typeof bal === 'number' ? bal : 0);
     wagerLiability = await sumWagerLiability();
+    if (protectPlayers) { parkedFood = await sumParkedFoodLiability(); wagerLiability += parkedFood; }
     const led = await readBetLedger();
     betLiability = led.betLiability; accruedFee = led.accruedFee;
   } catch (e) {
     // Any failure → keep wagerLiability at MAX so checkInvariant refuses. Never pay blind.
-    return { ok: false, reason: 'solvency-read-failed:' + (e && e.message || e), onChainBalance, wagerLiability, betLiability, accruedFee };
+    return { ok: false, reason: 'solvency-read-failed:' + (e && e.message || e), onChainBalance, wagerLiability, betLiability, accruedFee, parkedFood };
   }
-  const inv = BET.checkInvariant({ onChainBalance, wagerLiability, betLiability, accruedFee, payoutLamports, txFee: TX_FEE });
-  return { ...inv, onChainBalance, wagerLiability, betLiability, accruedFee };
+  const inv = BET.checkInvariant({ onChainBalance, wagerLiability, betLiability, accruedFee, payoutLamports, txFee: TX_FEE, protectPlayers });
+  return { ...inv, onChainBalance, wagerLiability, betLiability, accruedFee, parkedFood };
 }
 
 // Verify a GAME_SECRET-HMAC server-to-server proof (same trust model as elim-lock / park-food).
@@ -1214,10 +1269,10 @@ async function wgPush(region, lobby, event, wager) {
 
 // Pay exactly one recipient, gated by the global solvency invariant. Used for winner payouts,
 // cancellations, returns and the "your deposit couldn't be matched" refund. Never sizes from balance.
-async function wgPayOne(esc, toAddr, lamports, tag) {
+async function wgPayOne(esc, toAddr, lamports, tag, opts) {
   const amt = Math.floor(Number(lamports) || 0);
   if (!(amt > 0)) return { ok: false, reason: 'nothing to pay' };
-  const inv = await assertSolvency(esc.pubkeyB58, amt);
+  const inv = await assertSolvency(esc.pubkeyB58, amt, opts);
   if (!inv.ok) {
     betAlert('invariant REFUSED ' + tag + ' to=' + String(toAddr).slice(0, 8) + ' amt=' + amt +
              ' bal=' + inv.onChainBalance + ' wagerLiab=' + inv.wagerLiability + ' betLiab=' + inv.betLiability +
@@ -1394,11 +1449,13 @@ module.exports = async function handler(req, res) {
         if (past) { ev = past; state = 'ended'; }
       }
       const nextEv = killEvents().filter(e => e.start > now).sort((a, b) => a.start - b.start)[0] || null;
-      // Auto-settle: once a bounty window has ended, pay the winners from the float — idempotent
-      // (per-place NX locks) and solvency-guarded, so only the first post-event reader does the work
-      // and it can never overpay or touch player funds. Always on (the EVENT_AUTOPAY kill-switch was
-      // removed 2026-07-25 — it had been silently disabling every event payout).
-      if (state === 'ended' && ev && (now - ev.end) < 24 * 3600 * 1000) { try { await settleBounty(ev, { dryRun: false }); } catch (_) {} }
+      /* NO PAYOUT HAPPENS HERE ANY MORE — same reason as recruiter-board above. The claim that this
+       * "can never touch player funds" was simply untrue: the guard it relied on (assertSolvency →
+       * checkInvariant) deliberately left wagerLiability OUT of the gate, so with no live bets it let
+       * a payout of the ENTIRE escrow balance through. Its twin drained escrow on 2026-08-07 and
+       * stranded a player's 36,688,110-lamport cash-out. Player deposits are senior now
+       * (protectPlayers), but an unsigned board read still has no business moving money at a moment
+       * nobody chose: bounty prizes leave only via admin-gated `event-settle` (dryRun:false). */
       clearTimeout(guard); done = true;
       const nextOut = nextEv ? { id: nextEv.id, startsAt: nextEv.start, endsAt: nextEv.end } : null;
       if (!ev) return res.status(200).json({ active: false, next: nextOut });
@@ -1530,11 +1587,13 @@ module.exports = async function handler(req, res) {
     // ── recruiter-board: this week's Recruiter-of-the-Week standings (unsigned read) ──────────────
     if (action === 'recruiter-board') {
       const wk = recruitWeek();
-      // Lazy auto-settle the PREVIOUS week once it has ended (idempotent, solvency-guarded).
-      if (process.env.EVENT_AUTOPAY !== '0') {
-        const prev = recruitWeek(wk.start - 1);
-        if (Date.now() >= prev.end) { try { await settleRecruiter(prev, { dryRun: false }); } catch (_) {} }
-      }
+      /* NO PAYOUT HAPPENS HERE ANY MORE. This is an unsigned, unauthenticated board READ that every
+       * client fires when the referral panel opens — and it used to call settleRecruiter(prev,
+       * {dryRun:false}), a REAL $10 transfer out of escrow. So the moment money left was "whenever
+       * somebody happened to look at the leaderboard", which is why the 2026-08-07 drain landed in the
+       * middle of a live $0.90 match six days after the week it was paying for had ended. A board read
+       * must never move funds. The prize now leaves only through the admin-gated `recruiter-settle`
+       * (dryRun:false + x-admin-secret), so the operator chooses the moment. */
       clearTimeout(guard); done = true;
       const h = (await kvHgetall('recruit:' + wk.id).catch(() => null)) || {};
       const rows = Object.keys(h).map(a => ({ addr: a, n: parseInt(h[a]) || 0 }))
@@ -2780,7 +2839,7 @@ module.exports = async function handler(req, res) {
           clearTimeout(guard); done = true;
           return res.status(400).json({ error: 'Below minimum claim (' + (REF_MIN_CLAIM / 1e9).toFixed(4) + ' SOL) — keep earning', owedLamports: owed, minLamports: REF_MIN_CLAIM });
         }
-        const pay = await wgPayOne(esc, playerAddress, owed, 'ref-claim');
+        const pay = await wgPayOne(esc, playerAddress, owed, 'ref-claim', { protectPlayers: true });
         if (!pay.ok) {
           // Payout didn't happen (insolvent surplus / send failure) — restore the balance, lose nothing.
           await kvIncrby('refbal:' + playerAddress, owed).catch(() => {});
@@ -3059,11 +3118,22 @@ module.exports = async function handler(req, res) {
         // What a payout is ACTUALLY tested against, so the answer to "why was this refused?" is here
         // rather than inferred from the raw figures.
         gate: {
-          formula: 'escrow - payout - txFee >= betLiability - payout',
+          formula: 'bet/cashout payouts: escrow - payout - txFee >= betLiability - payout   |   ' +
+                   'house-funded prizes & ref-claims: escrow - payout - txFee >= betLiability - payout + wagerLiability',
           spendableNowLamports: Math.max(0, inv.onChainBalance - TX_FEE),
           spendableNowSol: sol(Math.max(0, inv.onChainBalance - TX_FEE)),
           owedToOtherBettorsLamports: inv.betLiability,
           largestPayoutThatWouldClearLamports: Math.max(0, inv.onChainBalance - TX_FEE),
+          /* ⚠️ THE NUMBER TO READ BEFORE GIVING ANYTHING AWAY. `spendableNow` is what a PLAYER can be
+           * paid — it is allowed to draw on player deposits because that IS what deposits are for. It
+           * is NOT free money, and reading it as "the float" is what made a $10 prize look affordable
+           * against a $10.79 escrow that already owed $5.40 to three people mid-match on 2026-08-07.
+           * This figure subtracts everything owed, so it is the real answer to "what is actually mine".
+           * It also still UNDERSTATES the liability: a killed player's stake is deleted from `pw:` and
+           * lives on as gold orbs on the arena floor, which nothing counts until the room empties and
+           * parks them (parkedFoodLamports below). Treat a small positive number here as zero. */
+          houseFundedSpendableLamports: Math.max(0, inv.onChainBalance - TX_FEE - inv.betLiability - inv.wagerLiability),
+          houseFundedSpendableSol: sol(Math.max(0, inv.onChainBalance - TX_FEE - inv.betLiability - inv.wagerLiability)),
         },
         lamports: {
           escrow: inv.onChainBalance,
