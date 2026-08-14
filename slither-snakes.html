@@ -500,10 +500,10 @@ body.mctl #voice-speakers{left:150px;}
   <!-- ══ RECRUITER OF THE WEEK ══ Live standings + the player's own invite link + how it works. -->
   <div id="rec-card" class="panel" style="order:3;width:100%;max-width:460px;border-color:rgba(57,255,20,.34);background:linear-gradient(180deg,rgba(6,20,9,.94),rgba(10,10,26,.92));margin-bottom:1rem;padding:12px 14px;">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
-      <span style="font-family:'Press Start 2P',monospace;font-size:9px;color:#39FF14;">🥇 RECRUITER OF THE WEEK</span>
+      <span id="rec-title" style="font-family:'Press Start 2P',monospace;font-size:9px;color:#39FF14;">🥇 RECRUITER OF THE WEEK</span>
       <span id="rec-count" style="font-family:'Press Start 2P',monospace;font-size:7px;color:var(--muted);">--</span>
     </div>
-    <div style="font-size:11px;color:var(--muted);text-align:center;line-height:1.6;margin-bottom:11px;">
+    <div id="rec-blurb" style="font-size:11px;color:var(--muted);text-align:center;line-height:1.6;margin-bottom:11px;">
       Share your link. Every friend who <b style="color:#fff;">plays a paid lobby</b> counts as a recruit. Most recruits this week wins <b style="color:#FFD700;">$10 in SOL</b>. <span style="opacity:.8;">Alts don't count — they have to deposit &amp; play for real.</span>
     </div>
     <div id="rec-link-box" style="display:none;margin-bottom:11px;">
@@ -563,18 +563,31 @@ body.mctl #voice-speakers{left:150px;}
     function fetchBoard(){ var addr=(typeof ST!=='undefined'&&ST&&ST.address)||'';
       fetch('/api/settle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'recruiter-board',playerAddress:addr})})
         .then(function(r){return r.json();}).then(draw).catch(function(){}); }
+    /* The board used to render this week's bucket and nothing else, with a hardcoded "$10 · ENDS IN".
+     * Only SCHEDULED weeks pay (api/settle.js SCHEDULED_RECRUIT_WEEKS), and none since rw0 have been —
+     * so players shared links, friends qualified, and every Saturday the board went back to empty
+     * under a banner still promising $10. Off a paying week it now shows the ALL-TIME standings, which
+     * only ever go up, and stops advertising a prize that is not running. */
     function draw(d){ if(!d) return;
-      elCount.textContent='$'+(d.prize||10)+' · ENDS IN '+dur((d.weekEnd||0)-Date.now());
+      var sched=!!d.scheduled;
+      var rows=sched?(d.top||[]):(d.allTime||[]);
+      var you =sched?d.you:d.youAllTime;
+      var elTitle=document.getElementById('rec-title'), elBlurb=document.getElementById('rec-blurb');
+      if(elTitle) elTitle.textContent=sched?'🥇 RECRUITER OF THE WEEK':'🥇 TOP RECRUITERS';
+      elCount.textContent=sched?('$'+(d.prize||10)+' · ENDS IN '+dur((d.weekEnd||0)-Date.now())):'ALL-TIME';
+      if(elBlurb) elBlurb.innerHTML=sched
+        ? 'Share your link. Every friend who <b style="color:#fff;">plays a paid lobby</b> counts as a recruit. Most recruits this week wins <b style="color:#FFD700;">$10 in SOL</b>. <span style="opacity:.8;">Alts don\'t count — they have to deposit &amp; play for real.</span>'
+        : 'Share your link. Every friend who <b style="color:#fff;">plays a paid lobby</b> counts as a recruit — <b style="color:#fff;">your total keeps counting</b> whether or not a prize week is running. <span style="opacity:.8;">Alts don\'t count — they have to deposit &amp; play for real.</span>';
       var h='';
-      if(!d.top||!d.top.length){ h='<div style="font-size:11px;color:var(--muted);text-align:center;">No recruits yet — be the first. Share your link!</div>'; }
-      else { d.top.forEach(function(r,i){ var medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
+      if(!rows.length){ h='<div style="font-size:11px;color:var(--muted);text-align:center;">No recruits yet — be the first. Share your link!</div>'; }
+      else { rows.forEach(function(r,i){ var medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
         h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 4px;font-size:12px;color:'+(i<1?'#FFD700':'#fff')+';">'
           +'<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72%;">'+medal+' '+r.name+'</span>'
           +'<b style="color:#39FF14;">'+r.recruits+'</b></div>'; }); }
       elBoard.innerHTML=h;
-      if(d.you){ elYou.textContent=d.you.onBoard?('YOU: '+d.you.recruits+' recruit'+(d.you.recruits===1?'':'s')+' — '+ord(d.you.rank)+' place')
-                                                :'YOU: 0 recruits — invite a friend to get on the board';
-        elYou.style.color=d.you.onBoard?'#39FF14':'var(--muted)'; } }
+      if(you){ elYou.textContent=you.onBoard?('YOU: '+you.recruits+' recruit'+(you.recruits===1?'':'s')+' — '+ord(you.rank)+' place')
+                                            :'YOU: 0 recruits — invite a friend to get on the board';
+        elYou.style.color=you.onBoard?'#39FF14':'var(--muted)'; } }
     fetchMine(); fetchBoard();
     setInterval(fetchMine,6000); setInterval(fetchBoard,30000);
   })();

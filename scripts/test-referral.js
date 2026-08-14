@@ -36,17 +36,30 @@ const reset = () => store.clear();
   eq(store.has('refby:' + P), false, 'unknown code does not bind');
   eq(bal(), 0, 'unknown code pays nothing');
 
-  // 2. Valid owner-minted code → binds first touch and accrues one reward
+  /* THE MONEY SPLIT (2026-08-14). TRACKING is on so shared links show on the leaderboard again;
+   * REWARDS stay off so no lamport is written and nothing can be withdrawn from escrow. These two
+   * assertions are what stop the halves being flipped back together by accident — every reward
+   * expectation below is derived from the shipped flag, not hardcoded. */
+  const REWARDS  = join._refConsts.REFERRAL_REWARDS_ENABLED;
+  const TRACKING = join._refConsts.REFERRAL_TRACKING_ENABLED;
+  eq(REWARDS,  false, 'REFERRAL REWARDS ARE OFF — no SOL accrues on a paid join');
+  eq(TRACKING, true,  'referral TRACKING is on — binds and recruit counts still happen');
+  const reward = (n) => (REWARDS ? REF_REWARD_LAMPORTS * n : 0);
+
+  // 2. Valid owner-minted code → binds first touch. Attribution happens with the payout switched off.
   reset();
   store.set('refcode:STREAM1', R);
   await join.accrueReferral(P, 'STREAM1');
   eq(!!store.get('refby:' + P), true, 'valid code binds');
-  eq(bal(), REF_REWARD_LAMPORTS, 'first paid join accrues one reward');
+  eq(bal(), reward(1), 'first paid join accrues the reward only when rewards are on');
 
-  // 3. Subsequent joins keep accruing (per-join, no code needed after bind)
+  // 3. Subsequent joins are still counted for the streamer dashboard…
   await join.accrueReferral(P, null);
   await join.accrueReferral(P, null);
-  eq(bal(), REF_REWARD_LAMPORTS * 3, 'each later join accrues again');
+  eq(bal(), reward(3), 'later joins accrue only when rewards are on');
+  eq(Number((store.get('refstats:' + R) || {}).joins) || 0, 3, 'joins are counted regardless of the reward flag');
+  // …but `accrued` mirrors refbal, so it must never claim a balance the referrer does not hold.
+  eq(Number((store.get('refstats:' + R) || {}).accrued) || 0, reward(3), 'accrued never overstates the real balance');
 
   // 4. First touch is sticky — a different code cannot re-bind an already-referred player
   reset();
@@ -55,7 +68,8 @@ const reset = () => store.clear();
   await join.accrueReferral(P, 'AAA');
   await join.accrueReferral(P, 'BBB');
   eq(JSON.parse(store.get('refby:' + P)).ref, R, 'first referrer stays bound');
-  eq(bal(), REF_REWARD_LAMPORTS * 2, 'both joins credit the ORIGINAL referrer');
+  eq(bal(), reward(2), 'both joins credit the ORIGINAL referrer');
+  eq(Number(store.get('refbal:Other')) || 0, 0, 'the second code never gets a lamport');
 
   // 5. Self-referral is blocked (code resolves to the joining wallet itself)
   reset();

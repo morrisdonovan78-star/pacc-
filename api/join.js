@@ -121,16 +121,34 @@ function activeGrindEvent(now) {
  * every outstanding `refbal:` balance verified at ZERO across all known referrers, so nothing is
  * stranded and nobody is owed anything.
  *
- * Returning here disables the whole program in one place — no accrual, no first-touch bind, and no
- * recruit-qualification counting into `recruit:<week>`. Nothing else is deleted: existing keys are
- * left untouched so flipping this back on later resumes exactly where it stopped. Set to true only if
- * you actually want to run the program again. */
+ * ⚠️ KEEP IN SYNC with REFERRAL_REWARDS_ENABLED in api/settle.js — that one refuses the ref-claim
+ * withdrawal. Both must be true for money to move at all; leaving either half on is what would let
+ * escrow keep draining after the owner switched it off. Nothing is deleted: existing keys are left
+ * untouched, so flipping both back on resumes exactly where it stopped. */
 const REFERRAL_REWARDS_ENABLED = false;
+
+/* ⚠️ TRACKING IS A SEPARATE SWITCH, AND IT IS ON. 2026-08-14, owner's call.
+ *
+ * The one flag above used to gate this whole function with a `return` on line 1, which stopped three
+ * different things at once: the money (`refbal:` accrual), the first-touch BIND, and the qualified-
+ * recruit COUNT that feeds the leaderboard. Only the first of those is a payout. Killing the other
+ * two meant that from 2026-08-07 nobody who shared an invite link was recorded anywhere — no bind, no
+ * count — so the Recruiter board could only ever show people the operator hand-credited through the
+ * admin panel, and every real referral silently went nowhere. Reported as "when people are sending
+ * referral link it should show on leaderboard even when the event isn't running or a payment is not
+ * scheduled for it".
+ *
+ * Splitting them restores the leaderboard WITHOUT reopening the payout: attribution and counting are
+ * pure bookkeeping in KV, and no lamport is written or withdrawable while REFERRAL_REWARDS_ENABLED
+ * stays false. The Recruiter-of-the-Week PRIZE is separately gated by SCHEDULED_RECRUIT_WEEKS in
+ * api/settle.js and pays only through the admin-gated recruiter-settle, so counting a recruit here
+ * still cannot cause money to leave on its own. */
+const REFERRAL_TRACKING_ENABLED = true;
 
 // First-touch bind + per-join accrual. Fully wrapped by the caller's try/catch AND its own — the
 // referral program must NEVER be able to fail a legitimate paid join.
 async function accrueReferral(playerWallet, refCodeRaw, wagerLamports) {
-  if (!REFERRAL_REWARDS_ENABLED) return;
+  if (!REFERRAL_TRACKING_ENABLED) return;
   // Resolve who (if anyone) this player is referred by. First touch wins and is permanent.
   let bind = null;
   try { const raw = await kvGet('refby:' + playerWallet); if (raw) bind = JSON.parse(raw); } catch (_) {}
@@ -168,10 +186,15 @@ async function accrueReferral(playerWallet, refCodeRaw, wagerLamports) {
   if (!bind || !bind.ref) return;
   if (Date.now() - Number(bind.ts || 0) > REF_WINDOW_MS) return; // 3-month window elapsed
 
-  // Accrue the reward. refbal is the withdrawable balance; refstats is the streamer's dashboard.
-  await kvIncrby('refbal:' + bind.ref, REF_REWARD_LAMPORTS).catch(() => {});
+  // Accrue the reward. refbal is the WITHDRAWABLE balance — the only thing in this function that is
+  // money, and the only thing the rewards flag has to stop. `joins` is a counter for the streamer's
+  // dashboard and stays live so attribution is still visible with the payout switched off; `accrued`
+  // mirrors refbal, so it must move with it or the dashboard would claim a balance nobody holds.
+  if (REFERRAL_REWARDS_ENABLED) {
+    await kvIncrby('refbal:' + bind.ref, REF_REWARD_LAMPORTS).catch(() => {});
+    await kvHincrby('refstats:' + bind.ref, 'accrued', REF_REWARD_LAMPORTS).catch(() => {});
+  }
   await kvHincrby('refstats:' + bind.ref, 'joins', 1).catch(() => {});
-  await kvHincrby('refstats:' + bind.ref, 'accrued', REF_REWARD_LAMPORTS).catch(() => {});
 
   // Recruiter of the Week: count this referee ONCE for their referrer, the first time their
   // cumulative paid wager crosses the qualify threshold. NX flag makes it exactly-once even under
@@ -649,4 +672,7 @@ module.exports = async function handler(req, res) {
 
 // Exported for unit testing the referral accrual logic in isolation (see scripts/test-referral.js).
 module.exports.accrueReferral = accrueReferral;
-module.exports._refConsts = { REF_WINDOW_MS, REF_REWARD_LAMPORTS, RECRUIT_QUALIFY_LAMPORTS, recruitWeekId };
+// The two flags are exported so the suite asserts the SHIPPED values, not a copy of them. A test that
+// hardcodes "rewards are off" passes just as happily when somebody flips the constant back on.
+module.exports._refConsts = { REF_WINDOW_MS, REF_REWARD_LAMPORTS, RECRUIT_QUALIFY_LAMPORTS, recruitWeekId,
+                              REFERRAL_REWARDS_ENABLED, REFERRAL_TRACKING_ENABLED };

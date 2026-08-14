@@ -203,6 +203,50 @@ function recruitWeek(now) { now = now || Date.now();
  * YOU ACTUALLY WANT TO RUN THAT CONTEST — same rule, same reason, as SCHEDULED_SATURDAYS. */
 const SCHEDULED_RECRUIT_WEEKS = ['rw0'];
 function recruitWeekIsScheduled(id) { return SCHEDULED_RECRUIT_WEEKS.indexOf(String(id)) >= 0; }
+
+/* ── ALL-TIME recruit totals ─────────────────────────────────────────────────────────────────────
+ *
+ * `recruit:<weekId>` buckets counts per week, and the board only ever read the CURRENT bucket. So a
+ * recruit somebody earned last week vanished from the leaderboard the moment the week rolled over,
+ * and because only rw0 is a SCHEDULED (paying) week, every week since has looked like a contest that
+ * counts nothing: players share a link, a friend qualifies, and days later the board shows zero
+ * again. Reported as "when people are sending referral link it should show on leaderboard even when
+ * the event isn't running or a payment is not scheduled for it".
+ *
+ * This is DERIVED, never stored as its own counter. A second hand-maintained total would need a
+ * matching write at all three places that touch `recruit:` (join.js accrual, admin.js ref-bind,
+ * settle.js recruit-migrate) — the exact three-copies-must-agree shape that already broke
+ * RECRUIT_ANCHOR here. Summing the week buckets cannot drift from them by construction, and it stays
+ * correct through recruit-migrate (which moves counts BETWEEN weeks, leaving the sum alone) and
+ * through admin ref-unbind (which decrements a week bucket).
+ *
+ * Cached for CACHE_S because this is an unauthenticated read every client polls on a timer, and KV
+ * request quota has taken the platform down before. One SCAN a minute platform-wide, not one per
+ * poll per player.
+ */
+const RECRUIT_ALL_CACHE_KEY = 'recruitall:cache';
+const RECRUIT_ALL_CACHE_S   = 60;
+async function allTimeRecruits() {
+  try {
+    const cached = await kvGet(RECRUIT_ALL_CACHE_KEY).catch(() => null);
+    if (cached) { const o = JSON.parse(cached); if (o && typeof o === 'object') return o; }
+  } catch (_) {}
+  const totals = {};
+  try {
+    // `recruit:rw*` — the trailing `rw` matters: a bare `recruit:*` would also sweep up any future
+    // sibling key that happens to share the prefix and silently inflate every total.
+    const keys = await kvScan('recruit:rw*', 500);
+    for (const k of keys) {
+      const h = (await kvHgetall(k).catch(() => null)) || {};
+      for (const a of Object.keys(h)) {
+        const n = parseInt(h[a], 10) || 0;
+        if (n > 0) totals[a] = (totals[a] || 0) + n;
+      }
+    }
+    await kvSet(RECRUIT_ALL_CACHE_KEY, JSON.stringify(totals), RECRUIT_ALL_CACHE_S).catch(() => {});
+  } catch (_) {}
+  return totals;
+}
 // Stable 6-char code from a wallet (no I/O/0/1 → unambiguous, human-typeable).
 function refCodeFor(seed) {
   const h = crypto.createHash('sha256').update('refcode|' + seed).digest();
@@ -1529,8 +1573,11 @@ module.exports = async function handler(req, res) {
       const code = await ensureRefCode(w);
       const wk = recruitWeek();
       const mine = parseInt(await kvHget('recruit:' + wk.id, w).catch(() => 0)) || 0;
+      // `recruits` resets every Saturday; `recruitsAllTime` is the one a player can watch go up.
+      const allTime = parseInt((await allTimeRecruits())[w], 10) || 0;
       return res.status(200).json({ code, link: 'https://snakepot.com/?ref=' + code,
-        recruits: mine, weekStart: wk.start, weekEnd: wk.end });
+        recruits: mine, recruitsAllTime: allTime,
+        weekStart: wk.start, weekEnd: wk.end, scheduled: recruitWeekIsScheduled(wk.id) });
     }
 
     // ── credit-status: a player's free-entry credit balance + Free Entry Grind progress ───────────
@@ -1599,18 +1646,28 @@ module.exports = async function handler(req, res) {
        * must never move funds. The prize now leaves only through the admin-gated `recruiter-settle`
        * (dryRun:false + x-admin-secret), so the operator chooses the moment. */
       clearTimeout(guard); done = true;
-      const h = (await kvHgetall('recruit:' + wk.id).catch(() => null)) || {};
-      const rows = Object.keys(h).map(a => ({ addr: a, n: parseInt(h[a]) || 0 }))
-                         .filter(r => r.n > 0).sort((a, b) => b.n - a.n);
       const you = String(body.playerAddress || '').trim();
-      let youRank = 0, youN = 0;
-      for (let i = 0; i < rows.length; i++) { if (rows[i].addr === you) { youRank = i + 1; youN = rows[i].n; break; } }
-      const top = rows.slice(0, 10);
-      await Promise.all(top.map(async r => { try { r.name = (await kvHget('ph:' + r.addr, 'name')) || ''; } catch (_) { r.name = ''; } }));
+      // Rank a {addr: count} map, resolve display names for the top 10, and locate the caller in it.
+      const rank = async (map) => {
+        const rows = Object.keys(map).map(a => ({ addr: a, n: parseInt(map[a]) || 0 }))
+                           .filter(r => r.n > 0).sort((a, b) => b.n - a.n);
+        let youRank = 0, youN = 0;
+        for (let i = 0; i < rows.length; i++) { if (rows[i].addr === you) { youRank = i + 1; youN = rows[i].n; break; } }
+        const top = rows.slice(0, 10);
+        await Promise.all(top.map(async r => { try { r.name = (await kvHget('ph:' + r.addr, 'name')) || ''; } catch (_) { r.name = ''; } }));
+        return { top: top.map(r => ({ name: r.name || (r.addr.slice(0, 4) + '…' + r.addr.slice(-4)), recruits: r.n })),
+                 you: { rank: youRank, recruits: youN, onBoard: youRank > 0 } };
+      };
+      const week = await rank((await kvHgetall('recruit:' + wk.id).catch(() => null)) || {});
+      const all  = await rank(await allTimeRecruits());
+      /* `scheduled` is what lets the client stop promising money it is not going to pay. A week not in
+       * SCHEDULED_RECRUIT_WEEKS pays NOTHING (see the note there — an unscheduled week is what drained
+       * escrow on 2026-08-07), but the card still rendered "$10 · ENDS IN 3d 4h" on every one of them. */
+      const scheduled = recruitWeekIsScheduled(wk.id);
       return res.status(200).json({
-        weekStart: wk.start, weekEnd: wk.end, prize: 10,
-        top: top.map(r => ({ name: r.name || (r.addr.slice(0, 4) + '…' + r.addr.slice(-4)), recruits: r.n })),
-        you: { rank: youRank, recruits: youN, onBoard: youRank > 0 },
+        weekStart: wk.start, weekEnd: wk.end, weekId: wk.id, scheduled, prize: scheduled ? 10 : 0,
+        top: week.top, you: week.you,
+        allTime: all.top, youAllTime: all.you,
       });
     }
 

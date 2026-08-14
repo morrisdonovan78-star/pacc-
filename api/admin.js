@@ -10,9 +10,27 @@
 //   ADMIN_SECRET   — secret used to sign tokens AND authenticate game-server calls
 //                    (set the SAME value in PM2 env on Vultr: ADMIN_SECRET=...)
 const crypto = require('crypto');
-const { kvGet, kvSet, kvSetPerm, kvDel, kvHgetall, kvHset,
+const { kvGet, kvSet, kvSetPerm, kvDel, kvHgetall, kvHget, kvHset,
         kvZadd, kvZrevrange, kvZrem, kvScan, kvSetNX, kvHincrby,
         kvLpush, kvLtrim, kvLrange } = require('../lib/kv');
+
+/*
+ * ⚠️ THIS ANCHOR MUST MATCH api/settle.js recruitWeek() AND api/join.js recruitWeekId() EXACTLY.
+ *
+ * It did not, and the bug is worth keeping in front of whoever edits this next. This file carried
+ * `Date.UTC(2026, 6, 23, 4, 0, 0)` while both of the others used `Date.UTC(2026, 6, 25, 18, 0, 0)` —
+ * 62 hours earlier, enough to land on a DIFFERENT week index. So every hand-credited recruit was
+ * written to `recruit:rw<n+1>` while the profile card (`my-refcode`) and the homescreen podium both
+ * read `recruit:rw<n>`: the operator saw "credited", and the player's count never moved.
+ *
+ * It lived inline inside ref-bind, which is how it drifted unnoticed. It is up here now so ref-bind
+ * and ref-unbind cannot disagree about which bucket a credit is in — an unbind that decremented a
+ * different week than the bind incremented would leave the count stuck AND put a phantom -1 in a week
+ * nobody touched. Three hand-copied constants is the real defect; keep them in step.
+ */
+const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 25, 18, 0, 0);
+const RECRUIT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+function recruitWeekId(now) { return 'rw' + Math.floor(((now || Date.now()) - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS); }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 function getSecret()   { return (process.env.ADMIN_SECRET   || '').trim(); }
@@ -359,28 +377,94 @@ module.exports = async function handler(req, res) {
     // Count the qualified recruit too when asked — the operator can see they really paid.
     let counted = false;
     if (req.body.countRecruit) {
-      /*
-       * ⚠️ THIS ANCHOR MUST MATCH api/settle.js AND api/join.js EXACTLY.
-       *
-       * It did not. This file carried `Date.UTC(2026, 6, 23, 4, 0, 0)` while both of the others use
-       * `Date.UTC(2026, 6, 25, 18, 0, 0)` — 62 hours earlier, which is enough to land on a DIFFERENT
-       * week index. So every hand-credited recruit was written to `recruit:rw<n+1>` while the profile
-       * card (`my-refcode`) and the homescreen podium both read `recruit:rw<n>`: the operator saw
-       * "credited", and the player's count never moved. Reported as "I did this and it's not working
-       * either — it doesn't show on the homescreen after he refreshes."
-       *
-       * Three hand-copied constants that must agree is the actual defect; keeping them in step is the
-       * cheap fix. If this anchor is ever changed again, change it in all three files together.
-       */
-      const RECRUIT_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0), WK = 7 * 24 * 60 * 60 * 1000;
-      const wk = 'rw' + Math.floor((Date.now() - RECRUIT_ANCHOR) / WK);
+      const wk = recruitWeekId();   // see the anchor note at the top of this file
       if (await kvSetNX('refq:' + player, String(Date.now()))) {
         await kvHincrby('recruit:' + wk, referrer, 1).catch(() => {});
+        // Drop the all-time board's 60s cache so a hand credit is visible on the next refresh rather
+        // than up to a minute later — "I credited it and it isn't showing" is the report this whole
+        // path exists to answer, and a stale cache reproduces it exactly.
+        await kvDel('recruitall:cache').catch(() => {});
         counted = true;
       }
     }
     await logAction('ref-bind' + (counted ? '+recruit' : ''), player, 'referrer=' + referrer.slice(0, 8));
     return res.json({ ok: true, referrer, player, countedRecruit: counted });
+  }
+
+  /*
+   * ── ref-unbind: TAKE BACK a referral that went to the wrong person ────────────────────────────
+   *
+   * ref-bind is deliberately one-way — first touch is permanent, because a referral that can be
+   * reassigned later is a referral nobody can trust. That rule protects players from the operator
+   * changing his mind. It does not protect anybody from a TYPO, and there was no door at all: an
+   * operator who credited the Bounty Hour prize to the wrong wallet had no way to take it back and
+   * no way to give it to whoever actually won. That is what this is for, and why it is the only
+   * action here that undoes a completed one.
+   *
+   * It reverses exactly the four writes ref-bind makes, and nothing else:
+   *   refby:<player>        DEL      — frees first touch, so the correct referrer can now be bound
+   *   refstats:<ref> players -1      — floored at 0; never invents a negative from a missing stat
+   *   refq:<player>         DEL      — clears the qualified flag so the re-bind can count them again
+   *   recruit:<week> <ref>  -1       — floored at 0, in the SAME week bucket ref-bind wrote to
+   *
+   * ⚠️ WHAT IT DOES NOT TOUCH, deliberately:
+   *   refbal:<referrer>  — accrued LAMPORTS, real money the referrer can withdraw. Every paid join
+   *                        the referee made while mis-bound put REF_REWARD_LAMPORTS in there, and it
+   *                        is pooled with legitimately earned referral money, so there is no honest
+   *                        way to subtract "the wrong part" here. The preview REPORTS the balance so
+   *                        the operator can see whether anything actually accrued and decide.
+   *   refwag:<player>    — the referee's own cumulative wager toward qualifying. It is a fact about
+   *                        the player, not about who referred them, and clearing it would make them
+   *                        re-earn a bar they already passed.
+   *
+   * `dry: true` reports what WOULD change and writes nothing. The panel always previews first.
+   */
+  if (action === 'ref-unbind') {
+    const player = String(address || '').trim();
+    if (player.length < 20) return res.status(400).json({ error: 'address (the referee wallet) required' });
+
+    const raw = await kvGet('refby:' + player).catch(() => null);
+    if (!raw) return res.status(404).json({ error: 'That wallet is not bound to any referrer — nothing to undo.' });
+    let bind = null;
+    try { bind = JSON.parse(raw); } catch (_) { bind = null; }
+    const referrer = String((bind && bind.ref) || raw).trim();
+    if (!referrer) return res.status(500).json({ error: 'Binding is stored in a shape this cannot read: ' + String(raw).slice(0, 60) });
+
+    const wk        = recruitWeekId();
+    const weekCount = parseInt(await kvHget('recruit:' + wk, referrer).catch(() => 0), 10) || 0;
+    const players   = parseInt(((await kvHgetall('refstats:' + referrer).catch(() => null)) || {}).players, 10) || 0;
+    const qualified = !!(await kvGet('refq:' + player).catch(() => null));
+    const refbal    = Number(await kvGet('refbal:' + referrer).catch(() => 0)) || 0;
+
+    const plan = {
+      referrer, player, week: wk,
+      boundBy: (bind && bind.code) || 'unknown',
+      boundAt: (bind && bind.ts) || 0,
+      wasQualifiedRecruit: qualified,
+      // The recruit -1 only lands if there is a count in THIS week to take it from. A credit made
+      // before the last Saturday sits in an older bucket and is reported as such rather than being
+      // silently taken out of an unrelated week.
+      willRemoveRecruit: qualified && weekCount > 0,
+      weekCountBefore: weekCount,
+      playersBefore: players,
+      referrerRefbalLamports: refbal,
+      referrerRefbalSol: +(refbal / 1e9).toFixed(6),
+    };
+    if (req.body.dry) return res.json({ ok: true, dry: true, plan });
+
+    await kvDel('refby:' + player);
+    if (players > 0) await kvHincrby('refstats:' + referrer, 'players', -1).catch(() => {});
+    let removedRecruit = false;
+    if (qualified) {
+      await kvDel('refq:' + player).catch(() => {});
+      if (weekCount > 0) { await kvHincrby('recruit:' + wk, referrer, -1).catch(() => {}); removedRecruit = true; }
+    }
+    // The all-time board is a 60s cache of a SCAN over the week buckets (settle.js allTimeRecruits).
+    // Dropping it here means the corrected number shows immediately instead of up to a minute later,
+    // which matters when the operator is staring at the leaderboard to check the fix landed.
+    await kvDel('recruitall:cache').catch(() => {});
+    await logAction('ref-unbind' + (removedRecruit ? '-recruit' : ''), player, 'was=' + referrer.slice(0, 8));
+    return res.json({ ok: true, ...plan, removedRecruit, dry: false });
   }
 
   if (action === 'wallet-find') {

@@ -373,6 +373,35 @@ function renderWallets() {
     </div>
     <div id="wf-out"></div>
 
+    <div class="section-title" style="margin-top:22px;">🎥 CREATOR CODES</div>
+    <div class="card">
+      <div class="muted" style="font-size:12px;line-height:1.7;margin-bottom:12px;">
+        Mint a tracking code for a streamer/creator. Their link becomes
+        <code>snakepot.com/?ref=CODE</code>.
+        <br><br>
+        <b style="color:#FFD700;">The wallet you put here is who can withdraw the accrued reward</b> —
+        <code>ref-claim</code> is signature-gated, so only the holder of that wallet's private key can
+        ever be paid. For a flat-fee creator who earns nothing, mint against a wallet <b>you</b> hold and
+        never share the address; the accrual then just sits in a counter you own.
+        <br><br>
+        Use a <b>separate wallet per creator</b> — stats are keyed by referrer wallet, not by code, so a
+        reused wallet merges two creators' numbers into one bucket that can't be split apart again.
+        <br><br>
+        <span style="color:#FF9F1C;">Only counts PAID joins.</span> Someone who arrives on the link and
+        only plays free lobbies never appears here.
+      </div>
+      <input id="rm-code" placeholder="CODE (letters + numbers, max 12)" maxlength="12" oninput="rmClean()" style="width:100%;box-sizing:border-box;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;margin-bottom:6px;text-transform:uppercase;">
+      <div class="muted" style="font-size:11px;margin-bottom:8px;">
+        12 characters max — the site's link capture truncates at 12, so a longer code silently never
+        matches and tracks nothing. Underscores and spaces are stripped.
+      </div>
+      <input id="rm-ref" placeholder="REFERRER wallet (a fresh wallet YOU control)" style="width:100%;box-sizing:border-box;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;margin-bottom:10px;">
+      <button class="btn btn-g btn-sm" onclick="doRefMint()">MINT CODE</button>
+      <button class="btn btn-sm" onclick="doRefList()" style="margin-left:8px;">REFRESH STATS</button>
+      <div id="rm-out" style="margin-top:10px;"></div>
+      <div id="rl-out" style="margin-top:12px;"></div>
+    </div>
+
     <div class="section-title" style="margin-top:22px;">🤝 CREDIT A REFERRAL BY HAND</div>
     <div class="card">
       <div class="muted" style="font-size:12px;line-height:1.7;margin-bottom:12px;">
@@ -386,7 +415,24 @@ function renderWallets() {
       </label>
       <button class="btn btn-g btn-sm" onclick="doRefBind()">CREDIT REFERRAL</button>
       <div id="rb-out" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="section-title" style="margin-top:22px;">↩️ TAKE A REFERRAL BACK</div>
+    <div class="card">
+      <div class="muted" style="font-size:12px;line-height:1.7;margin-bottom:12px;">
+        For a credit that went to the <b>wrong wallet</b>. Enter the REFEREE (the friend), not the person
+        who got the credit — the panel looks up who currently holds them and shows you before it changes
+        anything. Undoing frees the referee so you can then credit them to the right person with the box
+        above. <b>It does not move SOL:</b> any referral reward already accrued to the wrong wallet stays
+        there, and the preview tells you how much that is.
+      </div>
+      <input id="ru-play" placeholder="REFEREE wallet (the friend who was credited to the wrong person)" style="width:100%;box-sizing:border-box;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;margin-bottom:10px;">
+      <button class="btn btn-sm" onclick="doRefUnbind(true)">1 · PREVIEW</button>
+      <div id="ru-out" style="margin-top:10px;"></div>
     </div>`;
+  // Populate the creator table straight away — an empty panel on open reads as "no data" rather than
+  // "not fetched yet", which is exactly the confusion this whole section exists to remove.
+  doRefList();
 }
 async function doRefBind() {
   const out = document.getElementById('rb-out');
@@ -398,6 +444,98 @@ async function doRefBind() {
     const d = await api({ action: 'ref-bind', referrer, address: player, countRecruit: count });
     out.innerHTML = '<span style="color:#39FF14;">✓ Credited' + (d.countedRecruit ? ' — counted as a qualified recruit this week.' : ' — bound, but the recruit was already counted.') + '</span>';
   } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
+}
+/*
+ * Two clicks, never one. PREVIEW reads the binding and reports what would change; the CONFIRM button
+ * only appears after that, carrying the wallet the preview actually resolved. Getting this wrong is
+ * what created the job in the first place, so the destructive half of it never runs off a wallet the
+ * operator has not been shown.
+ */
+async function doRefUnbind(dry) {
+  const out    = document.getElementById('ru-out');
+  const player = (document.getElementById('ru-play').value || '').trim();
+  if (player.length < 20) { out.innerHTML = '<span style="color:#FF4444;">That does not look like a Solana address.</span>'; return; }
+  out.innerHTML = '<span class="muted">Working…</span>';
+  try {
+    const d = await api({ action: 'ref-unbind', address: player, dry: !!dry });
+    const p = dry ? (d.plan || {}) : d;
+    if (dry) {
+      let h = '<div style="line-height:1.8;font-size:12px;">'
+        + 'Currently credited to <b style="font-family:monospace;color:#FFD700;">' + esc(p.referrer) + '</b><br>'
+        + 'Qualified recruit: <b>' + (p.wasQualifiedRecruit ? 'YES' : 'no') + '</b>'
+        + (p.wasQualifiedRecruit
+            ? (p.willRemoveRecruit
+                ? ' — will take 1 off their <b>' + esc(p.week) + '</b> count (now ' + p.weekCountBefore + ')'
+                : ' — <b style="color:#FFAA33;">but the count is not in the current week (' + esc(p.week) + '), so no recruit will be subtracted.</b> Their leaderboard number will not drop.')
+            : '')
+        + '<br>Referral SOL already accrued to that wallet: <b>' + (p.referrerRefbalSol || 0) + ' SOL</b>'
+        + (p.referrerRefbalLamports ? ' <span class="muted">— NOT reversed by this.</span>' : '')
+        + '</div>'
+        + '<button class="btn btn-r btn-sm" style="margin-top:10px;" onclick="doRefUnbind(false)">2 · CONFIRM — TAKE IT BACK</button>';
+      out.innerHTML = h;
+      return;
+    }
+    out.innerHTML = '<span style="color:#39FF14;">✓ Taken back from ' + esc(String(p.referrer).slice(0, 8)) + '…'
+      + (d.removedRecruit ? ' — recruit count reduced by 1.' : ' — binding removed (no recruit count changed).')
+      + '</span> <span class="muted">You can now credit this referee to the correct wallet above.</span>';
+  } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
+}
+// Mirror RefCapture.jsx exactly: uppercase, strip non-alphanumerics, cap at 12. The capture component
+// truncates at 12 while api/join.js normalizeCode allows 24, so a 13+ char code mints fine and then
+// never matches a real visit. Clamping in the field is the only place that failure is visible.
+function rmClean() {
+  const el = document.getElementById('rm-code');
+  el.value = String(el.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+}
+async function doRefMint() {
+  const out = document.getElementById('rm-out');
+  rmClean();
+  const code     = (document.getElementById('rm-code').value || '').trim();
+  const referrer = (document.getElementById('rm-ref').value || '').trim();
+  if (!code)            { out.innerHTML = '<span style="color:#FF4444;">Code required.</span>'; return; }
+  if (referrer.length < 20) { out.innerHTML = '<span style="color:#FF4444;">That does not look like a Solana address.</span>'; return; }
+  out.innerHTML = '<span class="muted">Minting…</span>';
+  try {
+    const d = await api({ action: 'ref-mint', code, referrer });
+    const link = 'https://snakepot.com/?ref=' + d.code;
+    out.innerHTML = '<span style="color:#39FF14;">✓ Minted.</span> Their link:<br>' +
+      '<code style="display:inline-block;margin-top:6px;padding:8px 10px;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;user-select:all;">' + esc(link) + '</code>';
+    doRefList();
+  } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
+}
+async function doRefList() {
+  const out = document.getElementById('rl-out');
+  out.innerHTML = '<span class="muted">Loading…</span>';
+  try {
+    const d = await api({ action: 'ref-list' });
+    const codes = d.codes || [];
+    if (!codes.length) { out.innerHTML = '<span class="muted">No codes minted yet.</span>'; return; }
+    codes.sort((a, b) => (b.players || 0) - (a.players || 0));
+    let h = '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
+      '<tr style="text-align:left;color:#9aa;border-bottom:1px solid rgba(255,255,255,.12);">' +
+      '<th style="padding:6px 4px;">CODE</th><th style="padding:6px 4px;">PAYS OUT TO</th>' +
+      '<th style="padding:6px 4px;text-align:right;">PLAYERS</th><th style="padding:6px 4px;text-align:right;">PAID JOINS</th>' +
+      '<th style="padding:6px 4px;text-align:right;">ACCRUED</th><th></th></tr>';
+    for (const c of codes) {
+      const sol = ((Number(c.owedLamports) || 0) / 1e9).toFixed(4);
+      h += '<tr style="border-bottom:1px solid rgba(255,255,255,.06);">' +
+        '<td style="padding:8px 4px;font-family:monospace;color:#39FF14;">' + esc(c.code) + '</td>' +
+        '<td style="padding:8px 4px;font-family:monospace;" title="' + esc(c.referrer) + '">' + esc(String(c.referrer).slice(0, 8)) + '…</td>' +
+        '<td style="padding:8px 4px;text-align:right;font-weight:700;">' + (Number(c.players) || 0) + '</td>' +
+        '<td style="padding:8px 4px;text-align:right;">' + (Number(c.joins) || 0) + '</td>' +
+        '<td style="padding:8px 4px;text-align:right;" class="muted">' + sol + ' SOL</td>' +
+        '<td style="padding:8px 4px;text-align:right;"><button class="btn btn-sm" onclick="doRefVoid(\'' + esc(c.code) + '\')">VOID</button></td></tr>';
+    }
+    h += '</table><div class="muted" style="font-size:11px;margin-top:10px;line-height:1.6;">' +
+      'PLAYERS = referred wallets that completed a first PAID join. Free-lobby players are not counted ' +
+      'anywhere here. ACCRUED is withdrawable only by whoever holds that wallet\'s private key.</div>';
+    out.innerHTML = h;
+  } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
+}
+async function doRefVoid(code) {
+  if (!confirm('Void code ' + code + '?\n\nNew visits on that link stop being attributed. Players already bound to it keep their attribution — first touch is permanent.')) return;
+  try { await api({ action: 'ref-void', code }); doRefList(); }
+  catch (e) { alert(e.message || 'Failed'); }
 }
 async function doWalletFind() {
   const out = document.getElementById('wf-out');
