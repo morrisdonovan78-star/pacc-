@@ -82,10 +82,11 @@ const normalizeCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '
 // cumulative PAID wager crosses this threshold (real money at risk = the anti-alt wall). Rolling
 // 7-day weeks bucket the counts. KEEP RECRUIT_ANCHOR in sync with api/settle.js recruitWeek().
 const RECRUIT_QUALIFY_LAMPORTS = 60000000;            // ~0.06 SOL (~$9-10) of real wagering
-// Sat Jul 25 2026 14:00 America/New_York (18:00 UTC) — weeks end Saturday 2pm ET. See the long note
-// in api/settle.js before changing this; the two MUST match or counts land in a different bucket than
-// the board reads.
-const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 25, 18, 0, 0);
+// Mon Jul 27 2026 14:00 America/New_York (18:00 UTC) — weeks end Monday 2pm ET. See the long note in
+// api/settle.js before changing this; all THREE copies (here, settle.js, admin.js) MUST match or
+// counts land in a different bucket than the board reads, and a shift that changes the current week
+// index renumbers every bucket. scripts/test-recruit-anchor.js enforces both.
+const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 27, 18, 0, 0);
 const RECRUIT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 function recruitWeekId(now) { now = now || Date.now(); return 'rw' + Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS); }
 

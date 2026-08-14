@@ -27,8 +27,13 @@ const { kvGet, kvSet, kvSetPerm, kvDel, kvHgetall, kvHget, kvHset,
  * and ref-unbind cannot disagree about which bucket a credit is in — an unbind that decremented a
  * different week than the bind incremented would leave the count stuck AND put a phantom -1 in a week
  * nobody touched. Three hand-copied constants is the real defect; keep them in step.
+ *
+ * Moved Saturday → MONDAY Jul 27 2026 14:00 ET on 2026-08-14 (owner's call). The +2d shift leaves the
+ * current week index unchanged, so nothing needed migrating — see the long note in api/settle.js, and
+ * scripts/test-recruit-anchor.js, which fails if the three copies drift OR if a future shift would
+ * renumber the buckets.
  */
-const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 25, 18, 0, 0);
+const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 27, 18, 0, 0);
 const RECRUIT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 function recruitWeekId(now) { return 'rw' + Math.floor(((now || Date.now()) - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS); }
 

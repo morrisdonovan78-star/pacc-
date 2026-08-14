@@ -165,20 +165,28 @@ function activeGrindEvent(now) { now = now || Date.now();
 // ── Recruiter of the Week — rolling 7-day contest. weekId buckets all recruit counts so a new week
 // starts clean automatically.
 //
-// Anchor = SATURDAY Jul 25 2026 14:00 America/New_York (18:00 UTC, EDT), so every week ends Saturday
-// 2:00 PM ET — the same slot the Bounty Hour runs in, which is the point: one weekly deadline players
-// can remember. It was previously anchored to Thursday Jul 23 00:00 ET, so the homepage counted down
-// to Thursday midnight while the profile page told players "runs to Saturday 2pm ET" — the two
-// disagreed by two and a half days and the copy was the honest one. Shifting the anchor by exactly
-// 2d14h leaves the CURRENT week id unchanged (both anchors put today in rw0), so no recruit counts
-// already banked under recruit:rw0 are lost.
+// Anchor = MONDAY Jul 27 2026 14:00 America/New_York (18:00 UTC, EDT), so every week ends Monday
+// 2:00 PM ET. Owner's call, 2026-08-14 — moved off Saturday, which was the Bounty Hour slot.
+//
+// ⚠️ HOW TO MOVE THIS SAFELY, because the obvious way loses counts. `recruit:<weekId>` keys are
+// written by api/join.js and api/admin.js and read by the board, and the id is pure arithmetic off
+// this constant — so an arbitrary shift RENUMBERS every bucket and the current week's counts vanish
+// from the leaderboard while a different week's reappear. Shift only by an amount that leaves
+// `floor((now - anchor) / 7d)` UNCHANGED, and prove it before shipping:
+//
+//     Sat Jul 25 18:00Z → Mon Jul 27 18:00Z  is +2d, and on 2026-08-14 both put today in rw2.
+//
+// That is the same property the previous move relied on (Thursday Jul 23 00:00 ET → Saturday, +2d14h,
+// both landing in rw0). scripts/test-recruit-anchor.js asserts it, and asserts all three copies of
+// the constant are identical. A shift that fails that check needs the counts migrated first, not a
+// bigger comment.
 //
 // Fixed 7-day arithmetic, so this lands at 1:00 PM ET during EST rather than 2:00 PM. Same
 // simplification the Bounty Hour makes (see EventCard.jsx) and deliberate: a stable, monotonic week
-// index is worth more here than an hour of DST accuracy, because `recruit:<weekId>` keys are written
-// by api/join.js and must never renumber under a live contest.
-// KEEP RECRUIT_ANCHOR in sync with join.js (qualification counting writes recruit:<weekId>).
-const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 25, 18, 0, 0);
+// index is worth more here than an hour of DST accuracy.
+// KEEP RECRUIT_ANCHOR in sync with api/join.js AND api/admin.js — all three write or read
+// recruit:<weekId>, and they have silently disagreed before.
+const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 27, 18, 0, 0);
 const RECRUIT_WEEK_MS = 7 * 24 * 3600 * 1000;
 function recruitWeek(now) { now = now || Date.now();
   const i = Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS);
