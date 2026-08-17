@@ -3345,6 +3345,24 @@ module.exports = async function handler(req, res) {
         // by taking it from here — a wrong value simply makes the HMAC not match.
         const cpLobby = String(body.cashLobby || '');
         let   proofOk = false;
+        /* Separate from proofOk, and the whole point of the 2026-08-17 fix.
+         *
+         * proofAuthentic = the HMAC VERIFIED, so the game server genuinely signed this cash-out with
+         * GAME_SECRET. Nobody without the secret can produce that.
+         * proofOk        = ...and the signed figures are still usable as the AUTHORITATIVE amount.
+         *
+         * They came apart on the base check below: the proof binds `cpBase` to the `pw:` deposit the
+         * game server read at mint time, and `pw:` legitimately MOVES while a player eats (the node's
+         * own log shows base 13186523 -> 13202192 for one player). A player whose wager changed between
+         * the proof being minted and the cash-out landing therefore failed the bind — and with
+         * CASHOUT_REQUIRE_PROOF armed that was a flat REFUSAL, not a fallback, so an honest player was
+         * told "could not be verified with the game server" and could not get paid.
+         *
+         * A moved base is a STALE BINDING, not a forgery: the signature still proves the game server
+         * vouched for this player. So it falls back to the capped path (which is bounded by the 20x cap
+         * AND floored at the real kvWager deposit) instead of refusing. Only a cash-out with NO
+         * authentic signature at all is still refused outright, which is what the guard exists for. */
+        let   proofAuthentic = false;
 
         if (cpProof && cpProof.length === 64 && cpTs && cpLam > 0 && GAME_SECRET) {
           const cpAge = Date.now() - cpTs;
@@ -3355,10 +3373,13 @@ module.exports = async function handler(req, res) {
             const canon = 'cashout:' + playerAddress + ':' + cpLobby + ':' + cpBase + ':' + cpLam + ':' + cpTs;
             const want  = crypto.createHmac('sha256', GAME_SECRET).update(canon).digest('hex');
             try { proofOk = crypto.timingSafeEqual(Buffer.from(want), Buffer.from(cpProof)); } catch (_) {}
+            // The signature verified: this really came from the game server. Recorded before the bind
+            // check below can clear proofOk, because the two answer different questions.
+            proofAuthentic = proofOk;
             // Bind the proof to THIS deposit. The base the game server read out of `pw:` at join
             // must still be the `pw:` we just consumed, so a proof cannot be carried across rounds.
             if (proofOk && cpBase !== kvWager) {
-              console.warn('[settle] cashout proof base mismatch signed=' + cpBase + ' kv=' + kvWager + ' — refusing proof, falling back');
+              console.warn('[settle] cashout proof base mismatch signed=' + cpBase + ' kv=' + kvWager + ' — signature is genuine, falling back to the capped path');
               proofOk = false;
             }
             // Spent proofs stay spent. Checked (not set) here so the client's own retry loop can
@@ -3388,7 +3409,33 @@ module.exports = async function handler(req, res) {
             wagerLamports = cpLam;   // authoritative, uncapped
           }
         } else {
-          if (REQUIRE_CASH_PROOF) {
+          /* ⚠️ REFUSE ONLY WHEN NOTHING VOUCHED FOR THIS CASH-OUT.
+           *
+           * `proofAuthentic` means the HMAC verified — the game server signed it and only the holder of
+           * GAME_SECRET could have. A proof that is authentic but whose base moved is a stale binding on
+           * an honest player (see the note where proofAuthentic is declared), and refusing it is how
+           * players ended up unable to cash out at all while the guard was armed. Those fall through to
+           * the capped path below, which is floored at the real `pw:` deposit and capped at 20x it, so a
+           * forged AMOUNT still cannot overpay.
+           *
+           * What is still refused outright is what the guard was built for: a cash-out arriving with no
+           * signature, a malformed one, or one that fails the HMAC. */
+          if (proofAuthentic) {
+            /* Prefer the figure the GAME SERVER SIGNED over the client's unsigned claim. The signature is
+             * genuine, so `cpLam` is the honest total it computed (deposit + food); only its binding to a
+             * since-changed deposit is stale. Still bounded, because a genuine proof could in principle be
+             * a replayed one from a richer round: floored at the real `pw:` so nobody is shortchanged, and
+             * capped at the same 20x the unsigned path uses so nobody is overpaid.
+             *
+             * `cpd:` already blocks replaying a proof that was actually PAID, so the cap is the backstop
+             * for the case that guard cannot see, not the primary defence. */
+            wagerLamports = Math.max(kvWager, Math.min(cpLam, kvWager * 20));
+            console.warn('[settle] cashout base moved — paying signed ' + cpLam + ' bounded to ' + wagerLamports + ' (kv=' + kvWager + ')');
+            betAlert('CASHOUT proof base moved — signature GENUINE, paid the signed amount bounded to the ' +
+                     'deposit. player=' + playerAddress.slice(0, 8) + ' game=' + game + ' signedBase=' + cpBase +
+                     ' signedTotal=' + cpLam + ' kv=' + kvWager + ' paid=' + wagerLamports +
+                     '. Not a forgery: the deposit changed between the proof being minted and the cash-out.');
+          } else if (REQUIRE_CASH_PROOF) {
             await kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
             betAlert('CASHOUT REFUSED — no valid game-server proof. player=' + playerAddress.slice(0, 8) +
                      ' game=' + game + ' claimed=' + wagerLamportsRaw + '. If this player is on a CACHED ' +
@@ -3402,9 +3449,13 @@ module.exports = async function handler(req, res) {
               error: 'Cash-out could not be verified with the game server. Your wager is SAFE and still on record — please RELOAD the page (Ctrl+Shift+R), rejoin, and cash out again.',
               reload: true, retry: true });
           }
-          wagerLamports = wagerLamportsRaw > kvWager
-            ? Math.min(wagerLamportsRaw, kvWager * 20)
-            : kvWager;
+          // Unsigned claim, capped. Reached when the guard is OFF and no usable proof arrived — and NOT
+          // when the proof was authentic, which is handled above off the signed figure instead.
+          if (wagerLamports == null) {
+            wagerLamports = wagerLamportsRaw > kvWager
+              ? Math.min(wagerLamportsRaw, kvWager * 20)
+              : kvWager;
+          }
         }
         console.log('[settle] cashout kv=' + kvWager + ' claimed=' + wagerLamportsRaw +
                     ' proof=' + (proofOk ? cpLam : 'none') + ' using=' + wagerLamports +
