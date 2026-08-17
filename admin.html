@@ -411,7 +411,7 @@ function renderWallets() {
       <input id="rb-ref" placeholder="REFERRER wallet (who gets the credit)" style="width:100%;box-sizing:border-box;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;margin-bottom:8px;">
       <input id="rb-play" placeholder="REFEREE wallet (the friend who joined)" style="width:100%;box-sizing:border-box;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;margin-bottom:10px;">
       <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px;cursor:pointer;">
-        <input type="checkbox" id="rb-count" checked> also count them as a QUALIFIED RECRUIT this week
+        <input type="checkbox" id="rb-count" checked> also count them as a QUALIFIED INVITE (all-time)
       </label>
       <button class="btn btn-g btn-sm" onclick="doRefBind()">CREDIT REFERRAL</button>
       <div id="rb-out" style="margin-top:10px;"></div>
@@ -429,6 +429,19 @@ function renderWallets() {
       <input id="ru-play" placeholder="REFEREE wallet (the friend who was credited to the wrong person)" style="width:100%;box-sizing:border-box;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;margin-bottom:10px;">
       <button class="btn btn-sm" onclick="doRefUnbind(true)">1 · PREVIEW</button>
       <div id="ru-out" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="section-title" style="margin-top:22px;">📦 IMPORT OLD RECRUIT COUNTS — RUN ONCE</div>
+    <div class="card">
+      <div class="muted" style="font-size:12px;line-height:1.7;margin-bottom:12px;">
+        Recruiter of the Week is gone, and with it the weekly buckets its counts lived in. This folds
+        those old counts into each referrer's <b>all-time qualified-invite</b> total, so nobody's number
+        restarts at zero. <b>Run it once, after the deploy.</b> It is safe to run again — each referrer is
+        flagged as it is imported, so a second run adds nothing and an interrupted run can be finished by
+        re-running. It moves <b>no SOL</b>.
+      </div>
+      <button class="btn btn-sm" onclick="doQualImport(true)">1 · PREVIEW</button>
+      <div id="qi-out" style="margin-top:10px;"></div>
     </div>`;
   // Populate the creator table straight away — an empty panel on open reads as "no data" rather than
   // "not fetched yet", which is exactly the confusion this whole section exists to remove.
@@ -442,7 +455,7 @@ async function doRefBind() {
   out.innerHTML = '<span class="muted">Working…</span>';
   try {
     const d = await api({ action: 'ref-bind', referrer, address: player, countRecruit: count });
-    out.innerHTML = '<span style="color:#39FF14;">✓ Credited' + (d.countedRecruit ? ' — counted as a qualified recruit this week.' : ' — bound, but the recruit was already counted.') + '</span>';
+    out.innerHTML = '<span style="color:#39FF14;">✓ Credited' + (d.countedRecruit ? ' — counted as a qualified invite.' : ' — bound, but this friend was already counted.') + '</span>';
   } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
 }
 /*
@@ -462,11 +475,11 @@ async function doRefUnbind(dry) {
     if (dry) {
       let h = '<div style="line-height:1.8;font-size:12px;">'
         + 'Currently credited to <b style="font-family:monospace;color:#FFD700;">' + esc(p.referrer) + '</b><br>'
-        + 'Qualified recruit: <b>' + (p.wasQualifiedRecruit ? 'YES' : 'no') + '</b>'
+        + 'Qualified invite: <b>' + (p.wasQualifiedRecruit ? 'YES' : 'no') + '</b>'
         + (p.wasQualifiedRecruit
             ? (p.willRemoveRecruit
-                ? ' — will take 1 off their <b>' + esc(p.week) + '</b> count (now ' + p.weekCountBefore + ')'
-                : ' — <b style="color:#FFAA33;">but the count is not in the current week (' + esc(p.week) + '), so no recruit will be subtracted.</b> Their leaderboard number will not drop.')
+                ? ' — will take 1 off their all-time count (now ' + p.qualifiedBefore + ')'
+                : ' — <b style="color:#FFAA33;">their count is already 0, so there is nothing to subtract.</b>')
             : '')
         + '<br>Referral SOL already accrued to that wallet: <b>' + (p.referrerRefbalSol || 0) + ' SOL</b>'
         + (p.referrerRefbalLamports ? ' <span class="muted">— NOT reversed by this.</span>' : '')
@@ -476,8 +489,33 @@ async function doRefUnbind(dry) {
       return;
     }
     out.innerHTML = '<span style="color:#39FF14;">✓ Taken back from ' + esc(String(p.referrer).slice(0, 8)) + '…'
-      + (d.removedRecruit ? ' — recruit count reduced by 1.' : ' — binding removed (no recruit count changed).')
+      + (d.removedRecruit ? ' — qualified-invite count reduced by 1.' : ' — binding removed (no invite count changed).')
       + '</span> <span class="muted">You can now credit this referee to the correct wallet above.</span>';
+  } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
+}
+// Same two-click shape as the unbind above: PREVIEW shows exactly what would be added, per referrer,
+// and only then does a CONFIRM button exist. This one writes to every referrer at once, so being shown
+// the list first is the difference between an import and a surprise.
+async function doQualImport(dry) {
+  const out = document.getElementById('qi-out');
+  out.innerHTML = '<span class="muted">Working…</span>';
+  try {
+    const d = await api({ action: 'ref-qualified-import', dry: !!dry });
+    const rows = (d.imported || []).map(r => '<div style="font-family:monospace;font-size:12px;">'
+      + esc(r.referrer) + ' <b style="color:#39FF14;">+' + r.add + '</b></div>').join('');
+    let h = '<div style="line-height:1.8;font-size:12px;">'
+      + 'Week buckets found: <b>' + (d.weekBucketsFound || 0) + '</b> · referrers in them: <b>'
+      + (d.referrers || 0) + '</b><br>'
+      + (dry ? 'Would add' : 'Added') + ' <b style="color:#39FF14;">' + (d.totalAdded || 0)
+      + '</b> across <b>' + (d.imported || []).length + '</b> referrer(s)'
+      + ((d.skipped || []).length ? ' · <span class="muted">' + d.skipped.length + ' already imported, skipped</span>' : '')
+      + '</div>' + rows;
+    if (dry) {
+      h += (d.imported || []).length
+        ? '<button class="btn btn-g btn-sm" style="margin-top:10px;" onclick="doQualImport(false)">2 · CONFIRM — IMPORT</button>'
+        : '<div class="muted" style="margin-top:8px;font-size:12px;">Nothing left to import.</div>';
+    }
+    out.innerHTML = h;
   } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
 }
 // Mirror RefCapture.jsx exactly: uppercase, strip non-alphanumerics, cap at 12. The capture component

@@ -62,17 +62,11 @@ eq(r.ok, false, 'floor reserve enforced');
 r = P.planBountyPayout({ board: board(5), solPriceUsd: 0, escrowLamports: BIG });
 eq(r.ok, false, 'no price fails closed');
 
-// 10. Recruiter payout — single top referrer gets the flat $10
-r = P.planRecruiterPayout({ board: [{ addr: 'R1', name: 'A', recruits: 5 }, { addr: 'R2', name: 'B', recruits: 3 }], solPriceUsd: SOL, escrowLamports: BIG, prizeUsd: 10 });
-eq(r.ok, true, 'recruiter payout ok');
-eq(r.winners.length, 1, 'one recruiter winner');
-eq(r.winners[0].addr, 'R1', 'top referrer wins');
-eq(r.winners[0].usd, 10, 'recruiter prize $10');
-eq(r.winners[0].lamports, L(10), 'recruiter lamports correct');
-
-// 11. Recruiter with no recruits → nothing paid
-r = P.planRecruiterPayout({ board: [], solPriceUsd: SOL, escrowLamports: BIG });
-eq(r.ok, false, 'no recruiters pays nothing');
+// 10. There is NO recruiter payout planner any more. Cases 10 and 11 used to exercise
+// planRecruiterPayout — the single-winner $10 Recruiter-of-the-Week prize — which was deleted along with
+// the contest on 2026-08-17. Asserting its absence is worth a line: this is the only module that can
+// turn a referral count into lamports, so if the function ever comes back, it comes back deliberately.
+eq(typeof P.planRecruiterPayout, 'undefined', 'no recruiter payout planner is exported');
 
 console.log((fail === 0 ? '✓ ALL PASS' : '✗ FAILURES') + ' — ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail === 0 ? 0 : 1);

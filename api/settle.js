@@ -112,14 +112,14 @@ const CREATOR_FEE_PCT = 0.10;
  * resolving to the same id it was paid under.
  *
  * KEEP IN SYNC with the 'grind' schedule in api/join.js and window.SNAKE_EVENTS in
- * slither-snakes.html (the in-game card). SATURDAY_ANCHOR is the same instant as RECRUIT_ANCHOR
- * below — one weekly deadline across the whole platform.
+ * slither-snakes.html (the in-game card).
  *
  * Recruiter of the Week used to be exempt from this rule ("a rolling weekly contest that always
- * runs"). That exemption is GONE — it is the exact hole this whole comment warns about, and on
- * 2026-08-07 it paid an unscheduled $10 out of escrow mid-match and stranded a player's cash-out.
- * It now has its own explicit list, SCHEDULED_RECRUIT_WEEKS. Owner's rule, no exceptions: prize
- * money is committed one occurrence at a time, by hand, or it is not committed. */
+ * runs"). That exemption is the exact hole this whole comment warns about: on 2026-08-07 it paid an
+ * unscheduled $10 out of escrow mid-match and stranded a player's cash-out. It was first put behind
+ * its own explicit schedule and then, on 2026-08-17, removed altogether. Bounty Hour and the Free
+ * Entry Grind are what is left, and the rule they are held to is unchanged — prize money is
+ * committed one occurrence at a time, by hand, or it is not committed. */
 const SCHEDULED_SATURDAYS = ['2026-07-25'];                // ← the only Saturdays an event exists on
 const SATURDAY_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0);   // Sat Jul 25 2026 14:00 ET
 const SAT_UTC_HOUR    = 18;                                // time-of-day of SATURDAY_ANCHOR, in UTC
@@ -162,99 +162,29 @@ function activeGrindEvent(now) { now = now || Date.now();
   const e = evOccurrence(now, 'grind', GRIND_EVENT_DUR, GRIND_OFFSET_MS);
   return (e && now >= e.start && now < e.end) ? e : null; }
 
-// ── Recruiter of the Week — rolling 7-day contest. weekId buckets all recruit counts so a new week
-// starts clean automatically.
-//
-// Anchor = MONDAY Jul 27 2026 14:00 America/New_York (18:00 UTC, EDT), so every week ends Monday
-// 2:00 PM ET. Owner's call, 2026-08-14 — moved off Saturday, which was the Bounty Hour slot.
-//
-// ⚠️ HOW TO MOVE THIS SAFELY, because the obvious way loses counts. `recruit:<weekId>` keys are
-// written by api/join.js and api/admin.js and read by the board, and the id is pure arithmetic off
-// this constant — so an arbitrary shift RENUMBERS every bucket and the current week's counts vanish
-// from the leaderboard while a different week's reappear. Shift only by an amount that leaves
-// `floor((now - anchor) / 7d)` UNCHANGED, and prove it before shipping:
-//
-//     Sat Jul 25 18:00Z → Mon Jul 27 18:00Z  is +2d, and on 2026-08-14 both put today in rw2.
-//
-// That is the same property the previous move relied on (Thursday Jul 23 00:00 ET → Saturday, +2d14h,
-// both landing in rw0). scripts/test-recruit-anchor.js asserts it, and asserts all three copies of
-// the constant are identical. A shift that fails that check needs the counts migrated first, not a
-// bigger comment.
-//
-// Fixed 7-day arithmetic, so this lands at 1:00 PM ET during EST rather than 2:00 PM. Same
-// simplification the Bounty Hour makes (see EventCard.jsx) and deliberate: a stable, monotonic week
-// index is worth more here than an hour of DST accuracy.
-// KEEP RECRUIT_ANCHOR in sync with api/join.js AND api/admin.js — all three write or read
-// recruit:<weekId>, and they have silently disagreed before.
-const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 27, 18, 0, 0);
-const RECRUIT_WEEK_MS = 7 * 24 * 3600 * 1000;
-function recruitWeek(now) { now = now || Date.now();
-  const i = Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS);
-  return { id: 'rw' + i, start: RECRUIT_ANCHOR + i * RECRUIT_WEEK_MS, end: RECRUIT_ANCHOR + (i + 1) * RECRUIT_WEEK_MS }; }
+/* ── Recruiter of the Week: REMOVED, 2026-08-17 ──────────────────────────────────────
+ *
+ * Owner: take it out of snakepot.com completely, no trace of it whatsoever. Gone from here are the
+ * rolling week arithmetic (RECRUIT_ANCHOR / recruitWeek), the paying-week schedule
+ * (SCHEDULED_RECRUIT_WEEKS), the derived all-time totals (allTimeRecruits + its recruitall: cache),
+ * the settleRecruiter payout, and the recruiter-board / recruiter-settle / recruit-migrate actions.
+ * lib/eventpayout.js lost planRecruiterPayout with them, so no code path in the platform can now
+ * turn a referral count into a transfer.
+ *
+ * ⚠️ REFERRALS THEMSELVES STAY — that was the explicit instruction. The invite link, the first-touch
+ * bind (refby:), the per-referrer stats (refstats:) and the exactly-once qualify flag (refq:) are all
+ * untouched, and my-refcode below still serves a player their link and their all-time count.
+ *
+ * The count moved from `recruit:<weekId>` hashes to one `refstats:<ref>` field, `qualified`. With no
+ * contest there is no week, so there is nothing to bucket by and no anchor that can renumber a
+ * bucket — the failure mode that cost two sessions. Writers are api/join.js (accrual, +1) and
+ * api/admin.js (ref-bind +1 / ref-unbind -1), the same two that already maintain `players` beside it.
+ *
+ * ⚠️ The old `recruit:rw*` hashes are LEFT IN KV, not deleted. They hold counts earned before this
+ * change, and admin.html has a one-shot `ref-qualified-import` that folds them into
+ * refstats.qualified so nobody watches their number drop to zero. Run it once after deploy; it is
+ * NX-guarded, so a second run is a no-op. Delete the buckets only after that has run. */
 
-/* ⚠️ WHICH RECRUITER WEEKS ACTUALLY PAY A PRIZE — the owner's schedule, not the calendar.
- *
- * recruitWeek() is pure arithmetic: it mints a fresh week id every 7 days, FOREVER. Bounty Hour has
- * always been gated by an explicit SCHEDULED_SATURDAYS list precisely so a window can never open on a
- * week the operator did not schedule (giving away real money). Recruiter of the Week had NO such
- * gate — so every rolling week automatically owed somebody $10 out of escrow, indefinitely, with the
- * operator never having scheduled a single one of them.
- *
- * That is what happened on 2026-08-07: week rw0 (25 Jul → 1 Aug) had ended days earlier, and the
- * first person to open the referral board — six days later, mid-match — triggered its $10 payout.
- * It took escrow from 146,245,330 to 10,389,223 lamports and the next player cash-out (36,688,110
- * owed) had nothing left behind it. rw1 would have done the same thing the following week, and rw2
- * after that, unprompted.
- *
- * A week not listed here pays NOTHING. rw0 is listed because it has already been paid (recpaid:rw0 is
- * set, so listing it changes nothing and keeps its result page honest). ADD A WEEK ID HERE ONLY WHEN
- * YOU ACTUALLY WANT TO RUN THAT CONTEST — same rule, same reason, as SCHEDULED_SATURDAYS. */
-const SCHEDULED_RECRUIT_WEEKS = ['rw0'];
-function recruitWeekIsScheduled(id) { return SCHEDULED_RECRUIT_WEEKS.indexOf(String(id)) >= 0; }
-
-/* ── ALL-TIME recruit totals ─────────────────────────────────────────────────────────────────────
- *
- * `recruit:<weekId>` buckets counts per week, and the board only ever read the CURRENT bucket. So a
- * recruit somebody earned last week vanished from the leaderboard the moment the week rolled over,
- * and because only rw0 is a SCHEDULED (paying) week, every week since has looked like a contest that
- * counts nothing: players share a link, a friend qualifies, and days later the board shows zero
- * again. Reported as "when people are sending referral link it should show on leaderboard even when
- * the event isn't running or a payment is not scheduled for it".
- *
- * This is DERIVED, never stored as its own counter. A second hand-maintained total would need a
- * matching write at all three places that touch `recruit:` (join.js accrual, admin.js ref-bind,
- * settle.js recruit-migrate) — the exact three-copies-must-agree shape that already broke
- * RECRUIT_ANCHOR here. Summing the week buckets cannot drift from them by construction, and it stays
- * correct through recruit-migrate (which moves counts BETWEEN weeks, leaving the sum alone) and
- * through admin ref-unbind (which decrements a week bucket).
- *
- * Cached for CACHE_S because this is an unauthenticated read every client polls on a timer, and KV
- * request quota has taken the platform down before. One SCAN a minute platform-wide, not one per
- * poll per player.
- */
-const RECRUIT_ALL_CACHE_KEY = 'recruitall:cache';
-const RECRUIT_ALL_CACHE_S   = 60;
-async function allTimeRecruits() {
-  try {
-    const cached = await kvGet(RECRUIT_ALL_CACHE_KEY).catch(() => null);
-    if (cached) { const o = JSON.parse(cached); if (o && typeof o === 'object') return o; }
-  } catch (_) {}
-  const totals = {};
-  try {
-    // `recruit:rw*` — the trailing `rw` matters: a bare `recruit:*` would also sweep up any future
-    // sibling key that happens to share the prefix and silently inflate every total.
-    const keys = await kvScan('recruit:rw*', 500);
-    for (const k of keys) {
-      const h = (await kvHgetall(k).catch(() => null)) || {};
-      for (const a of Object.keys(h)) {
-        const n = parseInt(h[a], 10) || 0;
-        if (n > 0) totals[a] = (totals[a] || 0) + n;
-      }
-    }
-    await kvSet(RECRUIT_ALL_CACHE_KEY, JSON.stringify(totals), RECRUIT_ALL_CACHE_S).catch(() => {});
-  } catch (_) {}
-  return totals;
-}
 // Stable 6-char code from a wallet (no I/O/0/1 → unambiguous, human-typeable).
 function refCodeFor(seed) {
   const h = crypto.createHash('sha256').update('refcode|' + seed).digest();
@@ -372,37 +302,6 @@ async function settleBounty(ev, opts) {
   return { ok: true, result };
 }
 
-// Settle a Recruiter-of-the-Week: pay the single top referrer $10 from the float. Same solvency +
-// once-only guarantees as settleBounty (one week-scoped NX lock; a failed send releases it to retry).
-async function settleRecruiter(wk, opts) {
-  const dryRun = !!(opts && opts.dryRun);
-  const h = (await kvHgetall('recruit:' + wk.id).catch(() => null)) || {};
-  const board = Object.keys(h).map(a => ({ addr: a, recruits: parseInt(h[a]) || 0 }))
-                      .filter(r => r.recruits > 0).sort((a, b) => b.recruits - a.recruits);
-  for (const r of board.slice(0, 1)) { try { r.name = (await kvHget('ph:' + r.addr, 'name')) || ''; } catch (_) { r.name = ''; } }
-  const price = await solUsdQuick();
-  let esc, bal = 0;
-  try { esc = getEscrow(); const bh = await fetchBalAndHash(esc.pubkeyB58); bal = bh.bal; }
-  catch (e) { return { ok: false, reason: 'escrow load: ' + (e && e.message) }; }
-  const plan = PAYOUT.planRecruiterPayout({ board, solPriceUsd: price || 0, escrowLamports: bal, floorLamports: RENT_MIN, prizeUsd: 10 });
-  if (dryRun) return { dryRun: true, week: wk.id, solPriceUsd: price || 0, escrowSol: bal / 1e9,
-    recruiters: board.length, scheduled: recruitWeekIsScheduled(wk.id), plan };
-  // NOT ON THE SCHEDULE → NOT A CONTEST → NO PRIZE. Checked before the pay-lock so an unscheduled week
-  // never even reserves one, and the moment it IS scheduled the payout runs normally.
-  if (!recruitWeekIsScheduled(wk.id)) return { ok: false, reason: 'week ' + wk.id + ' is not a scheduled contest — add it to SCHEDULED_RECRUIT_WEEKS to run it' };
-  if (!plan.ok) return { ok: false, reason: plan.reason, plan };
-  const lk = await kvSetNX('recpaid:' + wk.id, String(Date.now()));
-  if (!lk) { const prev = await kvGet('recresult:' + wk.id).catch(() => null); return { already: true, result: prev ? JSON.parse(prev) : null }; }
-  const w = plan.winners[0];
-  const r = await wgPayOne(esc, w.addr, w.lamports, 'recruiter:' + wk.id, { protectPlayers: true });
-  if (!r.ok) { await kvDel('recpaid:' + wk.id).catch(() => {});
-    betAlert('recruiter payout FAILED ' + wk.id + ' -> ' + String(w.addr).slice(0, 8) + ' : ' + (r.reason || '')); }
-  const paid = [{ place: 1, addr: w.addr, name: w.name, usd: w.usd, lamports: w.lamports, ok: r.ok, sig: r.sig || null, reason: r.reason || null }];
-  const result = { week: wk.id, ts: Date.now(), winners: paid };
-  if (r.ok) await kvSetPerm('recresult:' + wk.id, JSON.stringify(result)).catch(() => {});
-  try { await postEventWinners('🥇 **RECRUITER OF THE WEEK — WINNER**', paid); } catch (_) {}
-  return { ok: r.ok, result };
-}
 // Minimum accrued referral balance a referrer can withdraw. Keeps a single payout worth many times
 // its own ~5000-lamport network fee instead of dribbling out cent-sized transactions. ~0.002 SOL.
 const REF_MIN_CLAIM   = 2_000_000;
@@ -1505,8 +1404,9 @@ module.exports = async function handler(req, res) {
         if (past) { ev = past; state = 'ended'; }
       }
       const nextEv = killEvents().filter(e => e.start > now).sort((a, b) => a.start - b.start)[0] || null;
-      /* NO PAYOUT HAPPENS HERE ANY MORE — same reason as recruiter-board above. The claim that this
-       * "can never touch player funds" was simply untrue: the guard it relied on (assertSolvency →
+      /* NO PAYOUT HAPPENS HERE ANY MORE — same reason the recruiter board stopped paying before it was
+       * deleted. The claim that this "can never touch player funds" was simply untrue: the guard it
+       * relied on (assertSolvency →
        * checkInvariant) deliberately left wagerLiability OUT of the gate, so with no live bets it let
        * a payout of the ENTIRE escrow balance through. Its twin drained escrow on 2026-08-07 and
        * stranded a player's 36,688,110-lamport cash-out. Player deposits are senior now
@@ -1530,62 +1430,24 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    /* ── recruit-migrate: rescue counts written to a FUTURE week by the old admin anchor ────────────
-     *
-     * api/admin.js carried its own copy of RECRUIT_ANCHOR set 62 hours earlier than the one here and
-     * in join.js, so every hand-credited recruit was banked under `recruit:rw<n+1>` while `my-refcode`
-     * and the homescreen podium both read `recruit:rw<n>`. The operator saw "credited" and the
-     * player's count never moved. The anchor is fixed; this moves the stranded counts.
-     *
-     * SAFETY — this can only ever move counts BACKWARDS out of a week that has not started yet:
-     *   * source must be a strictly FUTURE week index (only reachable via that bug),
-     *   * destination is ALWAYS the current week, never a caller-supplied one,
-     *   * counts are ADDED with hincrby (never overwritten), then the source key is deleted so a
-     *     second run is a no-op rather than a double credit.
-     * There is no input that can disturb a past week or invent a count that was not already banked.
-     *
-     * GAME_SECRET proof, the same gate wager-sweep uses. `?dry=1` reports without moving anything.
-     */
-    if (action === 'recruit-migrate') {
-      const gts = Number(req.headers['x-game-ts'] || 0);
-      if (!verifyGameProof(req, 'recruit-migrate:' + gts)) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
-      clearTimeout(guard); done = true;
-      const wk = recruitWeek();
-      const curIdx = parseInt(String(wk.id).slice(2), 10);
-      const dry = !!body.dry;
-      const scanned = [], moved = [];
-      // Look a few weeks ahead — the bug could only ever be a small offset, and this bounds the work.
-      for (let i = curIdx + 1; i <= curIdx + 4; i++) {
-        const from = 'rw' + i;
-        const h = (await kvHgetall('recruit:' + from).catch(() => null)) || {};
-        const addrs = Object.keys(h);
-        if (!addrs.length) continue;
-        scanned.push({ week: from, players: addrs.length });
-        for (const a of addrs) {
-          const n = parseInt(h[a], 10) || 0;
-          if (n <= 0) continue;
-          if (!dry) await kvHincrby('recruit:' + wk.id, a, n).catch(() => {});
-          moved.push({ player: a.slice(0, 4) + '…' + a.slice(-4), count: n, from, to: wk.id });
-        }
-        if (!dry) await kvDel('recruit:' + from).catch(() => {});
-      }
-      return res.status(200).json({ ok: true, dry, currentWeek: wk.id, futureWeeksFound: scanned, moved,
-        totalMoved: moved.reduce((s, m) => s + m.count, 0) });
-    }
-
-    // ── my-refcode: a player's own invite code/link + their qualified-recruit count this week ───────
+    // ── my-refcode: a player's own invite code/link + how many friends they have brought in ───────
+    //
+    // `recruits` used to be this week's bucket and `recruitsAllTime` a SCAN-derived total, because a
+    // weekly contest needed both. The contest is gone (see the note at the top of this file), so there
+    // is one number: the all-time count of invited friends who went on to wager for real. It only ever
+    // goes up, which is the only behaviour a player ever wanted from it.
+    //
+    // `recruits` is still in the response, carrying that all-time value. Three clients read this key
+    // and they deploy separately from this file — dropping the name would zero the count on whichever
+    // one is a minute behind. It can go once all three are known to be on the new field.
     if (action === 'my-refcode') {
       const w = String(body.playerAddress || '').trim();
       clearTimeout(guard); done = true;
       if (!w || w.length < 20) return res.status(400).json({ error: 'playerAddress required' });
       const code = await ensureRefCode(w);
-      const wk = recruitWeek();
-      const mine = parseInt(await kvHget('recruit:' + wk.id, w).catch(() => 0)) || 0;
-      // `recruits` resets every Saturday; `recruitsAllTime` is the one a player can watch go up.
-      const allTime = parseInt((await allTimeRecruits())[w], 10) || 0;
+      const qualified = parseInt(await kvHget('refstats:' + w, 'qualified').catch(() => 0), 10) || 0;
       return res.status(200).json({ code, link: 'https://snakepot.com/?ref=' + code,
-        recruits: mine, recruitsAllTime: allTime,
-        weekStart: wk.start, weekEnd: wk.end, scheduled: recruitWeekIsScheduled(wk.id) });
+        qualified, recruits: qualified, recruitsAllTime: qualified });
     }
 
     // ── credit-status: a player's free-entry credit balance + Free Entry Grind progress ───────────
@@ -1643,42 +1505,6 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ linked });
     }
 
-    // ── recruiter-board: this week's Recruiter-of-the-Week standings (unsigned read) ──────────────
-    if (action === 'recruiter-board') {
-      const wk = recruitWeek();
-      /* NO PAYOUT HAPPENS HERE ANY MORE. This is an unsigned, unauthenticated board READ that every
-       * client fires when the referral panel opens — and it used to call settleRecruiter(prev,
-       * {dryRun:false}), a REAL $10 transfer out of escrow. So the moment money left was "whenever
-       * somebody happened to look at the leaderboard", which is why the 2026-08-07 drain landed in the
-       * middle of a live $0.90 match six days after the week it was paying for had ended. A board read
-       * must never move funds. The prize now leaves only through the admin-gated `recruiter-settle`
-       * (dryRun:false + x-admin-secret), so the operator chooses the moment. */
-      clearTimeout(guard); done = true;
-      const you = String(body.playerAddress || '').trim();
-      // Rank a {addr: count} map, resolve display names for the top 10, and locate the caller in it.
-      const rank = async (map) => {
-        const rows = Object.keys(map).map(a => ({ addr: a, n: parseInt(map[a]) || 0 }))
-                           .filter(r => r.n > 0).sort((a, b) => b.n - a.n);
-        let youRank = 0, youN = 0;
-        for (let i = 0; i < rows.length; i++) { if (rows[i].addr === you) { youRank = i + 1; youN = rows[i].n; break; } }
-        const top = rows.slice(0, 10);
-        await Promise.all(top.map(async r => { try { r.name = (await kvHget('ph:' + r.addr, 'name')) || ''; } catch (_) { r.name = ''; } }));
-        return { top: top.map(r => ({ name: r.name || (r.addr.slice(0, 4) + '…' + r.addr.slice(-4)), recruits: r.n })),
-                 you: { rank: youRank, recruits: youN, onBoard: youRank > 0 } };
-      };
-      const week = await rank((await kvHgetall('recruit:' + wk.id).catch(() => null)) || {});
-      const all  = await rank(await allTimeRecruits());
-      /* `scheduled` is what lets the client stop promising money it is not going to pay. A week not in
-       * SCHEDULED_RECRUIT_WEEKS pays NOTHING (see the note there — an unscheduled week is what drained
-       * escrow on 2026-08-07), but the card still rendered "$10 · ENDS IN 3d 4h" on every one of them. */
-      const scheduled = recruitWeekIsScheduled(wk.id);
-      return res.status(200).json({
-        weekStart: wk.start, weekEnd: wk.end, weekId: wk.id, scheduled, prize: scheduled ? 10 : 0,
-        top: week.top, you: week.you,
-        allTime: all.top, youAllTime: all.you,
-      });
-    }
-
     // ── event-settle: compute (dryRun, anyone) or fire (real, admin-only) a Bounty-Hour payout ─────
     if (action === 'event-settle') {
       const now = Date.now();
@@ -1691,19 +1517,6 @@ module.exports = async function handler(req, res) {
         return res.status(200).json(await settleBounty(ev, { dryRun: false }));
       }
       return res.status(200).json(await settleBounty(ev, { dryRun: true }));
-    }
-
-    // ── recruiter-settle: compute (dryRun, anyone) or fire (real, admin-only) the weekly $10 payout ─
-    if (action === 'recruiter-settle') {
-      const cur = recruitWeek();
-      const wk = recruitWeek(cur.start - 1);   // the previous, fully-ended week is what gets paid
-      clearTimeout(guard); done = true;
-      if (body.dryRun === false) {
-        const adminSec = (req.headers['x-admin-secret'] || '').trim(), serverSec = (process.env.ADMIN_SECRET || '').trim();
-        if (!(adminSec && serverSec && adminSec === serverSec)) return res.status(403).json({ error: 'admin only' });
-        return res.status(200).json(await settleRecruiter(wk, { dryRun: false }));
-      }
-      return res.status(200).json(await settleRecruiter(wk, { dryRun: true }));
     }
 
     // ── bj-audit: inventory every registered blackjack ante; find UNPAID hands; (ADMIN) seal dead ones ─

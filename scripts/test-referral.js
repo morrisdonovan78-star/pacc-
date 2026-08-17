@@ -85,18 +85,29 @@ const reset = () => store.clear();
   await join.accrueReferral(P, null);
   eq(bal(), 0, 'join after window pays nothing');
 
-  // 7. Recruiter-of-the-Week qualification — a referee counts ONCE for the referrer past the threshold
+  // 7. Qualification — a referee counts ONCE for their referrer past the wager threshold.
+  //
+  // This asserted against `recruit:<weekId>` while Recruiter of the Week existed. That contest was
+  // removed on 2026-08-17 and the count moved to one all-time field, `refstats:<ref>` `qualified`.
+  // Everything the case was actually protecting is unchanged and still checked here: the threshold, and
+  // exactly-once-per-referee no matter how many more paid joins they make.
   reset();
   store.set('refcode:REC', R);
-  const { RECRUIT_QUALIFY_LAMPORTS, recruitWeekId } = join._refConsts;
-  const half = Math.floor(RECRUIT_QUALIFY_LAMPORTS / 2) + 1;
-  const rkey = 'recruit:' + recruitWeekId();
+  const { REF_QUALIFY_LAMPORTS } = join._refConsts;
+  const half = Math.floor(REF_QUALIFY_LAMPORTS / 2) + 1;
+  const qual = () => parseInt((store.get('refstats:' + R) || {}).qualified, 10) || 0;
   await join.accrueReferral(P, 'REC', half);   // below threshold → not yet counted
-  eq((store.get(rkey) || {})[R] || 0, 0, 'below-threshold recruit not counted');
+  eq(qual(), 0, 'below-threshold invite not counted');
   await join.accrueReferral(P, null, half);    // crosses threshold → counts once
-  eq((store.get(rkey) || {})[R] || 0, 1, 'crossing threshold counts the recruit once');
+  eq(qual(), 1, 'crossing threshold counts the invite once');
   await join.accrueReferral(P, null, half);    // more joins must NOT double-count
-  eq((store.get(rkey) || {})[R] || 0, 1, 'already-qualified recruit is not re-counted');
+  eq(qual(), 1, 'already-qualified invite is not re-counted');
+
+  // 8. The removed contest leaves NOTHING behind that writes a weekly bucket. Cheapest possible guard
+  // against the count quietly going back to a per-week key: after a full qualify cycle, no key in the
+  // mock store may be a `recruit:` hash at all.
+  const weekKeys = [...store.keys()].filter(k => String(k).startsWith('recruit:'));
+  eq(weekKeys.length, 0, 'no recruit:<week> key is written any more');
 
   console.log((fail === 0 ? '✓ ALL PASS' : '✗ FAILURES') + ' — ' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail === 0 ? 0 : 1);

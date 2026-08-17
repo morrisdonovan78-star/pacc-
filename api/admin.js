@@ -15,27 +15,20 @@ const { kvGet, kvSet, kvSetPerm, kvDel, kvHgetall, kvHget, kvHset,
         kvLpush, kvLtrim, kvLrange } = require('../lib/kv');
 
 /*
- * ⚠️ THIS ANCHOR MUST MATCH api/settle.js recruitWeek() AND api/join.js recruitWeekId() EXACTLY.
+ * A RECRUIT_ANCHOR lived here — the third hand-copied copy of the Recruiter-of-the-Week week
+ * arithmetic, and the one that drifted: it carried `Date.UTC(2026, 6, 23, 4, 0, 0)` while settle.js and
+ * join.js used a value 62 hours later, enough to land on a DIFFERENT week index. Every hand-credited
+ * recruit went to `recruit:rw<n+1>` while the profile card read `recruit:rw<n>`, so the operator saw
+ * "credited" and the player's count never moved.
  *
- * It did not, and the bug is worth keeping in front of whoever edits this next. This file carried
- * `Date.UTC(2026, 6, 23, 4, 0, 0)` while both of the others used `Date.UTC(2026, 6, 25, 18, 0, 0)` —
- * 62 hours earlier, enough to land on a DIFFERENT week index. So every hand-credited recruit was
- * written to `recruit:rw<n+1>` while the profile card (`my-refcode`) and the homescreen podium both
- * read `recruit:rw<n>`: the operator saw "credited", and the player's count never moved.
+ * All three copies are gone with the contest itself (2026-08-17). The count they were bucketing is now
+ * a single `refstats:<ref>` field, `qualified` — no week, no anchor, nothing to keep in step, and no
+ * arithmetic that can renumber a bucket out from under a live count. That whole class of bug is closed
+ * rather than commented, which is the only reason this note is worth leaving.
  *
- * It lived inline inside ref-bind, which is how it drifted unnoticed. It is up here now so ref-bind
- * and ref-unbind cannot disagree about which bucket a credit is in — an unbind that decremented a
- * different week than the bind incremented would leave the count stuck AND put a phantom -1 in a week
- * nobody touched. Three hand-copied constants is the real defect; keep them in step.
- *
- * Moved Saturday → MONDAY Jul 27 2026 14:00 ET on 2026-08-14 (owner's call). The +2d shift leaves the
- * current week index unchanged, so nothing needed migrating — see the long note in api/settle.js, and
- * scripts/test-recruit-anchor.js, which fails if the three copies drift OR if a future shift would
- * renumber the buckets.
+ * ref-bind and ref-unbind below still maintain that field, +1 and -1, and must stay each other's
+ * inverse.
  */
-const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 27, 18, 0, 0);
-const RECRUIT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-function recruitWeekId(now) { return 'rw' + Math.floor(((now || Date.now()) - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS); }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 function getSecret()   { return (process.env.ADMIN_SECRET   || '').trim(); }
@@ -379,20 +372,17 @@ module.exports = async function handler(req, res) {
     const bind = { code: 'MANUAL', ref: referrer, ts: Date.now() };
     await kvSet('refby:' + player, JSON.stringify(bind), 100 * 24 * 60 * 60);
     await kvHincrby('refstats:' + referrer, 'players', 1).catch(() => {});
-    // Count the qualified recruit too when asked — the operator can see they really paid.
+    // Count them as a QUALIFIED invite too when asked — the operator can see they really paid. The
+    // `refq:` NX flag is what makes that exactly-once, and it is the same flag api/join.js sets, so a
+    // player already counted automatically cannot be counted again by hand.
     let counted = false;
     if (req.body.countRecruit) {
-      const wk = recruitWeekId();   // see the anchor note at the top of this file
       if (await kvSetNX('refq:' + player, String(Date.now()))) {
-        await kvHincrby('recruit:' + wk, referrer, 1).catch(() => {});
-        // Drop the all-time board's 60s cache so a hand credit is visible on the next refresh rather
-        // than up to a minute later — "I credited it and it isn't showing" is the report this whole
-        // path exists to answer, and a stale cache reproduces it exactly.
-        await kvDel('recruitall:cache').catch(() => {});
+        await kvHincrby('refstats:' + referrer, 'qualified', 1).catch(() => {});
         counted = true;
       }
     }
-    await logAction('ref-bind' + (counted ? '+recruit' : ''), player, 'referrer=' + referrer.slice(0, 8));
+    await logAction('ref-bind' + (counted ? '+qualified' : ''), player, 'referrer=' + referrer.slice(0, 8));
     return res.json({ ok: true, referrer, player, countedRecruit: counted });
   }
 
@@ -407,10 +397,17 @@ module.exports = async function handler(req, res) {
    * action here that undoes a completed one.
    *
    * It reverses exactly the four writes ref-bind makes, and nothing else:
-   *   refby:<player>        DEL      — frees first touch, so the correct referrer can now be bound
-   *   refstats:<ref> players -1      — floored at 0; never invents a negative from a missing stat
-   *   refq:<player>         DEL      — clears the qualified flag so the re-bind can count them again
-   *   recruit:<week> <ref>  -1       — floored at 0, in the SAME week bucket ref-bind wrote to
+   *   refby:<player>            DEL  — frees first touch, so the correct referrer can now be bound
+   *   refstats:<ref> players    -1   — floored at 0; never invents a negative from a missing stat
+   *   refq:<player>             DEL  — clears the qualified flag so the re-bind can count them again
+   *   refstats:<ref> qualified  -1   — floored at 0
+   *
+   * ✅ That last one used to be `recruit:<week> <ref> -1`, and it could only take the credit out of the
+   * CURRENT week's bucket. A credit banked before the last week boundary had to be REFUSED — reported
+   * as "not removable" — because decrementing this week instead would have left the real count stuck
+   * and put a phantom -1 in a week nobody touched. Removing the weekly contest (2026-08-17) deleted
+   * that whole limitation: there is one all-time counter now, so an unbind always undoes its bind, no
+   * matter how long ago it happened.
    *
    * ⚠️ WHAT IT DOES NOT TOUCH, deliberately:
    *   refbal:<referrer>  — accrued LAMPORTS, real money the referrer can withdraw. Every paid join
@@ -435,22 +432,21 @@ module.exports = async function handler(req, res) {
     const referrer = String((bind && bind.ref) || raw).trim();
     if (!referrer) return res.status(500).json({ error: 'Binding is stored in a shape this cannot read: ' + String(raw).slice(0, 60) });
 
-    const wk        = recruitWeekId();
-    const weekCount = parseInt(await kvHget('recruit:' + wk, referrer).catch(() => 0), 10) || 0;
-    const players   = parseInt(((await kvHgetall('refstats:' + referrer).catch(() => null)) || {}).players, 10) || 0;
+    const stats     = (await kvHgetall('refstats:' + referrer).catch(() => null)) || {};
+    const players   = parseInt(stats.players, 10) || 0;
+    const qualCount = parseInt(stats.qualified, 10) || 0;
     const qualified = !!(await kvGet('refq:' + player).catch(() => null));
     const refbal    = Number(await kvGet('refbal:' + referrer).catch(() => 0)) || 0;
 
     const plan = {
-      referrer, player, week: wk,
+      referrer, player,
       boundBy: (bind && bind.code) || 'unknown',
       boundAt: (bind && bind.ts) || 0,
       wasQualifiedRecruit: qualified,
-      // The recruit -1 only lands if there is a count in THIS week to take it from. A credit made
-      // before the last Saturday sits in an older bucket and is reported as such rather than being
-      // silently taken out of an unrelated week.
-      willRemoveRecruit: qualified && weekCount > 0,
-      weekCountBefore: weekCount,
+      // Floored, not conditional on a week any more: the only reason not to decrement is that the
+      // counter is already at 0, which means the credit was never recorded there in the first place.
+      willRemoveRecruit: qualified && qualCount > 0,
+      qualifiedBefore: qualCount,
       playersBefore: players,
       referrerRefbalLamports: refbal,
       referrerRefbalSol: +(refbal / 1e9).toFixed(6),
@@ -462,14 +458,62 @@ module.exports = async function handler(req, res) {
     let removedRecruit = false;
     if (qualified) {
       await kvDel('refq:' + player).catch(() => {});
-      if (weekCount > 0) { await kvHincrby('recruit:' + wk, referrer, -1).catch(() => {}); removedRecruit = true; }
+      if (qualCount > 0) { await kvHincrby('refstats:' + referrer, 'qualified', -1).catch(() => {}); removedRecruit = true; }
     }
-    // The all-time board is a 60s cache of a SCAN over the week buckets (settle.js allTimeRecruits).
-    // Dropping it here means the corrected number shows immediately instead of up to a minute later,
-    // which matters when the operator is staring at the leaderboard to check the fix landed.
-    await kvDel('recruitall:cache').catch(() => {});
-    await logAction('ref-unbind' + (removedRecruit ? '-recruit' : ''), player, 'was=' + referrer.slice(0, 8));
+    await logAction('ref-unbind' + (removedRecruit ? '-qualified' : ''), player, 'was=' + referrer.slice(0, 8));
     return res.json({ ok: true, ...plan, removedRecruit, dry: false });
+  }
+
+  /*
+   * ── ref-qualified-import: fold the OLD weekly buckets into the new all-time counter ─────────────
+   *
+   * ONE-SHOT, run once after the 2026-08-17 deploy that removed Recruiter of the Week. Until then every
+   * qualified recruit was counted in `recruit:<weekId>` hashes; from that deploy they are counted in
+   * `refstats:<ref>` field `qualified`. Without this, every referrer's number silently restarts at zero
+   * — the exact "my referrals vanished" report the previous session was fixing.
+   *
+   * It ADDS the bucket sums rather than overwriting, because api/join.js starts writing the new field
+   * the moment it deploys: between deploy and this run, a fresh qualification can already be sitting in
+   * `qualified`, and an overwrite would throw it away.
+   *
+   * IDEMPOTENT PER REFERRER, deliberately, not once globally. `refqi:<ref>` is an NX flag set in the
+   * same step as the increment, so:
+   *   * running it twice cannot double-count anybody, and
+   *   * a run that dies halfway can simply be run again and will finish the rest.
+   * A single global "done" marker would have had to choose between those two, and would have stranded a
+   * partial import behind a flag saying it was complete.
+   *
+   * `dry: true` reports exactly what it would add, per referrer, and writes nothing.
+   */
+  if (action === 'ref-qualified-import') {
+    const dry = !!req.body.dry;
+    // `recruit:rw*`, not `recruit:*` — the trailing rw is what stops a future sibling key sharing the
+    // prefix from being summed in as if it were a week bucket.
+    const keys = await kvScan('recruit:rw*', 500).catch(() => []);
+    const sums = {};
+    for (const k of keys) {
+      const h = (await kvHgetall(k).catch(() => null)) || {};
+      for (const ref of Object.keys(h)) {
+        const n = parseInt(h[ref], 10) || 0;
+        if (n > 0) sums[ref] = (sums[ref] || 0) + n;
+      }
+    }
+    const imported = [], skipped = [];
+    for (const ref of Object.keys(sums)) {
+      const already = await kvGet('refqi:' + ref).catch(() => null);
+      const row = { referrer: ref.slice(0, 4) + '…' + ref.slice(-4), add: sums[ref] };
+      if (already) { skipped.push({ ...row, alreadyImported: parseInt(already, 10) || 0 }); continue; }
+      if (!dry) {
+        if (await kvSetNX('refqi:' + ref, String(sums[ref]))) {
+          await kvHincrby('refstats:' + ref, 'qualified', sums[ref]).catch(() => {});
+        } else { skipped.push({ ...row, alreadyImported: sums[ref] }); continue; }
+      }
+      imported.push(row);
+    }
+    if (!dry) await logAction('ref-qualified-import', '', 'referrers=' + imported.length);
+    return res.json({ ok: true, dry, weekBucketsFound: keys.length,
+      referrers: Object.keys(sums).length, imported, skipped,
+      totalAdded: imported.reduce((s, r) => s + r.add, 0) });
   }
 
   if (action === 'wallet-find') {

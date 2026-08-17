@@ -78,17 +78,15 @@ const REF_BIND_TTL_SEC    = 100 * 24 * 60 * 60;       // refby lives a bit past 
 const REF_REWARD_LAMPORTS = 66667;                    // ~1¢ at ~$150 SOL — tune freely, it's a bonus
 const normalizeCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 24);
 
-// ── Recruiter of the Week — a referred player only COUNTS as a qualified recruit once their
-// cumulative PAID wager crosses this threshold (real money at risk = the anti-alt wall). Rolling
-// 7-day weeks bucket the counts. KEEP RECRUIT_ANCHOR in sync with api/settle.js recruitWeek().
-const RECRUIT_QUALIFY_LAMPORTS = 60000000;            // ~0.06 SOL (~$9-10) of real wagering
-// Mon Jul 27 2026 14:00 America/New_York (18:00 UTC) — weeks end Monday 2pm ET. See the long note in
-// api/settle.js before changing this; all THREE copies (here, settle.js, admin.js) MUST match or
-// counts land in a different bucket than the board reads, and a shift that changes the current week
-// index renumbers every bucket. scripts/test-recruit-anchor.js enforces both.
-const RECRUIT_ANCHOR  = Date.UTC(2026, 6, 27, 18, 0, 0);
-const RECRUIT_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-function recruitWeekId(now) { now = now || Date.now(); return 'rw' + Math.floor((now - RECRUIT_ANCHOR) / RECRUIT_WEEK_MS); }
+// ── Qualified invites — a referred player only COUNTS for their referrer once their cumulative PAID
+// wager crosses this threshold (real money at risk = the anti-alt wall). One all-time total per
+// referrer, in `refstats:<ref>` field `qualified`.
+//
+// This used to be bucketed per rolling 7-day week (`recruit:<weekId>`) because it fed the weekly
+// Recruiter-of-the-Week contest, which is GONE — removed 2026-08-17 at the owner's request, prize,
+// leaderboard, schedule and week arithmetic all together. With no contest there is no week, so there
+// is nothing to bucket by and nothing that can renumber: a referrer's total only ever goes up.
+const REF_QUALIFY_LAMPORTS = 60000000;                // ~0.06 SOL (~$9-10) of real wagering
 
 // ── Free Entry Grind — play GRIND_TARGET paid $5 games inside a grind window → earn one free $5
 // credit (credit:<wallet>). KEEP these windows in sync with the 'grind' entries in the client
@@ -100,7 +98,7 @@ function recruitWeekId(now) { now = now || Date.now(); return 'rw' + Math.floor(
 // progress counters.
 const GRIND_TARGET = 10;
 const SCHEDULED_SATURDAYS = ['2026-07-25'];                // ← keep in sync with api/settle.js
-const SATURDAY_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0);   // Sat Jul 25 2026 14:00 ET — same instant as RECRUIT_ANCHOR
+const SATURDAY_ANCHOR = Date.UTC(2026, 6, 25, 18, 0, 0);   // Sat Jul 25 2026 14:00 ET
 const GRIND_WEEK_MS   = 7 * 24 * 3600 * 1000;
 function activeGrindEvent(now) {
   now = now || Date.now();
@@ -116,8 +114,9 @@ function activeGrindEvent(now) {
 /* ⚠️ REFERRAL REWARDS ARE OFF. Owner's decision, 2026-08-07 — no payout leaves escrow that the owner
  * did not schedule, and this one accrued forever on every paid join without ever being scheduled.
  *
- * It was the last automatic giveaway left after the Recruiter-of-the-Week drain (see
- * SCHEDULED_RECRUIT_WEEKS in api/settle.js): REF_REWARD_LAMPORTS banked to a referrer on EVERY paid
+ * It was the last automatic giveaway left after the Recruiter-of-the-Week drain (that contest, and
+ * with it the unscheduled prize that caused the drain, was deleted outright on 2026-08-17):
+ * REF_REWARD_LAMPORTS banked to a referrer on EVERY paid
  * join, withdrawable from the SAME escrow account that holds live players' stakes. Switched off with
  * every outstanding `refbal:` balance verified at ZERO across all known referrers, so nothing is
  * stranded and nobody is owed anything.
@@ -139,11 +138,14 @@ const REFERRAL_REWARDS_ENABLED = false;
  * referral link it should show on leaderboard even when the event isn't running or a payment is not
  * scheduled for it".
  *
- * Splitting them restores the leaderboard WITHOUT reopening the payout: attribution and counting are
- * pure bookkeeping in KV, and no lamport is written or withdrawable while REFERRAL_REWARDS_ENABLED
- * stays false. The Recruiter-of-the-Week PRIZE is separately gated by SCHEDULED_RECRUIT_WEEKS in
- * api/settle.js and pays only through the admin-gated recruiter-settle, so counting a recruit here
- * still cannot cause money to leave on its own. */
+ * Splitting them restores attribution WITHOUT reopening the payout: binding and counting are pure
+ * bookkeeping in KV, and no lamport is written or withdrawable while REFERRAL_REWARDS_ENABLED stays
+ * false.
+ *
+ * (The leaderboard that split was made for — Recruiter of the Week — was removed entirely on
+ * 2026-08-17. Tracking outlived it deliberately: the invite link is still on the profile page and in
+ * the game, and a player is still shown how many friends they brought. It just no longer feeds a
+ * weekly contest, and there is no longer any path by which counting one can pay anybody.) */
 const REFERRAL_TRACKING_ENABLED = true;
 
 // First-touch bind + per-join accrual. Fully wrapped by the caller's try/catch AND its own — the
@@ -197,18 +199,20 @@ async function accrueReferral(playerWallet, refCodeRaw, wagerLamports) {
   }
   await kvHincrby('refstats:' + bind.ref, 'joins', 1).catch(() => {});
 
-  // Recruiter of the Week: count this referee ONCE for their referrer, the first time their
-  // cumulative paid wager crosses the qualify threshold. NX flag makes it exactly-once even under
-  // concurrent joins. (Same-wallet self-referral is already impossible — blocked at bind above.)
+  // Count this referee ONCE for their referrer, the first time their cumulative paid wager crosses
+  // the qualify threshold. The `refq:` NX flag makes it exactly-once even under concurrent joins, and
+  // it is the SAME flag as before the contest was removed — never rename or clear it, or every
+  // already-qualified referee would be counted a second time. (Same-wallet self-referral is already
+  // impossible — blocked at bind above.)
   try {
     if (!(await kvGet('refq:' + playerWallet))) {
       const tot = await kvIncrby('refwag:' + playerWallet, Number(wagerLamports) || 0);
-      if (tot >= RECRUIT_QUALIFY_LAMPORTS && await kvSetNX('refq:' + playerWallet, String(Date.now()))) {
-        await kvHincrby('recruit:' + recruitWeekId(), bind.ref, 1).catch(() => {});
-        console.log('[ref] QUALIFIED RECRUIT', { referrer: String(bind.ref).slice(0, 8), player: String(playerWallet).slice(0, 8), wageredLamports: tot });
+      if (tot >= REF_QUALIFY_LAMPORTS && await kvSetNX('refq:' + playerWallet, String(Date.now()))) {
+        await kvHincrby('refstats:' + bind.ref, 'qualified', 1).catch(() => {});
+        console.log('[ref] QUALIFIED INVITE', { referrer: String(bind.ref).slice(0, 8), player: String(playerWallet).slice(0, 8), wageredLamports: tot });
       } else {
         // The commonest honest answer to "why is it still 0": they are attributed, just short of the bar.
-        console.log('[ref] recruit progress', { referrer: String(bind.ref).slice(0, 8), wageredLamports: tot, needLamports: RECRUIT_QUALIFY_LAMPORTS });
+        console.log('[ref] qualify progress', { referrer: String(bind.ref).slice(0, 8), wageredLamports: tot, needLamports: REF_QUALIFY_LAMPORTS });
       }
     }
   } catch (_) {}
@@ -675,5 +679,5 @@ module.exports = async function handler(req, res) {
 module.exports.accrueReferral = accrueReferral;
 // The two flags are exported so the suite asserts the SHIPPED values, not a copy of them. A test that
 // hardcodes "rewards are off" passes just as happily when somebody flips the constant back on.
-module.exports._refConsts = { REF_WINDOW_MS, REF_REWARD_LAMPORTS, RECRUIT_QUALIFY_LAMPORTS, recruitWeekId,
+module.exports._refConsts = { REF_WINDOW_MS, REF_REWARD_LAMPORTS, REF_QUALIFY_LAMPORTS,
                               REFERRAL_REWARDS_ENABLED, REFERRAL_TRACKING_ENABLED };
