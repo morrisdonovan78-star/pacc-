@@ -299,16 +299,8 @@ async function settleBounty(ev, opts) {
      * was for. A held lock is reported, alerted, and clearable from the admin panel. */
     let held = false;
     if (!r.ok) {
-      if (r.mayHavePaid) {
-        held = true;
-        betAlert('bounty payout UNCERTAIN ' + ev.id + ' place ' + w.place + ' -> ' + String(w.addr).slice(0, 8) +
-                 ' : ' + (r.reason || '') + ' — the transaction MAY have landed. Pay-lock evtpaid:' + ev.id + ':' +
-                 w.place + ' is HELD so this cannot pay twice. Check escrow on-chain, then clear the lock' +
-                 ' from the admin panel only if the money did NOT arrive.');
-      } else {
-        await kvDel('evtpaid:' + ev.id + ':' + w.place).catch(() => {});
-        betAlert('bounty payout FAILED ' + ev.id + ' place ' + w.place + ' -> ' + String(w.addr).slice(0, 8) + ' : ' + (r.reason || ''));
-      }
+      held = !(await releasePayLock('evtpaid:' + ev.id + ':' + w.place, r,
+                                    'bounty:' + ev.id + ' place ' + w.place + ' -> ' + String(w.addr).slice(0, 8)));
     }
     paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, lamports: w.lamports, ok: r.ok,
                 sig: r.sig || null, reason: r.reason || null, heldForReview: held });
@@ -1270,18 +1262,24 @@ async function wgPayOne(esc, toAddr, lamports, tag, opts) {
              ' fee=' + inv.accruedFee + ' deficit=' + (inv.deficit || 'n/a'));
     return { ok: false, mayHavePaid: false, reason: 'insolvent', inv };
   }
+  // Only a throw from sendAndConfirm is ambiguous. Everything before it — fetching a blockhash, encoding
+  // the recipient, building the transaction — fails with nothing on the wire, and treating those as
+  // "might have paid" would hold a lock (needing a manual clear) over a transient RPC blip or a bad
+  // address. So the flag is armed at the last possible moment.
+  let sendStarted = false;
   try {
     const { blockhash } = await fetchBalAndHash(esc.pubkeyB58);
     const tx = buildTx(esc, blockhash, [{ to: b58Decode(toAddr), lamports: amt }]);
+    sendStarted = true;
     const result = await sendAndConfirm(tx);
     return { ok: true, mayHavePaid: true, sig: result.sig, confirmed: result.confirmed };
   } catch (e) {
     const msg = (e && e.message) || 'send failed';
     console.error('[wg] payout failed ' + tag + ' — ' + msg);
     // 'TX rejected on-chain' is thrown only after getSignatureStatuses reports an on-chain error: the
-    // transaction was included and FAILED, so no transfer happened and escrow is untouched. Every other
-    // throw comes out of the submit call, where we cannot know whether the bytes reached the network.
-    return { ok: false, mayHavePaid: !msg.startsWith('TX rejected on-chain'), reason: msg };
+    // transaction was included and FAILED, so no transfer happened and escrow is untouched. Any other
+    // throw once the send has begun could be a lost response to a tx already in the mempool.
+    return { ok: false, mayHavePaid: sendStarted && !msg.startsWith('TX rejected on-chain'), reason: msg };
   }
 }
 
@@ -1290,16 +1288,21 @@ async function wgPayOne(esc, toAddr, lamports, tag, opts) {
 // actually owed to players and bettors; the platform cut belongs in the same fee wallet the 10%
 // cashout fee goes to (CREATOR_WALLET). Doing both transfers in a single tx makes it atomic (the
 // fee can never be stranded or double-swept) and costs one network fee instead of two.
+// Carries `mayHavePaid` on every failure for the same reason wgPayOne does — see the note there. Every
+// caller of this function also takes a pay-lock, so the same rule applies: release it only when nothing
+// can have moved.
 async function wgPayWinnerAndFee(esc, winner, payout, fee, tag) {
   const win = Math.floor(Number(payout) || 0);
   const cut = Math.max(0, Math.floor(Number(fee) || 0));
-  if (!(win > 0)) return { ok: false, reason: 'nothing to pay' };
+  if (!(win > 0)) return { ok: false, mayHavePaid: false, reason: 'nothing to pay' };
   const inv = await assertSolvency(esc.pubkeyB58, win + cut);
   if (!inv.ok) {
     betAlert('invariant REFUSED ' + tag + ' to=' + String(winner).slice(0, 8) + ' win=' + win + ' fee=' + cut +
              ' bal=' + inv.onChainBalance + ' betLiab=' + inv.betLiability + ' deficit=' + (inv.deficit || 'n/a'));
-    return { ok: false, reason: 'insolvent', inv };
+    return { ok: false, mayHavePaid: false, reason: 'insolvent', inv };
   }
+  // Armed immediately before the send — see the same flag in wgPayOne.
+  let sendStarted = false;
   try {
     const { bal, blockhash } = await fetchBalAndHash(esc.pubkeyB58);
     // ── KEEP ESCROW RENT-VALID, AND NOTHING MORE ────────────────────────────────────────────────
@@ -1316,7 +1319,8 @@ async function wgPayWinnerAndFee(esc, winner, payout, fee, tag) {
     let feeCut = Math.max(0, cut - TX_FEE);
     if (win > spendable) {
       // Can't even cover the winner while staying rent-valid — refuse rather than send a doomed tx.
-      return { ok: false, reason: 'insufficient escrow for a rent-valid payout' };
+      // Nothing was built, let alone sent, so this is safe to retry once escrow is topped up.
+      return { ok: false, mayHavePaid: false, reason: 'insufficient escrow for a rent-valid payout' };
     }
     if (win + feeCut > spendable) {
       feeCut = Math.max(0, spendable - win);
@@ -1325,12 +1329,41 @@ async function wgPayWinnerAndFee(esc, winner, payout, fee, tag) {
     const transfers = [{ to: b58Decode(winner), lamports: win }];
     if (feeCut > 0) transfers.push({ to: b58Decode(CREATOR_WALLET), lamports: feeCut });
     const tx = buildTx(esc, blockhash, transfers);
+    sendStarted = true;
     const result = await sendAndConfirm(tx);
-    return { ok: true, sig: result.sig, confirmed: result.confirmed, feeSent: feeCut };
+    return { ok: true, mayHavePaid: true, sig: result.sig, confirmed: result.confirmed, feeSent: feeCut };
   } catch (e) {
-    console.error('[wg] ' + tag + ' payout failed — ' + (e && e.message || e));
-    return { ok: false, reason: (e && e.message) || 'send failed' };
+    const msg = (e && e.message) || 'send failed';
+    console.error('[wg] ' + tag + ' payout failed — ' + msg);
+    // Same classification as wgPayOne: nothing on the wire before the send, and only an on-chain
+    // rejection proves no lamports moved once it has begun.
+    return { ok: false, mayHavePaid: sendStarted && !msg.startsWith('TX rejected on-chain'), reason: msg };
   }
+}
+
+/* ── THE ONE PLACE THE PAY-LOCK RELEASE RULE LIVES ────────────────────────────────────────────────
+ *
+ * Every payout path takes an NX lock so it can run at most once, and every one of them used to delete
+ * that lock on any failure. That is correct when the money definitely did not move and catastrophic
+ * when it might have — it is how a Recruiter-of-the-Week prize went out twice for one week.
+ *
+ * Hand-copying this decision to fourteen call sites is the shape that has already bitten this codebase
+ * repeatedly (three copies of RECRUIT_ANCHOR silently disagreeing). So it is a function, and the answer
+ * comes from `mayHavePaid` on the payout result rather than from `!ok`.
+ *
+ * Returns TRUE if the lock was released (the caller may safely advertise a retry) and FALSE if it is
+ * being HELD. Callers that answer a self-retrying client MUST pass this through as `retry`, or the
+ * client will hammer a lock that is never going to open.
+ */
+async function releasePayLock(key, r, tag) {
+  if (r && r.mayHavePaid) {
+    betAlert('payout UNCERTAIN ' + tag + ' : ' + ((r && r.reason) || '') + ' — the transaction MAY have ' +
+             'landed. Pay-lock ' + key + ' is HELD so it cannot pay twice. Check the destination wallet ' +
+             'on-chain; clear the lock ONLY if the money never arrived.');
+    return false;
+  }
+  await kvDel(key).catch(() => {});
+  return true;
 }
 
 // Public-safe projection of a wager (never leaks internal reservation details).
@@ -2048,7 +2081,12 @@ module.exports = async function handler(req, res) {
             const claimed = await kvSetNX('cfpaid:' + id + ':' + tag, '1', 86400);
             if (!claimed) { out[tag] = { already: true }; continue; }
             const r = await wgPayWinnerAndFee(esc, addr, dep, 0, 'cf-tie-' + tag);
-            if (!r.ok) { await kvDel('cfpaid:' + id + ':' + tag).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'refund held: ' + (r.reason || ''), retry: true }); }
+            if (!r.ok) {
+              const retry = await releasePayLock('cfpaid:' + id + ':' + tag, r, 'cf-tie-' + tag + ':' + id);
+              clearTimeout(guard); done = true;
+              return res.status(retry ? 503 : 409).json({ retry, held: !retry,
+                error: (retry ? 'refund held: ' : 'refund UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (r.reason || '') });
+            }
             await kvHincrby(BET_LEDGER, 'betLiability', -dep).catch(() => {});
             out[tag] = { sig: r.sig };
           }
@@ -2062,7 +2100,12 @@ module.exports = async function handler(req, res) {
         const fee = Math.floor(pot * CREATOR_FEE_PCT);            // 10% to CREATOR_WALLET
         const payout = pot - fee;
         const pay = await wgPayWinnerAndFee(esc, winnerAddr, payout, fee, 'cf-settle');
-        if (!pay.ok) { await kvDel('cfpaid:' + id).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'payout held: ' + (pay.reason || ''), retry: true }); }
+        if (!pay.ok) {
+          const retry = await releasePayLock('cfpaid:' + id, pay, 'cf-settle:' + id);
+          clearTimeout(guard); done = true;
+          return res.status(retry ? 503 : 409).json({ retry, held: !retry,
+            error: (retry ? 'payout held: ' : 'payout UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (pay.reason || '') });
+        }
         await kvHincrby(BET_LEDGER, 'betLiability', -pot).catch(() => {});
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, tie: false, winner: winnerAddr, payout, fee, tx: pay.sig });
@@ -2079,14 +2122,28 @@ module.exports = async function handler(req, res) {
       const d = JSON.parse(raw);
       const claimed = await kvSetNX('cfpaid:' + id + ':' + role + ':refund', '1', 86400);
       if (!claimed) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+      // See the note on the same flag in bj-refund: the catch releases the pay-lock, which is only safe
+      // while nothing has been sent.
+      let payAttempted = false;
       try {
         const esc = getEscrow();
+        payAttempted = true;
         const r = await wgPayWinnerAndFee(esc, d.addr, d.lamports, 0, 'cf-refund');
-        if (!r.ok) { await kvDel('cfpaid:' + id + ':' + role + ':refund').catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'refund held: ' + (r.reason || ''), retry: true }); }
+        if (!r.ok) {
+          const retry = await releasePayLock('cfpaid:' + id + ':' + role + ':refund', r, 'cf-refund:' + id + ':' + role);
+          clearTimeout(guard); done = true;
+          return res.status(retry ? 503 : 409).json({ retry, held: !retry,
+            error: (retry ? 'refund held: ' : 'refund UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (r.reason || '') });
+        }
         await kvHincrby(BET_LEDGER, 'betLiability', -d.lamports).catch(() => {});
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, tx: r.sig });
-      } catch (e) { await kvDel('cfpaid:' + id + ':' + role + ':refund').catch(() => {}); clearTimeout(guard); done = true; return res.status(500).json({ error: (e && e.message) || 'refund failed' }); }
+      } catch (e) {
+        const retry = await releasePayLock('cfpaid:' + id + ':' + role + ':refund', { mayHavePaid: payAttempted, reason: (e && e.message) || 'threw' },
+                                          'cf-refund:' + id + ':' + role);
+        clearTimeout(guard); done = true;
+        return res.status(500).json({ error: (e && e.message) || 'refund failed', retry, held: !retry });
+      }
     }
 
     // ── BLACKJACK PVP money — bj-deposit registers each seated player's ante (escrow deposit) as bet
@@ -2195,7 +2252,16 @@ module.exports = async function handler(req, res) {
             const c = await kvSetNX('bjpaid:' + handId + ':' + a, '1', 86400);
             if (!c) { out[a] = { already: true }; continue; }
             const r = await wgPayWinnerAndFee(esc, a, deps[a].lamports, 0, 'bj-push');
-            if (!r.ok) { await kvDel('bjpaid:' + handId + ':' + a).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'refund held: ' + (r.reason || ''), retry: true }); }
+            /* ⚠️ `retry` MUST come from releasePayLock, not be hardcoded true. The game server retries
+             * this call by itself, with no human in the loop — so when the lock is HELD (the send may
+             * already have landed) telling it to retry would make it hammer a lock that never opens.
+             * A held ante is reported as unresolved and needs the owner to check on-chain. */
+            if (!r.ok) {
+              const retry = await releasePayLock('bjpaid:' + handId + ':' + a, r, 'bj-push:' + handId + ':' + String(a).slice(0, 8));
+              clearTimeout(guard); done = true;
+              return res.status(retry ? 503 : 409).json({ retry, held: !retry,
+                error: (retry ? 'refund held: ' : 'refund UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (r.reason || '') });
+            }
             await kvHincrby(BET_LEDGER, 'betLiability', -deps[a].lamports).catch(() => {});
             out[a] = { sig: r.sig };
           }
@@ -2215,7 +2281,12 @@ module.exports = async function handler(req, res) {
           const c = await kvSetNX('bjpaid:' + handId + ':' + w, '1', 86400);
           if (!c) { out[w] = { already: true }; continue; }
           const r = await wgPayWinnerAndFee(esc, w, share, 0, 'bj-win');
-          if (!r.ok) { await kvDel('bjpaid:' + handId + ':' + w).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'payout held: ' + (r.reason || ''), retry: true }); }
+          if (!r.ok) {
+            const retry = await releasePayLock('bjpaid:' + handId + ':' + w, r, 'bj-win:' + handId + ':' + String(w).slice(0, 8));
+            clearTimeout(guard); done = true;
+            return res.status(retry ? 503 : 409).json({ retry, held: !retry,
+              error: (retry ? 'payout held: ' : 'payout UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (r.reason || '') });
+          }
           await kvHincrby(BET_LEDGER, 'betLiability', -share).catch(() => {});
           out[w] = { sig: r.sig, share };
         }
@@ -2231,7 +2302,12 @@ module.exports = async function handler(req, res) {
             const feeToSend = Math.max(0, feeTotal - (W + 1) * TX_FEE);
             if (feeToSend > 0) {
               const fr = await wgPayOne(esc, CREATOR_WALLET, feeToSend, 'bj-fee');
-              if (!fr.ok) { await kvDel('bjfee:' + handId).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'fee held: ' + (fr.reason || ''), retry: true }); }
+              if (!fr.ok) {
+                const retry = await releasePayLock('bjfee:' + handId, fr, 'bj-fee:' + handId);
+                clearTimeout(guard); done = true;
+                return res.status(retry ? 503 : 409).json({ retry, held: !retry,
+                  error: (retry ? 'fee held: ' : 'fee UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (fr.reason || '') });
+              }
               feeSig = fr.sig;
             }
             await kvHincrby(BET_LEDGER, 'betLiability', -feeTotal).catch(() => {});
@@ -2260,14 +2336,30 @@ module.exports = async function handler(req, res) {
       const d = JSON.parse(raw);
       const c = await kvSetNX('bjpaid:' + handId + ':' + addr, '1', 86400);
       if (!c) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+      // Tracks whether the transfer call was ever entered. The catch below releases the pay-lock, and
+      // that is only safe while nothing has been sent — the realistic throw here is getEscrow() failing
+      // before any transfer. Once the payout has been attempted, a throw from anything AFTER it (the
+      // ledger update, the response) must NOT release the lock, or the ante is refunded twice.
+      let payAttempted = false;
       try {
         const esc = getEscrow();
+        payAttempted = true;
         const r = await wgPayWinnerAndFee(esc, d.addr, d.lamports, 0, 'bj-refund');
-        if (!r.ok) { await kvDel('bjpaid:' + handId + ':' + addr).catch(() => {}); clearTimeout(guard); done = true; return res.status(503).json({ error: 'refund held: ' + (r.reason || ''), retry: true }); }
+        if (!r.ok) {
+          const retry = await releasePayLock('bjpaid:' + handId + ':' + addr, r, 'bj-refund:' + handId + ':' + String(addr).slice(0, 8));
+          clearTimeout(guard); done = true;
+          return res.status(retry ? 503 : 409).json({ retry, held: !retry,
+            error: (retry ? 'refund held: ' : 'refund UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (r.reason || '') });
+        }
         await kvHincrby(BET_LEDGER, 'betLiability', -d.lamports).catch(() => {});
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, tx: r.sig });
-      } catch (e) { await kvDel('bjpaid:' + handId + ':' + addr).catch(() => {}); clearTimeout(guard); done = true; return res.status(500).json({ error: (e && e.message) || 'refund failed' }); }
+      } catch (e) {
+        const retry = await releasePayLock('bjpaid:' + handId + ':' + addr, { mayHavePaid: payAttempted, reason: (e && e.message) || 'threw' },
+                                          'bj-refund:' + handId + ':' + String(addr).slice(0, 8));
+        clearTimeout(guard); done = true;
+        return res.status(500).json({ error: (e && e.message) || 'refund failed', retry, held: !retry });
+      }
     }
 
     // ── wager-return: unmatched at close → creator refunded 100%, NO fee (GAME_SECRET-HMAC) ──────
@@ -2531,7 +2623,7 @@ module.exports = async function handler(req, res) {
         if (!to) continue;
         const r = await wgPayWinnerAndFee(esc2, to, share, Math.floor(fee / winners.length), 'kart:' + raceId);
         if (!r.ok) betAlert('KART payout FAILED ' + raceId + ' -> ' + to.slice(0, 8) + ' : ' + (r.reason || ''));
-        paid.push({ address: to, lamports: share, ok: !!r.ok, sig: r.sig || null, reason: r.reason || null });
+        paid.push({ address: to, lamports: share, ok: !!r.ok, mayHavePaid: !!r.mayHavePaid, sig: r.sig || null, reason: r.reason || null });
       }
       // ⚠️ IF NOTHING ACTUALLY WENT OUT, UNDO THE "ALREADY PAID" FLAG.
       // kartpaid:<raceId> is set BEFORE the transfers and has NO TTL, so a race where every send
@@ -2540,12 +2632,26 @@ module.exports = async function handler(req, res) {
       // would ever look at it again. Same shape as the blackjack bjpaid bug. Clearing the flag when
       // not one lamport moved makes the race retryable; a PARTIAL success keeps the flag, because
       // re-running it would pay the ones that already landed a second time.
-      const anyPaid = paid.some((p) => p.ok);
-      if (!anyPaid) {
+      //
+      // ⚠️ "NOT ONE LAMPORT MOVED" IS NARROWER THAN "NOTHING RETURNED ok". A send whose submit call
+      // failed may still be in the mempool, and this loop is per-winner, so clearing the flag on that
+      // would re-pay whoever it did reach. Only a race where every payout is KNOWN not to have moved is
+      // retryable — the rest is reported for the owner to resolve against the chain.
+      const anyPaid      = paid.some((p) => p.ok);
+      const anyUncertain = paid.some((p) => !p.ok && p.mayHavePaid);
+      if (!anyPaid && !anyUncertain) {
         await kvDel('kartpaid:' + raceId).catch(() => {});
         betAlert('KART settle paid NOTHING for ' + raceId + ' — flag cleared, safe to retry');
         clearTimeout(guard); done = true;
         return res.status(503).json({ error: 'kart payout failed, retryable', retry: true, raceId });
+      }
+      if (!anyPaid) {
+        betAlert('KART settle for ' + raceId + ' is UNRESOLVED — no payout confirmed, but at least one ' +
+                 'transfer MAY have landed. Flag kartpaid:' + raceId + ' is HELD so a retry cannot pay ' +
+                 'twice. Check the winners\' wallets on-chain and pay by hand if nothing arrived.');
+        clearTimeout(guard); done = true;
+        return res.status(409).json({ error: 'kart payout unresolved — may already have been sent, not retrying',
+          retry: false, held: true, raceId, paid });
       }
       // The pot has left the building either way; keeping it as liability would block later payouts.
       await kvHincrby(BET_LEDGER, 'betLiability', -potLamports).catch(() => {});
@@ -3556,4 +3662,4 @@ module.exports.postBetSlipToDiscord = postBetSlipToDiscord;
  * hold it), and wgPayOne owns the classification that decision reads. A test that reimplemented either
  * would have gone green through the whole recruiter double-payment. `_payInternals` is a test seam and
  * nothing else calls it. */
-module.exports._payInternals = { settleBounty, wgPayOne, sendAndConfirm };
+module.exports._payInternals = { settleBounty, wgPayOne, wgPayWinnerAndFee, sendAndConfirm, releasePayLock };

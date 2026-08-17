@@ -107,8 +107,35 @@ global.fetch = async (url, opts) => {
   return json({});
 };
 
+process.env.GAME_SECRET   = 'test-game-secret';
+process.env.ADMIN_SECRET  = 'test-admin-secret';
+
+const crypto = require('crypto');
 const settle = require('../api/settle.js');
-const { settleBounty, wgPayOne } = settle._payInternals;
+const { settleBounty, wgPayOne, releasePayLock } = settle._payInternals;
+
+// Drive the real HTTP handler for the blackjack/coinflip paths — they are reached through the router and
+// their GAME_SECRET proof, and the thing under test is the RESPONSE (`retry`) as much as the lock.
+function mockRes() {
+  const r = { code: 200, body: null };
+  r.setHeader = () => {};
+  r.status = (c) => { r.code = c; return r; };
+  r.json = (b) => { r.body = b; return r; };
+  r.end = () => r;
+  return r;
+}
+const callSettle = async (body, proofPayload) => {
+  const res = mockRes();
+  const ts = Date.now();
+  const headers = {};
+  if (proofPayload) {
+    headers['x-game-ts'] = String(ts);
+    headers['x-game-proof'] = crypto.createHmac('sha256', process.env.GAME_SECRET)
+      .update(proofPayload.replace('{TS}', String(ts))).digest('hex');
+  }
+  await settle({ method: 'POST', query: {}, headers, body }, res);
+  return res;
+};
 
 let pass = 0, fail = 0;
 const eq = (got, want, msg) => {
@@ -228,6 +255,79 @@ const lockHeld = () => store.has('evtpaid:' + EV.id + ':1');
   eq(res.result.winners[0].ok, false, 'a rejected payout is reported failed');
   eq(res.result.winners[0].heldForReview, false, 'a rejection is not ambiguous, so it is not held');
   eq(lockHeld(), false, 'its lock is released so it can be retried');
+
+  // ══ 7. THE HELPER ITSELF — one rule, fourteen call sites ════════════════════════════════════════
+  // Every payout path delegates the release decision here, so this is the single thing that has to be
+  // right. Tested directly as well as through the paths, because a subtle inversion here would be a
+  // double payment in blackjack, coinflip, kart and the bounty simultaneously.
+  store.clear();
+  store.set('lk:test', '1');
+  eq(await releasePayLock('lk:test', { ok: false, mayHavePaid: false, reason: 'insolvent' }, 't'), true,
+     'a definitely-unpaid failure releases the lock');
+  eq(store.has('lk:test'), false, 'and the key is actually gone');
+  store.set('lk:test2', '1');
+  eq(await releasePayLock('lk:test2', { ok: false, mayHavePaid: true, reason: 'Send failed: x' }, 't'), false,
+     '⚠️ a maybe-paid failure HOLDS the lock');
+  eq(store.has('lk:test2'), true, 'and the key is still there');
+
+  // ══ 8. BLACKJACK — the hottest path, because the client retries by itself ════════════════════════
+  // A seat's ante refund. The game server calls this on a loop with no human in it, so the `retry` field
+  // is load-bearing: telling it to retry against a HELD lock makes it hammer a lock that never opens,
+  // and releasing the lock when the transfer may have landed refunds the ante twice.
+  const HAND = 'hand-test-1';
+  // ⚠️ Must be a REAL base58 32-byte key. An invented 44-char string decodes to 33 bytes, buildTx throws
+  // 'recipient must be 32 bytes', and case 8a then passed for entirely the wrong reason — a build error
+  // rather than a send failure. This is the system program id: 32 zero bytes.
+  const SEAT = '11111111111111111111111111111111';
+  const bjSeed = () => {
+    store.clear();
+    store.set('bjdep:' + HAND + ':' + SEAT, JSON.stringify({ addr: SEAT, lamports: 50_000_000 }));
+    net.sends = 0; net.balance = 5_000_000_000; net.sendMode = 'ok'; net.statusMode = 'confirmed';
+  };
+  const bjLock = () => store.has('bjpaid:' + HAND + ':' + SEAT);
+
+  // 8a. A send that may have landed: lock HELD and the client is told NOT to retry.
+  bjSeed();
+  net.sendMode = 'throw';
+  let r2 = await callSettle({ action: 'bj-refund', handId: HAND, address: SEAT },
+                            'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
+  eq(r2.code, 409, 'an unresolved bj refund answers 409, not 503');
+  eq(r2.body.retry, false, '⚠️ THE SELF-RETRYING CLIENT IS TOLD NOT TO RETRY');
+  eq(r2.body.held, true, 'and it is reported as held');
+  eq(bjLock(), true, '⚠️ the ante lock is HELD, so the refund cannot go out twice');
+
+  const bjSendsBefore = net.sends;
+  net.sendMode = 'ok';                                          // network recovers, server retries anyway
+  r2 = await callSettle({ action: 'bj-refund', handId: HAND, address: SEAT },
+                        'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
+  eq(net.sends, bjSendsBefore, '⚠️ A RETRY SENDS NOTHING — the double refund, prevented');
+  eq(r2.body.already, true, 'the retry is reported as already handled');
+
+  // 8b. …and an unambiguous failure still frees the refund to be retried.
+  bjSeed();
+  /* ⚠️ Getting this refusal to actually happen took three attempts, and each failure was the test
+   * quietly PAYING instead of refusing:
+   *   1. `pw:` liability does nothing here — wgPayWinnerAndFee asserts solvency WITHOUT protectPlayers,
+   *      and checkInvariant deliberately leaves wagerLiability out of that gate.
+   *   2. High betLiability alone does nothing either, because the gate is
+   *      `max(0, betLiability − payout)`: a refund RETIRES the very claim it is paying, so it is
+   *      correctly allowed.
+   * What refuses is escrow being short against OTHER bettors' claims: 200,000,000 on hand against
+   * 4,990,000,000 owed. */
+  net.balance = 200_000_000;
+  store.set('betledger', { betLiability: '4990000000', accruedFee: '0' });
+  r2 = await callSettle({ action: 'bj-refund', handId: HAND, address: SEAT },
+                        'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
+  eq(r2.body.retry, true, 'a refused refund DOES tell the client to retry');
+  eq(bjLock(), false, 'and its lock is released');
+  eq(net.sends, 0, 'nothing was sent');
+
+  net.balance = 5_000_000_000;                                  // escrow funded again
+  store.set('betledger', { betLiability: '0', accruedFee: '0' });
+  r2 = await callSettle({ action: 'bj-refund', handId: HAND, address: SEAT },
+                        'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
+  eq(r2.body.ok, true, 'and once escrow is free the ante is refunded');
+  eq(net.sends > 0, true, 'exactly one send happened');
 
   // ══ 6. A dry run never takes a lock or sends ════════════════════════════════════════════════════
   seedBoard();
