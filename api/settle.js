@@ -1372,6 +1372,47 @@ function throwProvesUnpaid(err) {
   return String((err && err.message) || err || '').startsWith('TX rejected on-chain');
 }
 
+/* ── A PAY-FLAG MUST RECORD COMPLETION, NOT INTENT ───────────────────────────────────────────────
+ *
+ * Every payout path claims an NX flag (`bjpaid:`, `cfpaid:`, `kartpaid:`, `evtpaid:`) and then sends. The
+ * flag was written as the placeholder `'1'` BEFORE the transfer, and a caller that found it already held
+ * was told `{ok:true, already:true}` — success.
+ *
+ * So if the function died in between — Vercel's 60s maxDuration, a cold-start kill, any crash — the
+ * money never left, the flag survived, and every retry reported the winner as already paid. The pot sat
+ * in escrow as unattributed surplus and nobody was told. Reported as blackjack, kart and kill rewards
+ * "not paying at times", with ~$10 unexplained in escrow.
+ *
+ * Now the flag carries its state: `claimed:<ts>` while a payout is in flight, `sig:<signature>` once SOL
+ * has actually moved. A flag found in `claimed:` is a payout that never finished — UNRESOLVED, alerted,
+ * and NOT reported as success.
+ *
+ * ⚠️ Legacy `'1'` is read as PAID. Real keys written by the old code are still in KV, most of them from
+ * genuinely completed payouts, and calling those unresolved would alert on every one. Treating them as
+ * paid keeps exactly the old behaviour for them and nothing worse; they expire with the 24h TTL, after
+ * which detection is complete. `'sealed'` is bj-audit's quarantine marker and also means "never pay".
+ */
+const PAY_FLAG_TTL = 86400;
+async function claimPayFlag(key, ttl) {
+  if (await kvSetNX(key, 'claimed:' + Date.now(), ttl || PAY_FLAG_TTL)) return { claimed: true };
+  const cur = String((await kvGet(key).catch(() => '')) || '');
+  // Anything that is not an in-flight claim counts as settled: a real signature, the audit's seal, or a
+  // legacy placeholder.
+  return { claimed: false, paid: !cur.startsWith('claimed:'), value: cur };
+}
+// Called ONLY after a transfer has actually gone out. This is what turns a claim into proof of payment.
+async function markPayFlagPaid(key, sig, ttl) {
+  await kvSet(key, 'sig:' + String(sig || 'ok'), ttl || PAY_FLAG_TTL).catch(() => {});
+}
+// A claim that never completed. Alerts with the amount so it can be settled by hand, and tells the
+// caller plainly that it is NOT paid — the silent `already: true` is what hid this for so long.
+function unresolvedPayFlag(key, who, lamports, tag) {
+  betAlert('PAYOUT NEVER COMPLETED ' + tag + ' -> ' + String(who).slice(0, 8) + ' amount=' + lamports +
+           ' — a previous attempt claimed ' + key + ' and then died before the transfer finished, so this ' +
+           'was never paid and the money is still in escrow. Verify on-chain, pay by hand if it never ' +
+           'arrived, then DEL ' + key + '.');
+}
+
 async function releasePayLock(key, r, tag) {
   if (r && r.mayHavePaid) {
     betAlert('payout UNCERTAIN ' + tag + ' : ' + ((r && r.reason) || '') + ' — the transaction MAY have ' +
@@ -2266,8 +2307,15 @@ module.exports = async function handler(req, res) {
         if (isPush) {
           const out = {};                                                    // refund every ante 100%, no fee
           for (const a of anted) {
-            const c = await kvSetNX('bjpaid:' + handId + ':' + a, '1', 86400);
-            if (!c) { out[a] = { already: true }; continue; }
+            const fk = 'bjpaid:' + handId + ':' + a;
+            const c = await claimPayFlag(fk);
+            if (!c.claimed) {
+              // A flag left in `claimed:` is a refund that was started and never finished — say so
+              // instead of reporting it as already paid, which is how these went missing silently.
+              if (!c.paid) { unresolvedPayFlag(fk, a, deps[a].lamports, 'bj-push:' + handId); out[a] = { unresolved: true, paid: false }; }
+              else out[a] = { already: true };
+              continue;
+            }
             const r = await wgPayWinnerAndFee(esc, a, deps[a].lamports, 0, 'bj-push');
             /* ⚠️ `retry` MUST come from releasePayLock, not be hardcoded true. The game server retries
              * this call by itself, with no human in the loop — so when the lock is HELD (the send may
@@ -2279,6 +2327,9 @@ module.exports = async function handler(req, res) {
               return res.status(retry ? 503 : 409).json({ retry, held: !retry,
                 error: (retry ? 'refund held: ' : 'refund UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (r.reason || '') });
             }
+            // The transfer went out — turn the claim into proof of it, so a retry can tell this apart
+            // from an attempt that died mid-flight.
+            await markPayFlagPaid(fk, r.sig);
             await kvHincrby(BET_LEDGER, 'betLiability', -deps[a].lamports).catch(() => {});
             out[a] = { sig: r.sig };
           }
@@ -2295,8 +2346,13 @@ module.exports = async function handler(req, res) {
         const feeTotal = fee0 + (prize - share * W);                          // rounding dust rides with the fee → escrow stays exact
         const out = {};
         for (const w of winners) {
-          const c = await kvSetNX('bjpaid:' + handId + ':' + w, '1', 86400);
-          if (!c) { out[w] = { already: true }; continue; }
+          const fk = 'bjpaid:' + handId + ':' + w;
+          const c = await claimPayFlag(fk);
+          if (!c.claimed) {
+            if (!c.paid) { unresolvedPayFlag(fk, w, share, 'bj-win:' + handId); out[w] = { unresolved: true, paid: false }; }
+            else out[w] = { already: true };
+            continue;
+          }
           const r = await wgPayWinnerAndFee(esc, w, share, 0, 'bj-win');
           if (!r.ok) {
             const retry = await releasePayLock('bjpaid:' + handId + ':' + w, r, 'bj-win:' + handId + ':' + String(w).slice(0, 8));
@@ -2304,6 +2360,7 @@ module.exports = async function handler(req, res) {
             return res.status(retry ? 503 : 409).json({ retry, held: !retry,
               error: (retry ? 'payout held: ' : 'payout UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (r.reason || '') });
           }
+          await markPayFlagPaid(fk, r.sig);
           await kvHincrby(BET_LEDGER, 'betLiability', -share).catch(() => {});
           out[w] = { sig: r.sig, share };
         }
@@ -2351,8 +2408,17 @@ module.exports = async function handler(req, res) {
       const raw = await kvGet('bjdep:' + handId + ':' + addr);
       if (!raw) { clearTimeout(guard); done = true; return res.status(404).json({ error: 'no deposit on record' }); }
       const d = JSON.parse(raw);
-      const c = await kvSetNX('bjpaid:' + handId + ':' + addr, '1', 86400);
-      if (!c) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+      const fk = 'bjpaid:' + handId + ':' + addr;
+      const c = await claimPayFlag(fk);
+      if (!c.claimed) {
+        clearTimeout(guard); done = true;
+        if (!c.paid) {
+          unresolvedPayFlag(fk, addr, d.lamports, 'bj-refund:' + handId);
+          return res.status(409).json({ ok: false, unresolved: true, retry: false,
+            error: 'A previous refund attempt never completed — this ante has NOT been returned. It is flagged for the operator; do not retry.' });
+        }
+        return res.status(200).json({ ok: true, already: true });
+      }
       // Tracks whether the transfer call was ever entered. The catch below releases the pay-lock, and
       // that is only safe while nothing has been sent — the realistic throw here is getEscrow() failing
       // before any transfer. Once the payout has been attempted, a throw from anything AFTER it (the
@@ -2368,6 +2434,7 @@ module.exports = async function handler(req, res) {
           return res.status(retry ? 503 : 409).json({ retry, held: !retry,
             error: (retry ? 'refund held: ' : 'refund UNRESOLVED — the transfer may already have been sent, so it will NOT be retried: ') + (r.reason || '') });
         }
+        await markPayFlagPaid(fk, r.sig);
         await kvHincrby(BET_LEDGER, 'betLiability', -d.lamports).catch(() => {});
         clearTimeout(guard); done = true;
         return res.status(200).json({ ok: true, tx: r.sig });
@@ -2539,8 +2606,16 @@ module.exports = async function handler(req, res) {
       if (!verifyGameProof(req, 'kart-refund:' + refundId + ':' + (req.headers['x-game-ts'] || ''))) {
         clearTimeout(guard); done = true; return res.status(403).json({ error: 'bad proof' });
       }
-      const lk = await kvSetNX('kartrefund:' + refundId, String(Date.now()));
-      if (!lk) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+      const lk = await claimPayFlag('kartrefund:' + refundId, 0);
+      if (!lk.claimed) {
+        clearTimeout(guard); done = true;
+        if (!lk.paid) {
+          unresolvedPayFlag('kartrefund:' + refundId, refundId, 0, 'kart-refund');
+          return res.status(409).json({ ok: false, unresolved: true, retry: false, refundId,
+            error: 'A previous refund for this race never completed — entries were NOT returned. Flagged for the operator; do not retry.' });
+        }
+        return res.status(200).json({ ok: true, already: true });
+      }
       const escR = getEscrow();
       const out = [];
       let returned = 0;
@@ -2572,6 +2647,8 @@ module.exports = async function handler(req, res) {
         return res.status(409).json({ error: 'kart refund unresolved — may already have been sent, not retrying',
           retry: false, held: true, refundId, refunded: out });
       }
+      // At least one entry was returned — record it, so a retry can tell this from a died-mid-refund.
+      await markPayFlagPaid('kartrefund:' + refundId, (out.find((o) => o.sig) || {}).sig, 0);
       if (returned > 0) await kvHincrby(BET_LEDGER, 'betLiability', -returned).catch(() => {});
       clearTimeout(guard); done = true;
       return res.status(200).json({ ok: true, refundId, refunded: out });
@@ -2637,8 +2714,18 @@ module.exports = async function handler(req, res) {
       }
       // ONE PAYOUT PER RACE, permanently. A race id can never be settled twice however many times the
       // kart server retries or restarts.
-      const lk = await kvSetNX('kartpaid:' + raceId, String(Date.now()));
-      if (!lk) { clearTimeout(guard); done = true; return res.status(200).json({ ok: true, already: true }); }
+      // ⚠️ Was `String(Date.now())`, so a flag could not be told apart from a completed one. A race whose
+      // settle died mid-payout answered `already: true` to every retry and the pot stayed in escrow.
+      const lk = await claimPayFlag('kartpaid:' + raceId, 0);
+      if (!lk.claimed) {
+        clearTimeout(guard); done = true;
+        if (!lk.paid) {
+          unresolvedPayFlag('kartpaid:' + raceId, raceId, potLamports, 'kart-settle');
+          return res.status(409).json({ ok: false, unresolved: true, retry: false, raceId,
+            error: 'A previous settle for this race never completed — the winners were NOT paid. Flagged for the operator; do not retry.' });
+        }
+        return res.status(200).json({ ok: true, already: true });
+      }
 
       // 10% to the house, the rest split evenly among the winners — ties split, as specified. Dust
       // from the division rides with the fee so escrow stays exact to the lamport.
@@ -2682,6 +2769,7 @@ module.exports = async function handler(req, res) {
           retry: false, held: true, raceId, paid });
       }
       // The pot has left the building either way; keeping it as liability would block later payouts.
+      await markPayFlagPaid('kartpaid:' + raceId, (paid.find((p) => p.sig) || {}).sig, 0);
       await kvHincrby(BET_LEDGER, 'betLiability', -potLamports).catch(() => {});
       clearTimeout(guard); done = true;
       return res.status(200).json({ ok: true, raceId, feeLamports: fee, paid });

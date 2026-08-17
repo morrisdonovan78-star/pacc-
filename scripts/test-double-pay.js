@@ -301,7 +301,11 @@ const lockHeld = () => store.has('evtpaid:' + EV.id + ':1');
   r2 = await callSettle({ action: 'bj-refund', handId: HAND, address: SEAT },
                         'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
   eq(net.sends, bjSendsBefore, '⚠️ A RETRY SENDS NOTHING — the double refund, prevented');
-  eq(r2.body.already, true, 'the retry is reported as already handled');
+  /* And it is reported as UNRESOLVED, not as already paid. The held flag still reads `claimed:` because
+   * the transfer never completed, and answering `already: true` there is precisely the silent success
+   * that let blackjack/kart/kill payouts go missing while the money sat in escrow. */
+  eq(r2.body.unresolved, true, '⚠️ THE RETRY SAYS UNRESOLVED, NOT "already paid"');
+  eq(r2.body.already, undefined, 'and does not claim it was already handled');
 
   // 8b. …and an unambiguous failure still frees the refund to be retried.
   bjSeed();
@@ -359,7 +363,8 @@ const lockHeld = () => store.has('evtpaid:' + EV.id + ':1');
   net.sendMode = 'ok';
   r2 = await kartCall();
   eq(net.sends, kartSends, '⚠️ THE RETRY SENDS NOTHING — the double refund, prevented');
-  eq(r2.body.already, true, 'and it reports as already done');
+  eq(r2.body.unresolved, true, '⚠️ AND REPORTS UNRESOLVED — the race was never actually refunded');
+  eq(r2.body.already, undefined, 'not "already done", which is how these went missing');
 
   // 10b. A refund that provably did not move still clears its flag and stays retryable.
   kartSeed();
@@ -368,6 +373,46 @@ const lockHeld = () => store.has('evtpaid:' + EV.id + ':1');
   eq(r2.body.retry, true, 'a provably-unpaid kart refund IS retryable');
   eq(kartLock(), false, 'and its flag is cleared');
   eq(net.sends, 0, 'nothing was broadcast');
+
+  // ══ 11. A PAYOUT THAT DIED AFTER CLAIMING ITS FLAG IS NOT "ALREADY PAID" ════════════════════════
+  // The reported outage: blackjack, kart and kill payouts "not paying at times", with money left over in
+  // escrow. The flags were written as the placeholder '1' BEFORE the transfer and a held flag answered
+  // {ok:true, already:true}. So a function killed between claiming and sending — Vercel's 60s cap, a
+  // cold start, any crash — left the pot in escrow while every retry reported the winner as paid.
+  //
+  // Simulated exactly: put a flag in the in-flight `claimed:` state, as a dead attempt would leave it,
+  // and ask for the payout again.
+  bjSeed();
+  store.set('bjpaid:' + HAND + ':' + SEAT, 'claimed:' + (Date.now() - 30000));
+  r2 = await callSettle({ action: 'bj-refund', handId: HAND, address: SEAT },
+                        'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
+  eq(r2.body.unresolved, true, '⚠️ A DIED-MID-PAYOUT FLAG REPORTS UNRESOLVED');
+  eq(r2.body.already, undefined, '⚠️ AND NEVER CLAIMS IT WAS PAID — the bug that hid missing payouts');
+  eq(net.sends, 0, 'it does not blind-resend either, because it may have landed');
+
+  // …while a flag carrying a real signature IS a completed payout and stays idempotent.
+  bjSeed();
+  store.set('bjpaid:' + HAND + ':' + SEAT, 'sig:SoMeReAlSignature');
+  r2 = await callSettle({ action: 'bj-refund', handId: HAND, address: SEAT },
+                        'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
+  eq(r2.body.already, true, 'a signature-backed flag is still reported as already paid');
+  eq(net.sends, 0, 'and pays nothing a second time');
+
+  // Legacy '1' flags from before this change are read as PAID on purpose: most are genuinely completed
+  // payouts, and calling them unresolved would alert on every one. They age out with the 24h TTL.
+  bjSeed();
+  store.set('bjpaid:' + HAND + ':' + SEAT, '1');
+  r2 = await callSettle({ action: 'bj-refund', handId: HAND, address: SEAT },
+                        'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
+  eq(r2.body.already, true, 'a legacy flag keeps its old meaning rather than alerting on everything');
+
+  // ══ 12. …and the happy path leaves a signature behind, which is what makes 11 possible ═══════════
+  bjSeed();
+  r2 = await callSettle({ action: 'bj-refund', handId: HAND, address: SEAT },
+                        'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
+  eq(r2.body.ok, true, 'a clean refund succeeds');
+  eq(String(store.get('bjpaid:' + HAND + ':' + SEAT) || '').startsWith('sig:'), true,
+     '⚠️ THE FLAG RECORDS THE SIGNATURE — proof of payment, not just intent');
 
   // ══ 6. A dry run never takes a lock or sends ════════════════════════════════════════════════════
   seedBoard();
