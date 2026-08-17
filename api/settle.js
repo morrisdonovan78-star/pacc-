@@ -1498,11 +1498,30 @@ module.exports = async function handler(req, res) {
         clearTimeout(guard); done = true;
         return res.status(400).json({ error: 'victimAddress required' });
       }
-      // Set dead flag (blocks cashout) and atomically delete their wager record simultaneously
-      await Promise.all([
+      /* ⚠️⚠️ THE VICTIM'S STAKE IS THE KILLER'S REWARD — IT MUST NOT BE THROWN AWAY.
+       *
+       * This deleted `pw:<victim>` and DISCARDED the value. The `kill` action then does its own
+       * `kvGetDel('pw:' + victim)` to size the reward — and the game server calls THIS endpoint the
+       * instant a player dies, well before the killer's client can claim. So elim-lock won the race
+       * essentially every time, `kill` read 0, and answered "Victim had no recorded wager — nothing to
+       * claim". The killer was never paid AND the victim's stake stayed in escrow as unattributed
+       * surplus. That is both "people weren't getting paid for kills" and the leftover escrow.
+       *
+       * The stake is now preserved under `victimstake:<victim>` for the `kill` claim to collect. TTL
+       * matches `dead:` (600s) and comfortably covers the kill proof's 300s freshness window, so a
+       * legitimate claim always finds it and nothing lingers past the round.
+       *
+       * ⚠️ `kill` collects it with GETDEL, so it is claimable EXACTLY ONCE — two killers cannot both be
+       * paid for the same corpse. */
+      const [, elimStake] = await Promise.all([
         kvSet('dead:' + victimAddress, '1', 600),
         kvGetDel('pw:' + victimAddress),
-      ]).catch(() => {});
+      ]).catch(() => [null, null]);
+      const elimLam = Math.floor(Number(elimStake) || 0);
+      if (elimLam > 0) {
+        await kvSet('victimstake:' + victimAddress, String(elimLam), 600).catch(() => {});
+        console.log('[settle] elim-lock preserved victim stake ' + elimLam + ' for the killer to claim victim=' + String(victimAddress).slice(0, 8));
+      }
       // Record the killer's elimination — paid lobbies only (matches every other leaderboard
       // stat: "wagered lobbies only"), never bots, never self-kills.
       if (killerAddress && typeof killerAddress === 'string' && killerAddress.length >= 20 &&
@@ -3757,6 +3776,18 @@ module.exports = async function handler(req, res) {
           kvGetDel('pw:' + vaBody),
         ]).catch(() => [null, null]);
         victimStakeLamports = Number(delVal) || 0;
+        /* ⚠️ FALL BACK TO THE STAKE elim-lock PRESERVED. `pw:<victim>` is almost always already gone by
+         * the time a killer claims, because the game server fires elim-lock the moment the victim dies —
+         * that race is why kill rewards silently paid nothing. GETDEL so the reward is claimable exactly
+         * once: a second killer claiming the same corpse finds it gone and is correctly refused. */
+        if (victimStakeLamports <= 0) {
+          const stashed = await kvGetDel('victimstake:' + vaBody).catch(() => null);
+          victimStakeLamports = Math.floor(Number(stashed) || 0);
+          if (victimStakeLamports > 0) {
+            console.log('[settle] kill claimed the preserved victim stake ' + victimStakeLamports +
+                        ' victim=' + vaBody.slice(0, 8) + ' killer=' + playerAddress.slice(0, 8));
+          }
+        }
       }
       if (victimStakeLamports !== Number(body.wagerLamports)) {
         console.warn('[settle] kill amount mismatch — victim pw:=' + victimStakeLamports +
