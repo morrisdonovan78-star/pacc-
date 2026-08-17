@@ -3523,8 +3523,20 @@ module.exports = async function handler(req, res) {
                      'deposit. player=' + playerAddress.slice(0, 8) + ' game=' + game + ' signedBase=' + cpBase +
                      ' signedTotal=' + cpLam + ' kv=' + kvWager + ' paid=' + wagerLamports +
                      '. Not a forgery: the deposit changed between the proof being minted and the cash-out.');
+          } else if (REQUIRE_CASH_PROOF && cpProof) {
+            /* A proof WAS presented and did not validate — forged, tampered, or past its 120s window.
+             * That is genuinely suspicious and stays refused, which is what the guard is for. The wager is
+             * restored first, so nothing is ever lost by refusing. Distinct from the branch below, where
+             * no proof was minted at all. */
+            await kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
+            betAlert('CASHOUT REFUSED — a proof was presented but did not validate (forged, tampered or ' +
+                     'stale). player=' + playerAddress.slice(0, 8) + ' game=' + game + ' claimed=' + wagerLamportsRaw);
+            clearTimeout(guard); done = true;
+            return res.status(503).json({
+              error: 'Cash-out could not be verified with the game server. Your wager is SAFE and still on record — please RELOAD the page (Ctrl+Shift+R), rejoin, and cash out again.',
+              reload: true, retry: true });
           } else if (REQUIRE_CASH_PROOF) {
-            /* ⚠️⚠️ NEVER REFUSE A CASH-OUT WHOSE DEPOSIT WE ARE HOLDING.
+            /* ⚠️⚠️ NEVER REFUSE A CASH-OUT WHOSE DEPOSIT WE ARE HOLDING, WHEN NO PROOF WAS EVER MINTED.
              *
              * This used to restore `pw:` and 503 with "could not be verified — RELOAD". On a $1 lobby with
              * $10 in escrow, players hit it repeatedly and simply could not be paid; it happened on a
@@ -3543,7 +3555,6 @@ module.exports = async function handler(req, res) {
              * is exactly what is missing. That shortfall is ALERTED, not silent, so it can be settled by
              * hand; this codebase's rule is "refuse rather than silently underpay", and the honest reading
              * of it is that being loud about the difference beats paying a player nothing at all. */
-            payingDepositOnly = true;
             wagerLamports = kvWager;
             betAlert('CASHOUT PAID DEPOSIT ONLY — no game-server proof arrived. player=' +
                      playerAddress.slice(0, 8) + ' game=' + game + ' deposit=' + kvWager + ' clientClaimed=' +

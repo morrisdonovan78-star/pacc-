@@ -186,12 +186,18 @@ function seed(deposit) {
   eq(r.code, 200, 'a genuine proof signing less than the deposit still pays');
   eq(net.lastLamports >= Math.floor(DEPOSIT * 0.85), true, '⚠️ FLOORED AT THE DEPOSIT (less the 10% fee) — nobody is shortchanged');
 
-  // ══ 5. THE GUARD STILL GUARDS: no proof at all is refused, and the wager is put back ════════════
+  /* ══ 5. NO PROOF WAS EVER MINTED → PAY THE DEPOSIT, never strand it ═════════════════════════════
+   *
+   * The case from the stream: the node declines to mint when its own stake record is missing
+   * (`NO deposit on record` -> `NO cash proof`), so no proof ever arrives and the old code refused
+   * forever. `kvWager` is server-side truth, so the deposit is payable with zero trust in the client —
+   * and the inflated claim below must be ignored entirely. */
   seed(DEPOSIT);
   r = await cashout({ claimed: DEPOSIT * 50 });
-  eq(r.code, 503, 'a cash-out with NO proof is still refused');
-  eq(net.sends, 0, '⚠️ NOTHING WAS SENT');
-  eq(store.get('pw:' + PLAYER), String(DEPOSIT), '⚠️ AND THE WAGER IS RESTORED — never lost');
+  eq(r.code, 200, '⚠️ A CASH-OUT WITH NO PROOF NOW PAYS THE DEPOSIT — it used to 503 forever');
+  eq(net.sends > 0, true, 'money moved');
+  eq(net.lastLamports <= DEPOSIT, true, '⚠️ AND THE 50x CLIENT CLAIM WAS IGNORED — deposit only');
+  eq(net.lastLamports >= Math.floor(DEPOSIT * 0.85), true, 'the player got their deposit less the fee');
 
   // ══ 6. A FORGED proof is refused — the HMAC is the whole defence ════════════════════════════════
   seed(DEPOSIT);
