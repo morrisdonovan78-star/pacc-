@@ -519,6 +519,20 @@ module.exports = async function handler(req, res) {
         // was silently never attributed — one of the ways "my friend used my link and it says 0"
         // happens with everything else configured correctly.
         try { await accrueReferral(walletAddress, refCode, Number(existingWager) || lamps); } catch (_) {}
+        /* ⚠️⚠️ CLEAR THE DEAD FLAG AND THE CASH-OUT LOCK HERE TOO.
+         *
+         * The fresh-join path below does this ~35 lines further down, and THIS path returns before ever
+         * reaching it. So a player who died and then rejoined inside the resume window kept a live
+         * `dead:<wallet>` — which has a 600s TTL — and every cash-out for the next TEN MINUTES was refused
+         * with "Cannot cashout — you were eliminated" while they were alive and playing. Reported from a
+         * $1 lobby with the player very much not dead, repeatedly, on stream.
+         *
+         * Safe for exactly the same reason it is safe below: reaching here means the resume was accepted,
+         * which required the SAME deposit that opened this entry. A new paid entry means the previous
+         * round's death is over, so its flag must not outlive it. Same for `lock:co:`, which would
+         * otherwise answer "cashout already in progress" from a session that has ended. */
+        kvDel('dead:' + walletAddress).catch(() => {});
+        kvDel('lock:co:' + walletAddress).catch(() => {});
         return res.status(200).json({ ok: true, recorded: Number(existingWager) || lamps, gameToken, entryToken, resumed: true });
       }
 

@@ -3524,18 +3524,33 @@ module.exports = async function handler(req, res) {
                      ' signedTotal=' + cpLam + ' kv=' + kvWager + ' paid=' + wagerLamports +
                      '. Not a forgery: the deposit changed between the proof being minted and the cash-out.');
           } else if (REQUIRE_CASH_PROOF) {
-            await kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
-            betAlert('CASHOUT REFUSED — no valid game-server proof. player=' + playerAddress.slice(0, 8) +
-                     ' game=' + game + ' claimed=' + wagerLamportsRaw + '. If this player is on a CACHED ' +
-                     'page they must RELOAD; if it happens to everyone, unset CASHOUT_REQUIRE_PROOF.');
-            clearTimeout(guard); done = true;
-            /* Tell them to RELOAD, not to retry. By far the likeliest reason a cash-out reaches here is a
-             * page cached from before the proof client shipped: it never listens for `ss-cash-proof`, so
-             * it has nothing to send and pressing Cash Out again produces the identical refusal forever.
-             * The wager is restored above, so reloading costs them nothing and actually fixes it. */
-            return res.status(503).json({
-              error: 'Cash-out could not be verified with the game server. Your wager is SAFE and still on record — please RELOAD the page (Ctrl+Shift+R), rejoin, and cash out again.',
-              reload: true, retry: true });
+            /* ⚠️⚠️ NEVER REFUSE A CASH-OUT WHOSE DEPOSIT WE ARE HOLDING.
+             *
+             * This used to restore `pw:` and 503 with "could not be verified — RELOAD". On a $1 lobby with
+             * $10 in escrow, players hit it repeatedly and simply could not be paid; it happened on a
+             * YouTube streamer's video. Reloading does not fix it, because the cause is not a cached page:
+             * the GAME SERVER declines to mint a proof when its own stake record is missing
+             * (`[stake] NO deposit on record` -> `NO cash proof`), e.g. after a node restart mid-session.
+             * No proof is ever minted, so the refusal repeats forever.
+             *
+             * But `kvWager` is the deposit THIS function just read out of KV. It is server-side truth and
+             * needs no trust in the client whatsoever — the proof exists to bound the FOOD a player claims
+             * on top, not to establish that their deposit is real. So pay the deposit rather than stranding
+             * it. A forged claim still cannot inflate anything: `wagerLamportsRaw` is ignored entirely on
+             * this path.
+             *
+             * The food they ate is NOT paid here, because only the game server can attest to it — and that
+             * is exactly what is missing. That shortfall is ALERTED, not silent, so it can be settled by
+             * hand; this codebase's rule is "refuse rather than silently underpay", and the honest reading
+             * of it is that being loud about the difference beats paying a player nothing at all. */
+            payingDepositOnly = true;
+            wagerLamports = kvWager;
+            betAlert('CASHOUT PAID DEPOSIT ONLY — no game-server proof arrived. player=' +
+                     playerAddress.slice(0, 8) + ' game=' + game + ' deposit=' + kvWager + ' clientClaimed=' +
+                     wagerLamportsRaw + ' (IGNORED). The node mints no proof when its stake record is ' +
+                     'missing, so the food this player ate could NOT be attested and is NOT included. ' +
+                     'Check the node log for "NO cash proof"/"NO deposit on record" and settle any food ' +
+                     'difference by hand.');
           }
           // Unsigned claim, capped. Reached when the guard is OFF and no usable proof arrived — and NOT
           // when the proof was authentic, which is handled above off the signed figure instead.
