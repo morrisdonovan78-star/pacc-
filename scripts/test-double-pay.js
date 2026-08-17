@@ -112,7 +112,7 @@ process.env.ADMIN_SECRET  = 'test-admin-secret';
 
 const crypto = require('crypto');
 const settle = require('../api/settle.js');
-const { settleBounty, wgPayOne, releasePayLock } = settle._payInternals;
+const { settleBounty, wgPayOne, releasePayLock, throwProvesUnpaid } = settle._payInternals;
 
 // Drive the real HTTP handler for the blackjack/coinflip paths — they are reached through the router and
 // their GAME_SECRET proof, and the thing under test is the RESPONSE (`retry`) as much as the lock.
@@ -328,6 +328,46 @@ const lockHeld = () => store.has('evtpaid:' + EV.id + ':1');
                         'bj-refund:' + HAND + ':' + SEAT + ':{TS}');
   eq(r2.body.ok, true, 'and once escrow is free the ante is refunded');
   eq(net.sends > 0, true, 'exactly one send happened');
+
+  // ══ 9. THE OTHER DISGUISE: paths that RESTORE what they consumed ════════════════════════════════
+  // Three sites had the same bug without a pay-lock in sight — cashout restores `pw:`, ref-claim
+  // restores `refbal:`, kart-refund clears `kartrefund:`. Restoring a consumed claim after a send that
+  // may have landed is exactly releasing a lock: the player holds the SOL *and* a fresh claim.
+  eq(throwProvesUnpaid(new Error('TX rejected on-chain: {"InstructionError":[0,"Custom"]}')), true,
+     'an on-chain rejection proves nothing was paid');
+  eq(throwProvesUnpaid(new Error('Send failed: All RPCs failed: node unreachable')), false,
+     '⚠️ A FAILED SUBMIT PROVES NOTHING — it may be in the mempool');
+  eq(throwProvesUnpaid(new Error('some other explosion')), false, 'an unknown throw is not proof either');
+  eq(throwProvesUnpaid(null), false, 'a missing error is not proof');
+
+  // ══ 10. kart-refund end to end — same shape, reachable through its GAME_SECRET proof ═════════════
+  const RID = 'refund-test-1';
+  const kartSeed = () => { store.clear(); net.sends = 0; net.balance = 5_000_000_000; net.sendMode = 'ok'; net.statusMode = 'confirmed'; };
+  const kartLock = () => store.has('kartrefund:' + RID);
+  const kartCall = () => callSettle(
+    { action: 'kart-refund', refundId: RID, entries: [{ address: SEAT, lamports: 20_000_000 }] },
+    'kart-refund:' + RID + ':{TS}');   // must match verifyGameProof's payload exactly, refundId included
+
+  // 10a. A send that may have landed: flag HELD, client told not to retry, and a retry sends nothing.
+  kartSeed();
+  net.sendMode = 'throw';
+  r2 = await kartCall();
+  eq(r2.code, 409, 'an unresolved kart refund answers 409');
+  eq(r2.body.retry, false, '⚠️ NOT RETRYABLE — the refund may already have gone out');
+  eq(kartLock(), true, '⚠️ the refund flag is HELD');
+  const kartSends = net.sends;
+  net.sendMode = 'ok';
+  r2 = await kartCall();
+  eq(net.sends, kartSends, '⚠️ THE RETRY SENDS NOTHING — the double refund, prevented');
+  eq(r2.body.already, true, 'and it reports as already done');
+
+  // 10b. A refund that provably did not move still clears its flag and stays retryable.
+  kartSeed();
+  net.balance = 1000;                                        // below rent+payout → refused pre-send
+  r2 = await kartCall();
+  eq(r2.body.retry, true, 'a provably-unpaid kart refund IS retryable');
+  eq(kartLock(), false, 'and its flag is cleared');
+  eq(net.sends, 0, 'nothing was broadcast');
 
   // ══ 6. A dry run never takes a lock or sends ════════════════════════════════════════════════════
   seedBoard();

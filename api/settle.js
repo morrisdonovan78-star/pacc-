@@ -1355,6 +1355,23 @@ async function wgPayWinnerAndFee(esc, winner, payout, fee, tag) {
  * being HELD. Callers that answer a self-retrying client MUST pass this through as `retry`, or the
  * client will hammer a lock that is never going to open.
  */
+/* TRUE only when a THROWN payout error proves no lamports moved.
+ *
+ * sendAndConfirm throws exactly two ways: 'TX rejected on-chain' (the transaction was included and
+ * FAILED — a rejected SystemProgram transfer moves nothing) and 'Send failed: …' out of the submit call,
+ * where a transport error is indistinguishable from a LOST RESPONSE to a transaction already in the
+ * mempool. Only the first is proof.
+ *
+ * ⚠️ This exists because a comment in the cashout path asserted the opposite — that sendAndConfirm
+ * "only throws on a failed broadcast or a tx rejected on-chain, and in BOTH cases no SOL left escrow".
+ * The second half is true; the first is not, and the code restored the player's `pw:` wager on that
+ * basis, so a lost response let them cash the same wager out twice. Same family as the wrong comment
+ * that broke build placement: a confident comment is not a proof.
+ */
+function throwProvesUnpaid(err) {
+  return String((err && err.message) || err || '').startsWith('TX rejected on-chain');
+}
+
 async function releasePayLock(key, r, tag) {
   if (r && r.mayHavePaid) {
     betAlert('payout UNCERTAIN ' + tag + ' : ' + ((r && r.reason) || '') + ' — the transaction MAY have ' +
@@ -2534,15 +2551,26 @@ module.exports = async function handler(req, res) {
         const r = await wgPayOne(escR, to, lam, 'kart-refund:' + refundId);
         if (!r.ok) betAlert('KART refund FAILED ' + refundId + ' -> ' + to.slice(0, 8) + ' : ' + (r.reason || ''));
         else returned += lam;
-        out.push({ address: to, lamports: lam, ok: !!r.ok, sig: r.sig || null });
+        out.push({ address: to, lamports: lam, ok: !!r.ok, mayHavePaid: !!r.mayHavePaid, sig: r.sig || null });
       }
       // Same rule as kart-settle: a refund where nothing moved must not stay flagged as done, or the
       // entry is stranded in escrow with no path back to the player.
-      if (!out.some((o) => o.ok)) {
+      //
+      // ⚠️ And the same correction: "nothing returned ok" is NOT "nothing moved". This loop is per-entry,
+      // so clearing the flag after a send that may have landed re-refunds whoever it did reach.
+      if (!out.some((o) => o.ok) && !out.some((o) => o.mayHavePaid)) {
         await kvDel('kartrefund:' + refundId).catch(() => {});
         betAlert('KART refund returned NOTHING for ' + refundId + ' — flag cleared, safe to retry');
         clearTimeout(guard); done = true;
         return res.status(503).json({ error: 'kart refund failed, retryable', retry: true, refundId });
+      }
+      if (!out.some((o) => o.ok)) {
+        betAlert('KART refund UNRESOLVED ' + refundId + ' — nothing confirmed but a transfer MAY have ' +
+                 'landed. Flag kartrefund:' + refundId + ' is HELD so a retry cannot refund twice. Check ' +
+                 'the entries on-chain and refund by hand if nothing arrived.');
+        clearTimeout(guard); done = true;
+        return res.status(409).json({ error: 'kart refund unresolved — may already have been sent, not retrying',
+          retry: false, held: true, refundId, refunded: out });
       }
       if (returned > 0) await kvHincrby(BET_LEDGER, 'betLiability', -returned).catch(() => {});
       clearTimeout(guard); done = true;
@@ -2878,10 +2906,24 @@ module.exports = async function handler(req, res) {
         }
         const pay = await wgPayOne(esc, playerAddress, owed, 'ref-claim', { protectPlayers: true });
         if (!pay.ok) {
-          // Payout didn't happen (insolvent surplus / send failure) — restore the balance, lose nothing.
-          await kvIncrby('refbal:' + playerAddress, owed).catch(() => {});
+          /* ⚠️ The balance was consumed with GETDEL, so restoring it is the same decision as releasing a
+           * pay-lock — and it is only safe when nothing can have moved. A send whose response was lost
+           * may still land, and restoring `refbal:` there means the referrer holds the SOL AND a
+           * claimable balance: they claim again and are paid twice. Insolvency and an on-chain rejection
+           * restore as before, which is what this branch was for. */
+          if (!pay.mayHavePaid) {
+            await kvIncrby('refbal:' + playerAddress, owed).catch(() => {});
+            clearTimeout(guard); done = true;
+            return res.status(503).json({ error: 'Payout temporarily unavailable — your balance is safe, try again shortly', retry: true });
+          }
+          await kvSetPerm('refclaimheld:' + playerAddress, JSON.stringify({ owedLamports: owed, ts: Date.now(), reason: pay.reason || '' })).catch(() => {});
+          betAlert('REF-CLAIM UNRESOLVED ' + String(playerAddress).slice(0, 8) + ' owed=' + owed + ' : ' +
+                   (pay.reason || '') + ' — MAY have landed, so the balance was NOT restored. Check the ' +
+                   'wallet on-chain: if it arrived, DEL refclaimheld:' + String(playerAddress) + '. If not, ' +
+                   'INCRBY refbal:' + String(playerAddress) + ' ' + owed + '.');
           clearTimeout(guard); done = true;
-          return res.status(503).json({ error: 'Payout temporarily unavailable — your balance is safe, try again shortly', retry: true });
+          return res.status(409).json({ held: true, retry: false,
+            error: 'Your claim is being checked — the transfer may already have gone through. Nothing is lost.' });
         }
         await kvHincrby('refstats:' + playerAddress, 'paid', owed).catch(() => {});
         clearTimeout(guard); done = true;
@@ -3447,16 +3489,42 @@ module.exports = async function handler(req, res) {
           }
         }
         } catch (payErr) {
-          // The payout never landed — sendAndConfirm only throws on a failed broadcast or a tx that was
-          // rejected on-chain, and in BOTH cases no SOL left escrow (a rejected SystemProgram transfer
-          // moves nothing). We consumed the wager with kvGetDel above, so restore it — otherwise the
-          // player is stranded: their next Cash Out finds no `pw:` record and returns "No wager on
-          // record" while their money sits in escrow (the hand-refund cases). Restoring is money-safe
-          // precisely because nothing was paid. Short TTL mirrors the live-wager window.
-          await kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
-          console.error('[settle] cashout FAILED, wager restored, wallet=' + playerAddress + ' — ' + (payErr && payErr.message || payErr));
+          /* ⚠️ RESTORING THE WAGER IS ONLY SAFE WHEN THE THROW PROVES NOTHING WAS PAID.
+           *
+           * This used to restore `pw:` unconditionally, on the stated grounds that sendAndConfirm "only
+           * throws on a failed broadcast or a tx rejected on-chain, and in BOTH cases no SOL left
+           * escrow". The rejected-on-chain half is true. The failed-broadcast half is NOT: a transport
+           * error on the submit call cannot be told apart from a lost response to a transaction that is
+           * already in the mempool and will land. Restoring the wager there hands the player back a
+           * live `pw:` record for money that has already reached their wallet — they press Cash Out
+           * again and are paid the same wager TWICE, out of the escrow that backs everyone else's
+           * stakes. This is the largest-value instance of the bug that paid a recruiter week twice.
+           *
+           * Proven-unpaid → restore, unchanged, because stranding a player whose payout genuinely
+           * failed is the reason the restore exists.
+           * Ambiguous → do NOT restore. Record it under `cashheld:` and alert, so it is a known item
+           * with the amount attached rather than either a double payment or a silent loss. */
+          if (throwProvesUnpaid(payErr)) {
+            await kvSet('pw:' + playerAddress, String(kvWager), 600).catch(() => {});
+            console.error('[settle] cashout REJECTED on-chain, wager restored, wallet=' + playerAddress + ' — ' + (payErr && payErr.message || payErr));
+            clearTimeout(guard); done = true;
+            return res.status(503).json({ error: 'Payout could not be confirmed — your wager is safe, press Cash Out again.', retry: true });
+          }
+          await kvSetPerm('cashheld:' + playerAddress, JSON.stringify({
+            wagerLamports: kvWager, playerCut: playerCut || null, ts: Date.now(),
+            reason: String((payErr && payErr.message) || payErr || ''),
+          })).catch(() => {});
+          console.error('[settle] cashout UNRESOLVED, wager NOT restored, wallet=' + playerAddress + ' — ' + (payErr && payErr.message || payErr));
+          betAlert('CASHOUT UNRESOLVED ' + String(playerAddress).slice(0, 8) + ' wager=' + kvWager +
+                   ' cut=' + (playerCut || '?') + ' : ' + String((payErr && payErr.message) || payErr) +
+                   ' — the transfer MAY have landed, so the wager was NOT restored (restoring it would let ' +
+                   'them cash out twice). Check the wallet on-chain: if the SOL arrived, DEL cashheld:' +
+                   String(playerAddress) + ' and nothing is owed. If it did not, restore pw:' +
+                   String(playerAddress) + ' = ' + kvWager + ' or pay by hand.');
           clearTimeout(guard); done = true;
-          return res.status(503).json({ error: 'Payout could not be confirmed — your wager is safe, press Cash Out again.', retry: true });
+          return res.status(409).json({ held: true, retry: false,
+            error: 'Your cash-out is being checked — the transfer may already have gone through. ' +
+                   'Nothing is lost; we are confirming on-chain before anything else happens.' });
         }
         clearTimeout(guard); done = true;
         return res.status(200).json({ sig, playerCut, creatorCut, confirmed: txConfirmed });
@@ -3662,4 +3730,4 @@ module.exports.postBetSlipToDiscord = postBetSlipToDiscord;
  * hold it), and wgPayOne owns the classification that decision reads. A test that reimplemented either
  * would have gone green through the whole recruiter double-payment. `_payInternals` is a test seam and
  * nothing else calls it. */
-module.exports._payInternals = { settleBounty, wgPayOne, wgPayWinnerAndFee, sendAndConfirm, releasePayLock };
+module.exports._payInternals = { settleBounty, wgPayOne, wgPayWinnerAndFee, sendAndConfirm, releasePayLock, throwProvesUnpaid };
