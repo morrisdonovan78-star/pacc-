@@ -52,7 +52,11 @@ require.cache[kvPath] = { id: kvPath, filename: kvPath, loaded: true, exports: {
   kvLpush:     async () => 1,
   kvLtrim:     async () => 'OK',
   kvLrange:    async () => [],
-  kvMget:      async (keys) => keys.map(() => null),
+  // Must return real values: sumWagerLiability reads `pw:*` through MGET, and a mock that always
+  // answered null pinned player liability at 0 forever — which silently made the "solvency refuses
+  // AFTER the lock was taken" case (4b below) unreachable, the one case that decides whether a
+  // legitimately-blocked payout can ever be retried.
+  kvMget:      async (keys) => keys.map((k) => (store.has(k) && typeof store.get(k) !== 'object' ? store.get(k) : null)),
   kvScan:      async (pattern) => {
     const rx = new RegExp('^' + String(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
     return [...store.keys()].filter((k) => rx.test(k));
@@ -196,6 +200,26 @@ const lockHeld = () => store.has('evtpaid:' + EV.id + ':1');
   res = await settleBounty(EV, { dryRun: false });
   eq(res.ok, true, 'and the retry now pays');
   eq(res.result.winners[0].ok, true, 'the winner is paid exactly once, after the float was funded');
+
+  // ══ 4b. Solvency refusing AFTER the lock is taken must ALSO release it ═══════════════════════════
+  // Case 4 above never reaches wgPayOne: planBountyPayout compares the bare balance against the rent
+  // floor and bails before any lock exists. This is the case that does reach it — the balance is ample,
+  // so the plan is fine, but the money is OWED TO PLAYERS (`pw:` liability), so assertSolvency refuses
+  // once the lock is already held. If that lock were not released, a transient liability spike would
+  // block the winner's prize permanently and need a hand-clear.
+  seedBoard();
+  store.set('pw:' + WINNER, '4900000000');                      // nearly the whole balance is players'
+  res = await settleBounty(EV, { dryRun: false });
+  eq(res.result.winners[0].ok, false, 'a payout refused by the solvency gate does not pay');
+  eq(res.result.winners[0].reason, 'insolvent', 'and reports why');
+  eq(res.result.winners[0].heldForReview, false, 'a refusal is unambiguous — nothing was sent');
+  eq(net.sends, 0, 'nothing was broadcast');
+  eq(lockHeld(), false, 'so its lock IS released and the prize can still be paid later');
+
+  store.delete('pw:' + WINNER);                                 // players cash out
+  res = await settleBounty(EV, { dryRun: false });
+  eq(res.result.winners[0].ok, true, 'and once escrow is free again the winner is paid');
+  eq(net.sends > 0, true, 'exactly one send happened on the retry');
 
   // ══ 5. An on-chain rejection also stays retryable ═══════════════════════════════════════════════
   seedBoard();

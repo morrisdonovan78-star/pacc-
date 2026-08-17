@@ -442,6 +442,23 @@ function renderWallets() {
       </div>
       <button class="btn btn-sm" onclick="doQualImport(true)">1 · PREVIEW</button>
       <div id="qi-out" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="section-title" style="margin-top:22px;">🔒 EVENT PAY-LOCKS</div>
+    <div class="card">
+      <div class="muted" style="font-size:12px;line-height:1.7;margin-bottom:12px;">
+        A pay-lock is what stops an event prize being paid twice — the bug that paid a recruiter week
+        twice over. After a <b>successful</b> payout a held lock is completely normal and should be left
+        alone. It only needs clearing in one case: the send genuinely failed, the winner <b>never got the
+        money</b>, and the lock is now blocking the retry.
+        <br><br>
+        ⚠️ <b>Check the escrow wallet on-chain first.</b> If the transfer did land, clearing this and
+        settling again pays that place a <b>second time</b>. When in doubt leave it — an unpaid winner can
+        be paid by hand, an overpaid one cannot be un-paid. Clearing moves <b>no SOL</b>.
+      </div>
+      <input id="pl-ev" placeholder="event id (e.g. bounty-2026-07-25) — blank to list all held locks" style="width:100%;box-sizing:border-box;background:#0b0b16;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#fff;padding:10px 12px;font-family:monospace;font-size:12px;margin-bottom:10px;">
+      <button class="btn btn-sm" onclick="doPayLock(true)">1 · SHOW</button>
+      <div id="pl-out" style="margin-top:10px;"></div>
     </div>`;
   // Populate the creator table straight away — an empty panel on open reads as "no data" rather than
   // "not fetched yet", which is exactly the confusion this whole section exists to remove.
@@ -516,6 +533,37 @@ async function doQualImport(dry) {
         : '<div class="muted" style="margin-top:8px;font-size:12px;">Nothing left to import.</div>';
     }
     out.innerHTML = h;
+  } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
+}
+/* Two clicks, and the CONFIRM button only exists after the locks have been listed — same shape as the
+ * unbind. This one can cost real money if it is used on a payout that actually landed, so the warning
+ * is repeated on the confirm step rather than only in the card copy above it. */
+async function doPayLock(dry) {
+  const out = document.getElementById('pl-out');
+  const evId = (document.getElementById('pl-ev').value || '').trim();
+  out.innerHTML = '<span class="muted">Working…</span>';
+  try {
+    const d = await api({ action: 'event-paylock', eventId: evId, dry: !!dry });
+    const rows = (d.willClear || d.cleared || d.held || []);
+    const list = rows.map(r => '<div style="font-family:monospace;font-size:12px;">' + esc(r.key)
+      + (r.takenAt ? ' <span class="muted">· ' + new Date(r.takenAt).toLocaleString() + '</span>' : '') + '</div>').join('');
+    if (!evId) {
+      out.innerHTML = '<div style="font-size:12px;line-height:1.8;">' + (d.count || 0)
+        + ' pay-lock(s) held platform-wide.</div>' + list
+        + '<div class="muted" style="margin-top:8px;font-size:12px;">' + esc(d.note || '') + '</div>';
+      return;
+    }
+    if (dry) {
+      out.innerHTML = '<div style="font-size:12px;line-height:1.8;">Would clear <b>' + (d.count || 0)
+        + '</b> lock(s) for <b>' + esc(d.eventId) + '</b>:</div>' + list
+        + '<div style="margin-top:10px;font-size:12px;color:#FFAA33;line-height:1.6;">'
+        + '⚠️ Only continue if you have checked on-chain that these payouts did NOT arrive. Clearing lets '
+        + 'the next settle pay them again.</div>'
+        + '<button class="btn btn-r btn-sm" style="margin-top:10px;" onclick="doPayLock(false)">2 · CONFIRM — CLEAR THE LOCK</button>';
+      return;
+    }
+    out.innerHTML = '<span style="color:#39FF14;">✓ Cleared ' + (d.count || 0) + ' lock(s) for '
+      + esc(d.eventId) + '.</span> <span class="muted">Run the settle again to pay.</span>';
   } catch (e) { out.innerHTML = '<span style="color:#FF4444;">' + esc(e.message || 'Failed') + '</span>'; }
 }
 // Mirror RefCapture.jsx exactly: uppercase, strip non-alphanumerics, cap at 12. The capture component
