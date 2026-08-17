@@ -1012,7 +1012,8 @@ function endRace(lb) {
         if (lb.racers.size >= MAX_RACERS) break;
         const taken = new Set([...lb.racers.values()].map((r) => r.slot));
         let idx = 0; while (taken.has(idx) && idx < MAX_RACERS) idx++;
-        const s = spawnFor(idx);
+        // (A `spawnFor(idx)` was computed here and read by nobody — makeRacer() calls placeOnGrid()
+        // itself. Harmless, but it is the same dead-value shape that hides real bugs in this codebase.)
         lb.spectators.delete(sid);
         s2.isSpectator = false;
         lb.racers.set(sid, makeRacer(sid, idx, q.name, q.color));

@@ -2473,15 +2473,31 @@ function netConnect(cb) {
     NET.on = true;
     // Take the grid slot the server assigned. Every client would otherwise build its car on slot 0 and
     // the whole field would start stacked on one square.
+    const mine = NET.roster.find((p) => p.id === s.id);
     {
       // Your RACE NUMBER is that slot + 1, so a grid of eight carries 1..8 and no two cars share one.
       // It used to be hardcoded to '7' in LIVERY.me, so every player on the grid was number 7 to
       // themselves while their rivals were numbered by an unrelated array index.
-      const mine = NET.roster.find((p) => p.id === s.id);
       LIVERY.me.num = mine && isFinite(mine.slot) ? String(mine.slot + 1) : '7';
     }
+    /* ⚠️ AM I RACING OR WATCHING? THE SERVER DECIDES, AND IT NEVER USED TO SAY.
+     *
+     * `NET.spectating` was only ever written by this client's own Spectate/Join clicks, while the real
+     * answer lived server-side as `sock.isSpectator`, which was never transmitted. So every transition
+     * the SERVER makes on your behalf was invisible here:
+     *   * tryStart() demotes any racer who did not press READY to spectator,
+     *   * the post-race promotion re-seats queued players as racers.
+     * Get promoted back into a race with a stale `NET.spectating === true` and the grid snap below is
+     * skipped — so you start the new race at the position AND LAP you finished the last one on, somewhere
+     * out on the circuit instead of on the line. Reported as "people restart at a spot mid race after a
+     * race, in a different lap, not on the finish line". Input sending and self-reconciliation are gated
+     * on the same flag, so the car could not even be driven out of it.
+     *
+     * `lb.racers` is the one authority — it is what the server simulates and what it builds this roster
+     * from. Being in it IS being in the race, so derive the flag instead of keeping a second copy. Only
+     * when a roster actually arrived: an empty payload must not turn the whole grid into spectators. */
+    if (Array.isArray(d.roster)) NET.spectating = !mine;
     if (!NET.spectating && d.state !== 'racing') {
-      const mine = NET.roster.find((p) => p.id === s.id);
       if (mine && isFinite(mine.gx)) {
         me.x = mine.gx; me.y = mine.gy; me.ang = mine.ga; me.spd = 0;
         me.lap = 1; me.sectors.clear(); me.prevSec = -1; me.best = 0; me.fuel = 0;
