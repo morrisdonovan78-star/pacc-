@@ -3536,12 +3536,37 @@ module.exports = async function handler(req, res) {
              *
              * `cpd:` already blocks replaying a proof that was actually PAID, so the cap is the backstop
              * for the case that guard cannot see, not the primary defence. */
-            wagerLamports = Math.max(kvWager, Math.min(cpLam, kvWager * 20));
+            /* ⚠️ NO CAP ON A GENUINE SIGNATURE. In snake a player carries other players' money, so a real
+             * cash-out can be many multiples of the deposit — capping it at 20x would rob a good run.
+             * Owner's rule: "in games u stack other money it should never be a cap on cashout".
+             *
+             * Safe to leave uncapped because this figure is NOT the client's: only the holder of
+             * GAME_SECRET can produce this HMAC, so `cpLam` is the game server's own total. The client
+             * number (`wagerLamportsRaw`) is never used here. Replay is bounded by the 120s freshness
+             * window above and by `cpd:<proof>`, which refuses any proof that has already been PAID.
+             * Floored at the deposit so a proof signing less than we hold cannot shortchange anyone. */
+            wagerLamports = Math.max(kvWager, cpLam);
             console.warn('[settle] cashout base moved — paying signed ' + cpLam + ' bounded to ' + wagerLamports + ' (kv=' + kvWager + ')');
             betAlert('CASHOUT proof base moved — signature GENUINE, paid the signed amount bounded to the ' +
                      'deposit. player=' + playerAddress.slice(0, 8) + ' game=' + game + ' signedBase=' + cpBase +
                      ' signedTotal=' + cpLam + ' kv=' + kvWager + ' paid=' + wagerLamports +
                      '. Not a forgery: the deposit changed between the proof being minted and the cash-out.');
+          /* ⚠️ WHY PAC-MAN IS PAID ITS DEPOSIT AND THAT IS THE WHOLE CORRECT AMOUNT.
+           *
+           * (Structural note: this `} else if` chain must stay a chain — dropping the closing brace here
+           * turned it into a fresh `if` and broke the function outright.)
+           *
+           * Only SNAKE lets a player carry other players' money (food/orbs), so only snake's cash-out can
+           * legitimately exceed the deposit — and only snake can mint the proof that attests to it
+           * (`ss-cash-proof` in slither-snakes.html; index.html has ZERO cashProof code, the feature was
+           * never built for Pac-Man). In Pac-Man a kill is paid immediately as its own transfer via the
+           * `kill` action, so it never needs to ride out on the cash-out.
+           *
+           * So the deposit-only branch below is not a degraded fallback for Pac-Man — it is the right
+           * number. It also cannot be inflated: `wagerLamportsRaw` is ignored entirely there, which is
+           * strictly safer than letting a proofless game claim up to the 20x cap.
+           *
+           * Owner's call, 2026-08-17: "only in snake ppl carry others money". */
           } else if (REQUIRE_CASH_PROOF && cpProof) {
             /* A proof WAS presented and did not validate — forged, tampered, or past its 120s window.
              * That is genuinely suspicious and stays refused, which is what the guard is for. The wager is

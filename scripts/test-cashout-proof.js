@@ -171,11 +171,14 @@ function seed(deposit) {
   eq(net.sends > 0, true, '⚠️ AND MONEY ACTUALLY MOVED');
   eq(store.has('pw:' + PLAYER), false, 'the wager is consumed, not left dangling');
 
-  // ══ 3. …bounded. A genuine proof cannot overpay beyond 20x the real deposit ══════════════════════
-  seed(1_000_000);                                              // tiny deposit now
+  /* ══ 3. A GENUINE signature is paid UNCAPPED — snake players carry others' money ═════════════════
+   * A big run is many multiples of the deposit, so a cap would rob it. Safe because the figure is the
+   * GAME SERVER's (only GAME_SECRET can sign it), the client's number is ignored, and replay is bounded
+   * by the 120s window plus the `cpd:` already-paid guard. */
+  seed(1_000_000);                                              // small deposit, huge legitimate run
   r = await cashout({ claimed: 900_000_000, proof: mintProof({ base: DEPOSIT, lam: 900_000_000, lobby: LOBBY }) });
-  eq(r.code, 200, 'a stale-but-genuine proof from a richer round still pays');
-  eq(net.lastLamports <= 1_000_000 * 20, true, '⚠️ CAPPED AT 20x THE REAL DEPOSIT — cannot be milked');
+  eq(r.code, 200, 'a genuine proof for a big run pays');
+  eq(net.lastLamports > 1_000_000 * 20, true, '⚠️ NOT CAPPED AT 20x — a real snake run is paid in full');
 
   // ══ 4. …and floored. It never pays less than the deposit actually held ══════════════════════════
   // ⚠️ The transfer the PLAYER receives is the wager minus the 10% cash-out fee (CREATOR_FEE_PCT), so
