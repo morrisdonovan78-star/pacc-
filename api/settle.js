@@ -292,9 +292,26 @@ async function settleBounty(ev, opts) {
     const lk = await kvSetNX('evtpaid:' + ev.id + ':' + w.place, String(Date.now()));
     if (!lk) { paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, already: true }); continue; }
     const r = await wgPayOne(esc, w.addr, w.lamports, 'bounty:' + ev.id + ':' + w.place, { protectPlayers: true });
-    if (!r.ok) { await kvDel('evtpaid:' + ev.id + ':' + w.place).catch(() => {});
-      betAlert('bounty payout FAILED ' + ev.id + ' place ' + w.place + ' -> ' + String(w.addr).slice(0, 8) + ' : ' + (r.reason || '')); }
-    paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, lamports: w.lamports, ok: r.ok, sig: r.sig || null, reason: r.reason || null });
+    /* ⚠️ THE LOCK IS ONLY RELEASED WHEN NOTHING CAN HAVE MOVED. See the note on wgPayOne: a failure
+     * whose transaction may already be in the mempool must KEEP its lock, or the next run pays the same
+     * place a second time — which is exactly how the recruiter prize went out twice for one week. The
+     * ordinary failure (an unfunded float) still releases and still retries, which is what the release
+     * was for. A held lock is reported, alerted, and clearable from the admin panel. */
+    let held = false;
+    if (!r.ok) {
+      if (r.mayHavePaid) {
+        held = true;
+        betAlert('bounty payout UNCERTAIN ' + ev.id + ' place ' + w.place + ' -> ' + String(w.addr).slice(0, 8) +
+                 ' : ' + (r.reason || '') + ' — the transaction MAY have landed. Pay-lock evtpaid:' + ev.id + ':' +
+                 w.place + ' is HELD so this cannot pay twice. Check escrow on-chain, then clear the lock' +
+                 ' from the admin panel only if the money did NOT arrive.');
+      } else {
+        await kvDel('evtpaid:' + ev.id + ':' + w.place).catch(() => {});
+        betAlert('bounty payout FAILED ' + ev.id + ' place ' + w.place + ' -> ' + String(w.addr).slice(0, 8) + ' : ' + (r.reason || ''));
+      }
+    }
+    paid.push({ place: w.place, addr: w.addr, name: w.name, usd: w.usd, lamports: w.lamports, ok: r.ok,
+                sig: r.sig || null, reason: r.reason || null, heldForReview: held });
   }
   const result = { id: ev.id, ts: Date.now(), bumped: plan.bumped, winners: paid };
   await kvSetPerm('evtresult:' + ev.id, JSON.stringify(result)).catch(() => {});
@@ -1224,24 +1241,47 @@ async function wgPush(region, lobby, event, wager) {
 
 // Pay exactly one recipient, gated by the global solvency invariant. Used for winner payouts,
 // cancellations, returns and the "your deposit couldn't be matched" refund. Never sizes from balance.
+/* ⚠️ `mayHavePaid` ON EVERY FAILURE RESULT — read this before using `!r.ok` to release a pay-lock.
+ *
+ * A caller that takes an NX pay-lock and DELETES it whenever this returns !ok is assuming !ok means
+ * "no lamports moved". That is not true of every failure, and the difference is a double payment.
+ *
+ *   mayHavePaid: false — nothing was broadcast, or it landed and was REJECTED, so escrow is untouched
+ *                        and retrying is not just safe but the point (the usual case is an unfunded
+ *                        float: fund it, run again, the winner gets paid once).
+ *   mayHavePaid: true  — the submit call itself failed, and a transport error is indistinguishable from
+ *                        a LOST RESPONSE to a transaction that is already in the mempool. It may well
+ *                        land. Releasing the lock here is what pays somebody twice.
+ *
+ * This is not hypothetical: the Recruiter-of-the-Week prize was paid TWICE for one week. Its single
+ * `recpaid:<week>` lock was deleted on any !ok, and the trigger was an UNAUTHENTICATED board read every
+ * client fired when the referral panel opened — so a lost response was retried within seconds by the
+ * next player to look. Both the board trigger and that contest are now gone, but the lock-releasing
+ * half of the bug is what this flag exists to fix. Note that an unconfirmed-but-broadcast send already
+ * returns ok:true (see sendAndConfirm's 12s path), so the lock is correctly KEPT in that case.
+ */
 async function wgPayOne(esc, toAddr, lamports, tag, opts) {
   const amt = Math.floor(Number(lamports) || 0);
-  if (!(amt > 0)) return { ok: false, reason: 'nothing to pay' };
+  if (!(amt > 0)) return { ok: false, mayHavePaid: false, reason: 'nothing to pay' };
   const inv = await assertSolvency(esc.pubkeyB58, amt, opts);
   if (!inv.ok) {
     betAlert('invariant REFUSED ' + tag + ' to=' + String(toAddr).slice(0, 8) + ' amt=' + amt +
              ' bal=' + inv.onChainBalance + ' wagerLiab=' + inv.wagerLiability + ' betLiab=' + inv.betLiability +
              ' fee=' + inv.accruedFee + ' deficit=' + (inv.deficit || 'n/a'));
-    return { ok: false, reason: 'insolvent', inv };
+    return { ok: false, mayHavePaid: false, reason: 'insolvent', inv };
   }
   try {
     const { blockhash } = await fetchBalAndHash(esc.pubkeyB58);
     const tx = buildTx(esc, blockhash, [{ to: b58Decode(toAddr), lamports: amt }]);
     const result = await sendAndConfirm(tx);
-    return { ok: true, sig: result.sig, confirmed: result.confirmed };
+    return { ok: true, mayHavePaid: true, sig: result.sig, confirmed: result.confirmed };
   } catch (e) {
-    console.error('[wg] payout failed ' + tag + ' — ' + (e && e.message || e));
-    return { ok: false, reason: (e && e.message) || 'send failed' };
+    const msg = (e && e.message) || 'send failed';
+    console.error('[wg] payout failed ' + tag + ' — ' + msg);
+    // 'TX rejected on-chain' is thrown only after getSignatureStatuses reports an on-chain error: the
+    // transaction was included and FAILED, so no transfer happened and escrow is untouched. Every other
+    // throw comes out of the submit call, where we cannot know whether the bytes reached the network.
+    return { ok: false, mayHavePaid: !msg.startsWith('TX rejected on-chain'), reason: msg };
   }
 }
 
@@ -3510,3 +3550,10 @@ module.exports.postWinToDiscord = postWinToDiscord;
 // Exported so the slip's field names and label rendering can be checked offline. The real call site
 // swallows every error, which would otherwise hide a typo'd field forever.
 module.exports.postBetSlipToDiscord = postBetSlipToDiscord;
+/* Exported for scripts/test-double-pay.js — the SHIPPED functions, not copies of their rules.
+ *
+ * settleBounty owns the decision that pays a winner twice if it is wrong (release the pay-lock, or
+ * hold it), and wgPayOne owns the classification that decision reads. A test that reimplemented either
+ * would have gone green through the whole recruiter double-payment. `_payInternals` is a test seam and
+ * nothing else calls it. */
+module.exports._payInternals = { settleBounty, wgPayOne, sendAndConfirm };

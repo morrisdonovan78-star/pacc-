@@ -516,6 +516,48 @@ module.exports = async function handler(req, res) {
       totalAdded: imported.reduce((s, r) => s + r.add, 0) });
   }
 
+  /*
+   * ── event-paylock: inspect, and if necessary clear, a HELD event pay-lock ──────────────────────
+   *
+   * `evtpaid:<eventId>:<place>` is the NX lock that makes each Bounty-Hour place pay at most once.
+   * api/settle.js releases it automatically when a payout definitely did not move money (an unfunded
+   * float, an on-chain rejection) so the retry works as intended. It deliberately does NOT release it
+   * when the send failed in a way that could have left a transaction in the mempool — because that is
+   * how the Recruiter-of-the-Week prize was paid twice for one week.
+   *
+   * That leaves one case needing a human: the send genuinely failed, the money never arrived, and the
+   * lock is now blocking the retry. This is the door for it, and the ONLY thing it does is delete a
+   * lock — it moves no SOL and pays nobody. Settling again afterwards is what pays.
+   *
+   * ⚠️ CHECK THE ESCROW WALLET ON-CHAIN FIRST. If the transfer did land, clearing the lock and running
+   * the settle again pays that place a SECOND time. The alert that brought you here names the signature
+   * to look for. When in doubt, leave it held — an unpaid winner can be paid by hand; an overpaid one
+   * cannot be un-paid.
+   *
+   * `dry: true` (the panel's first click) lists what is held and writes nothing.
+   */
+  if (action === 'event-paylock') {
+    const evId = String(req.body.eventId || '').trim();
+    const dry  = !!req.body.dry;
+    if (!evId) {
+      // No id → just report every held lock, so the operator can see whether anything is stuck at all.
+      const keys = await kvScan('evtpaid:*', 500).catch(() => []);
+      const held = [];
+      for (const k of keys) held.push({ key: k, takenAt: Number(await kvGet(k).catch(() => 0)) || 0 });
+      return res.json({ ok: true, dry: true, held, count: held.length,
+        note: 'Pass eventId to clear that event\'s locks. A lock is normal right after a successful payout — it is what stops a repeat.' });
+    }
+    const keys = (await kvScan('evtpaid:' + evId + ':*', 100).catch(() => []));
+    if (!keys.length) return res.status(404).json({ error: 'No pay-lock held for ' + evId + '.' });
+    const plan = [];
+    for (const k of keys) plan.push({ key: k, takenAt: Number(await kvGet(k).catch(() => 0)) || 0 });
+    if (dry) return res.json({ ok: true, dry: true, eventId: evId, willClear: plan, count: plan.length,
+      warning: 'Verify on-chain that these payouts did NOT arrive before clearing. Clearing lets the next settle pay them again.' });
+    for (const k of keys) await kvDel(k).catch(() => {});
+    await logAction('event-paylock-clear', '', evId + ' keys=' + keys.length);
+    return res.json({ ok: true, dry: false, eventId: evId, cleared: plan, count: plan.length });
+  }
+
   if (action === 'wallet-find') {
     try {
       const { walletFind } = require('./wallet.js');
