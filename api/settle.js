@@ -3575,12 +3575,28 @@ module.exports = async function handler(req, res) {
              * hand; this codebase's rule is "refuse rather than silently underpay", and the honest reading
              * of it is that being loud about the difference beats paying a player nothing at all. */
             wagerLamports = kvWager;
-            betAlert('CASHOUT PAID DEPOSIT ONLY — no game-server proof arrived. player=' +
-                     playerAddress.slice(0, 8) + ' game=' + game + ' deposit=' + kvWager + ' clientClaimed=' +
-                     wagerLamportsRaw + ' (IGNORED). The node mints no proof when its stake record is ' +
-                     'missing, so the food this player ate could NOT be attested and is NOT included. ' +
-                     'Check the node log for "NO cash proof"/"NO deposit on record" and settle any food ' +
-                     'difference by hand.');
+            /* ⚠️ ALERT ONLY WHEN SOMEBODY IS ACTUALLY SHORT.
+             *
+             * PAC-MAN HAS NO CASH-PROOF SYSTEM AT ALL — `index.html` contains zero `cashProof` code, while
+             * slither-snakes.html has it. So every paid Pac-Man cash-out lands here by design, and since
+             * the guard was armed 19 days ago EVERY ONE OF THEM WAS REFUSED, with "please RELOAD" advice
+             * that could never work because the client has nothing to send. Alerting on each one now would
+             * be pure noise and would bury the case that matters.
+             *
+             * The only case that costs a player money is a claim ABOVE the deposit we hold — food (snake)
+             * or winnings the node could have attested to but did not. That still alerts, loudly. A claim
+             * at or below the deposit means they received everything they were owed, so it is logged and
+             * left alone. */
+            if (wagerLamportsRaw > kvWager) {
+              betAlert('⚠️ CASHOUT MAY BE SHORT — paid the deposit only, no game-server proof arrived. player=' +
+                       playerAddress.slice(0, 8) + ' game=' + game + ' deposit=' + kvWager + ' clientClaimed=' +
+                       wagerLamportsRaw + ' → possibly OWED ' + (wagerLamportsRaw - kvWager) + ' lamports that ' +
+                       'could NOT be attested. Check the node log for "NO cash proof"/"NO deposit on record" ' +
+                       'and settle the difference by hand if it was genuine.');
+            } else {
+              console.log('[settle] cashout paid deposit only (no proof, nothing owed above it) player=' +
+                          playerAddress.slice(0, 8) + ' game=' + game + ' deposit=' + kvWager);
+            }
           }
           // Unsigned claim, capped. Reached when the guard is OFF and no usable proof arrived — and NOT
           // when the proof was authentic, which is handled above off the signed figure instead.

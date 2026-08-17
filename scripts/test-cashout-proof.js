@@ -199,6 +199,15 @@ function seed(deposit) {
   eq(net.lastLamports <= DEPOSIT, true, '⚠️ AND THE 50x CLIENT CLAIM WAS IGNORED — deposit only');
   eq(net.lastLamports >= Math.floor(DEPOSIT * 0.85), true, 'the player got their deposit less the fee');
 
+  /* ══ 5b. PAC-MAN: no proof system exists at all, so this is its NORMAL path ══════════════════════
+   * index.html carries ZERO cashProof code (slither-snakes.html has it), so every paid Pac-Man cash-out
+   * arrives with no proof — and was therefore refused for the 19 days the guard has been armed. A claim
+   * at or below the deposit means nothing is owed, so it must pay WITHOUT crying wolf on every hand. */
+  seed(DEPOSIT);
+  r = await cashout({ claimed: DEPOSIT });                       // exactly the deposit, as Pac-Man sends
+  eq(r.code, 200, 'a Pac-Man style cash-out (no proof, claim == deposit) pays');
+  eq(net.lastLamports >= Math.floor(DEPOSIT * 0.85), true, 'and pays the full deposit less the fee');
+
   // ══ 6. A FORGED proof is refused — the HMAC is the whole defence ════════════════════════════════
   seed(DEPOSIT);
   const forged = mintProof({ base: DEPOSIT, lam: DEPOSIT * 10, lobby: LOBBY });
