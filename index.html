@@ -2255,7 +2255,29 @@ async function joinLobby(usd){
    * what stops a player being CHARGED more than the screen showed them: every string the player
    * reads below is built from this floored value.
    */
-  usd = Number(usd) > 0 ? Math.max(0.25, Number(usd)) : 0;
+  /*
+   * Refuse, do not quietly round up. Clamping a $0.10 request to $0.25 takes more money than the
+   * player chose and explains nothing; and when the SERVER refused it instead, the client had no
+   * word for that answer and fell back on "servers are not accepting joins" — which is both wrong
+   * and alarming, since the servers were fine and the player was never charged.
+   *
+   * Nothing has been spent at this point in joinLobby: no blockhash, no signature, no deposit. So
+   * the honest outcome is to stop here, name the rule, and leave the player where they can pick
+   * again. Every downstream consumer still reads the same `usd` local, so the room id, the deposit
+   * and the labels cannot disagree.
+   */
+  var _reqUsd = Number(usd);
+  if (_reqUsd > 0 && _reqUsd < 0.25) {
+    try{ addToast('🚫 Paid lobbies have a 25¢ minimum — pick $0.25 or higher, or play free. You were NOT charged.','#FFD700',7000); }catch(_){}
+    try{ lg('mm-log','Below the $0.25 minimum — nothing was charged','lerr'); }catch(_){}
+    _joiningLobby = false;
+    // In the platform iframe there is no lobby screen to fall back to — hand the player back to
+    // the platform rather than stranding them on a dead game surface.
+    if (_BRIDGE) { try{ _bridgeNotify('EXIT',{reason:'stake-below-minimum',minPaidUsd:0.25}); }catch(_){} }
+    else { try{ go('scr-lobby'); }catch(_){} }
+    return;
+  }
+  usd = _reqUsd > 0 ? _reqUsd : 0;
   if(!ST.address){ alert('Log in first'); return; }
   // NOTE: do NOT auto-clear _joiningLobby just because _sio is still null — for paid
   // lobbies _sio isn't created until AFTER wallet signing + on-chain confirm + recordWager,
