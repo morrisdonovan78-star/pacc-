@@ -1573,7 +1573,7 @@ function ssStakeAuth() {
 
 // Fire-and-forget by design. This is NEVER awaited in the connection handler: awaiting there would
 // delay registering the socket's own event listeners, and a client's first packets would be dropped.
-function ssFetchStake(pid) {
+function ssFetchStake(pid, _try) {
   if (!GAME_SECRET || !pid || String(pid).indexOf('bot-') === 0) return;
   const { ts, proof } = ssStakeAuth();
   const url = (process.env.SETTLE_URL || 'https://pac-arena.vercel.app') + '/api/settle';
@@ -1585,6 +1585,11 @@ function ssFetchStake(pid) {
   }).then(r => r.json()).then(d => {
     const lam = (d && d.stakes) ? Math.floor(Number(d.stakes[pid]) || 0) : 0;
     if (lam > 0) { _stakeLam.set(pid, lam); console.log('[stake] ' + String(pid).slice(0, 8) + ' = ' + lam + ' lamports'); }
+    // RETRY: a 0 here is almost always a RACE, not an absent deposit - this read fires when the
+    // player connects, which can beat api/join's write of `pw:`. Abandoning it left the session with
+    // no stake base forever, so ssCashProof() could never mint and the cash-out lost the carried
+    // money. Bounded: 6 tries over ~25s, and only while the value is still missing.
+    else if ((_try || 0) < 6) { setTimeout(() => ssFetchStake(pid, (_try || 0) + 1), 1200 * ((_try || 0) + 1)); }
     else console.warn('[stake] NO deposit on record for ' + String(pid).slice(0, 8) + ' — cash-out will fall back to the capped path');
   }).catch(e => console.warn('[stake] read failed for ' + String(pid).slice(0, 8) + ': ' + (e && e.message)));
 }
