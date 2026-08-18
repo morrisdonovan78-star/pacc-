@@ -3195,8 +3195,42 @@ async function fetchPrice(){
  * Spelled out rather than hidden inside a flat 0.001 SOL, so the arithmetic can be read and so the
  * player can be told the real total instead of a magic number.
  */
+/*
+ * -- PRIORITY FEE ON EVERY ESCROW DEPOSIT ------------------------------------------------------
+ * Deposits went out as bare transfers paying only the 5000-lamport signature fee. Validators order
+ * by priority fee, so at ~4,000 TPS a zero-priority transfer can sit unlanded for tens of seconds.
+ * api/join.js then searches the chain ~40s, does not find it, and the client retries — the
+ * "Recording wager… / Still verifying deposit… (2/2)" wait of ~85s that hit several players at once
+ * on 2026-08-18. RPC and api/join were healthy throughout: a deposit that HAS landed is found in
+ * 0.06s. It simply had not landed yet.
+ *
+ * MEASURED, not guessed: this exact transaction (transfer + memo nonce + these two ComputeBudget
+ * instructions) consumes 9,103 compute units, via simulateTransaction against mainnet. The limit is
+ * 20,000 — about 2.2x headroom. THIS MUST NEVER BE SET NEAR REAL USAGE: a compute-unit limit below
+ * what the transaction needs makes EVERY deposit fail on chain, which is far worse than a slow join.
+ *
+ * Cost: 20,000 x 250,000 / 1e6 = 5,000 lamports (~$0.001), doubling a deposit’s network cost to
+ * 10,000 lamports and buying it a place ahead of the zero-priority traffic it was queueing behind.
+ */
+const PRIO_CU_LIMIT = 20000;                       // measured usage 9,103 CU — do not lower this
+const PRIO_CU_PRICE = 250000;                      // microLamports per CU
+const PRIO_FEE_LAMPORTS = Math.ceil(PRIO_CU_LIMIT * PRIO_CU_PRICE / 1e6);   // 5000
+/* Best-effort: if web3.js ever lacks ComputeBudgetProgram the deposit still goes out as it does
+   today (slow, but working) rather than throwing and blocking the join. 1.98.0 has it — verified. */
+function _addPriorityFee(tx){
+  try{
+    const CB = solanaWeb3.ComputeBudgetProgram;
+    if(!CB || !CB.setComputeUnitPrice) return tx;
+    tx.add(CB.setComputeUnitLimit({units:PRIO_CU_LIMIT}));
+    tx.add(CB.setComputeUnitPrice({microLamports:PRIO_CU_PRICE}));
+  }catch(_){}
+  return tx;
+}
 const SOL_RENT_MIN = 890880;   // rent-exempt minimum for a plain system account, in lamports
-const SOL_TX_FEE   = 5000;     // one signature
+/* What a deposit actually costs now: signature fee PLUS the priority fee above. Every affordability
+   check reads this one constant — raising the real cost without raising this would let a wallet pass
+   "you can afford it" and then fail to send. */
+const SOL_TX_FEE   = 5000 + PRIO_FEE_LAMPORTS;   // one signature + priority fee
 async function fetchBalanceLamports(addr){
   const body=JSON.stringify({jsonrpc:'2.0',id:1,method:'getBalance',params:[addr,{commitment:'confirmed'}]});
   // Retry a few times. A single /api/rpc hiccup used to return 0 — which is INDISTINGUISHABLE from an
@@ -4252,6 +4286,25 @@ function _isTestLobby(){ return pkRoomId==='ss-test-lobby'; }
 let _wbSuppressUntil=0, _enteringWatch=false;
 
 async function joinLobby(usd){
+  /*
+   * -- THE PLATFORM-WIDE $0.25 PAID FLOOR ---------------------------------------------------------
+   * FREE is free and stays free. Every PAID lobby, in every game on the platform, starts at a
+   * quarter. Under that the 10% fee is worth about a cent, while the round still costs a full set
+   * of serverless invocations, RPC calls and an on-chain payout — so the house pays for the
+   * privilege of running it.
+   *
+   * Applied HERE, at the very top, for the same reason lobbyIdFor exists: this is the ONE
+   * function that turns a number into both a room name and a charge. The room id (lobbyIdFor),
+   * the deposit (usdToSol), the affordability check and the HUD all read this one local, so they
+   * cannot disagree about what the player is buying. Flooring downstream instead would charge a
+   * quarter into a $0.10 room, or name a $0.25 room and charge a dime.
+   *
+   * The clamp is UP, not a refusal, because the game servers clamp identically (normStake) and
+   * api/join refuses to mint an entry token for a sub-floor room outright. Doing it here first is
+   * what stops a player being CHARGED more than the screen showed them: every string the player
+   * reads below is built from this floored value.
+   */
+  usd = Number(usd) > 0 ? Math.max(0.25, Number(usd)) : 0;
   if(!ST.address){alert('Log in first');return;}
   // Refuse any paid join that arrives from a stray click right after the Watch & Bet picker, or
   // while a watch session is being set up. Watching is free — it must never charge anyone.
@@ -4377,7 +4430,16 @@ async function joinLobby(usd){
     }catch(_){}
     if(!_pf||!_pf.ready){
       _joiningLobby=false;
-      addToast('⚠️ Game servers are not accepting joins right now — you were NOT charged. Try again shortly.','#FFD700',7000);
+      /*
+       * WHY it refused, not just THAT it refused. The floor answer (reason "stake-below-minimum")
+       * comes back through the same ready:false path as a throttled project or a missing GAME_SECRET,
+       * and telling someone the servers are down when the real answer is "that lobby is too cheap"
+       * sends them off to retry something that will never start working.
+       */
+      var _pfMsg=(_pf&&_pf.reason==='stake-below-minimum')
+        ?('⚠️ Paid lobbies start at $'+(((_pf&&_pf.minPaidUsd)||0.25).toFixed(2))+' — pick a bigger lobby, or play free. You were NOT charged.')
+        :'⚠️ Game servers are not accepting joins right now — you were NOT charged. Try again shortly.';
+      addToast(_pfMsg,'#FFD700',7000);
       lg('mm-log','Servers unavailable — nothing was charged','lerr');
       await new Promise(r=>setTimeout(r,2200));
       if(_myGen!==_joinGen)return;
@@ -4427,7 +4489,7 @@ async function joinLobby(usd){
     const from=new solanaWeb3.PublicKey(ST.address);
     const lamps=Math.floor(ST.wagerSol*solanaWeb3.LAMPORTS_PER_SOL);
     ST.cashoutLamports=lamps;
-    const tx=new solanaWeb3.Transaction().add(
+    const tx=_addPriorityFee(new solanaWeb3.Transaction()).add(
       solanaWeb3.SystemProgram.transfer({fromPubkey:from,toPubkey:escPubkey,lamports:lamps})
     );
     // ── UNIQUE-DEPOSIT NONCE ────────────────────────────────────────────────────────────────────
@@ -6175,7 +6237,7 @@ function _wgRender(){
 // Deposit `lamps` into the shared escrow (identical flow to a lobby-join deposit) → returns tx sig.
 async function _wgDeposit(lamps){
   const esc=new solanaWeb3.PublicKey(ESCROW_PUBKEY), from=new solanaWeb3.PublicKey(ST.address);
-  const tx=new solanaWeb3.Transaction().add(solanaWeb3.SystemProgram.transfer({fromPubkey:from,toPubkey:esc,lamports:lamps}));
+  const tx=_addPriorityFee(new solanaWeb3.Transaction()).add(solanaWeb3.SystemProgram.transfer({fromPubkey:from,toPubkey:esc,lamports:lamps}));
   const lb=await fetch('/api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'getLatestBlockhash',params:[{commitment:'confirmed'}]})});
   const lbd=await lb.json(); if(lbd.error)throw new Error('Blockhash: '+lbd.error.message);
   tx.recentBlockhash=lbd.result.value.blockhash; tx.feePayer=from;
