@@ -1255,9 +1255,31 @@ function mkKart(t, idx) {
 // Every driver is one of these rather than a bare colour string. Kart, suit, helmet and number all
 // come from the same entry, so a racer is recognisable at a glance from behind — which is what you
 // need the moment there are more than two on track and money is riding on which one you are watching.
+// ── YOUR KART COLOUR ────────────────────────────────────────────────────────────────────────────
+// Picked in the platform Locker, stored as `kart_color`, and read here. The rest of the pipeline
+// already carried it: k-join sends LIVERY.me.body, kart-server keeps it on the racer and
+// broadcasts it, and every client draws the colour it is given. Only this literal was in the way.
+//
+// The shades are derived with the SAME ratios NET_LIVERIES uses for opponents, so your kart is
+// shaded like every other car on the grid instead of looking hand-painted.
+const _KART_BODY_DEFAULT = '#39d353';
+function _kartDim(h, f){
+  return '#' + [1, 3, 5].map((o) => Math.round(parseInt(h.substr(o, 2), 16) * f)
+    .toString(16).padStart(2, '0')).join('');
+}
+function _kartLiveryFrom(body){
+  return { body: body, dark: _kartDim(body, 0.62), trim: _kartDim(body, 0.42),
+           suit: _kartDim(body, 0.55), glove: _kartDim(body, 0.28),
+           helmet: '#f4f7f5', helmet2: body, visor: '#101a2e', num: '7', numInk: '#0b2415' };
+}
+function _savedKartBody(){
+  try{
+    const c = localStorage.getItem('kart_color');
+    return /^#[0-9a-fA-F]{6}$/.test(c || '') ? c : _KART_BODY_DEFAULT;
+  }catch(_){ return _KART_BODY_DEFAULT; }
+}
 const LIVERY = {
-  me:    { body: '#39d353', dark: '#1b7a33', trim: '#0d5a24', suit: '#1f7d3c', glove: '#123c1e',
-           helmet: '#f4f7f5', helmet2: '#39d353', visor: '#101a2e', num: '7',  numInk: '#0b2415' },
+  me:    _kartLiveryFrom(_savedKartBody()),
   rival: { body: '#ff5f7a', dark: '#a32e46', trim: '#6f1f30', suit: '#8e2a3e', glove: '#3a1119',
            helmet: '#2b2436', helmet2: '#ffd166', visor: '#0d0714', num: '4',  numInk: '#ffe3e9' },
 };

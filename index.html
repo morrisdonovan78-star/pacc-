@@ -931,11 +931,23 @@ const _SKIN_HATS  =['none','crown','bow','party','halo'];
 const _SKIN_TRAILS=['none','fire','ice','rainbow','ghost'];
 const _SKIN_EYES  =['dot','shades','star','alien'];
 const _SKIN_AURAS =['none','white','fire','ice','rainbow'];
+// A colour is acceptable if it parses as #rrggbb AND is bright enough to be seen against the maze.
+// Kept identical to the snake rule so one Locker can serve both games without two definitions of
+// "too dark" that can drift apart.
+function _okSkinColor(c){
+  if(!/^#[0-9a-fA-F]{6}$/.test(String(c||''))) return false;
+  const r=parseInt(c.slice(1,3),16),g=parseInt(c.slice(3,5),16),b=parseInt(c.slice(5,7),16);
+  return Math.max(r,g,b)>=100;
+}
 let _mySkin={color:'#FFD700',hat:'none',trail:'none',eyes:'dot',aura:'none'};
 (function(){
   try{
     const s=JSON.parse(localStorage.getItem('pac_skin')||'{}');
-    if(s.color&&_SKIN_COLORS.includes(s.color)) _mySkin.color=s.color;
+    // A custom colour from the Locker is legal as long as it is a real hex and not so dark it
+    // vanishes into the maze — the same test slither-snakes.html applies (max channel >= 100).
+    // Restricting this to _SKIN_COLORS meant a Locker pick was stored and then discarded here on
+    // the very next load, so the player saw it save and never saw it in game.
+    if(s.color&&_okSkinColor(s.color)) _mySkin.color=s.color;
     if(s.hat&&_SKIN_HATS.includes(s.hat)) _mySkin.hat=s.hat;
     if(s.trail&&_SKIN_TRAILS.includes(s.trail)) _mySkin.trail=s.trail;
     if(s.eyes&&_SKIN_EYES.includes(s.eyes)) _mySkin.eyes=s.eyes;
