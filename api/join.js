@@ -29,6 +29,30 @@ function makeEntryToken(walletAddress, lobbyId) {
     .digest('hex').slice(0, 32);
 }
 
+/*
+ * -- THE PLATFORM-WIDE $0.25 PAID FLOOR ---------------------------------------------------------
+ * FREE lobbies are untouched and always will be. Every PAID room, in every game, starts at a
+ * quarter: under that the 10% fee is worth about a cent while the round still costs a full set of
+ * function invocations, RPC calls and an on-chain payout, so the platform pays to run it.
+ *
+ * For snake and Pac-Man THE LOBBY ID IS THE STAKE (see api/admin.js) -- `ss-paid-lobby-0.25` is a
+ * quarter-dollar snake arena -- so the floor is a property of the room name and needs no price
+ * lookup, no chain read and no KV read to enforce. Kart and Battle Royale carry cents on the lobby
+ * object instead and clamp the same way in their own normStake().
+ *
+ * Returns null for anything that is not a paid room id -- a free lobby, a spectate id, junk -- so
+ * a caller can tell "free" apart from "paid, and this cheap".
+ */
+const MIN_PAID_USD = 0.25;
+function paidStakeUsdOf(lobbyId) {
+  const m = /^(?:ss-(?:og-)?)?paid-lobby-(\d{1,6}(?:\.\d{1,2})?)$/.exec(String(lobbyId || ''));
+  return m ? Number(m[1]) : null;
+}
+function belowPaidFloor(lobbyId) {
+  const usd = paidStakeUsdOf(lobbyId);
+  return usd !== null && usd > 0 && usd < MIN_PAID_USD;
+}
+
 // Mint the entry credentials for a paid room. The game token is a deterministic HMAC of
 // (lobbyId, wallet) — it carries no per-tx state — so it can be re-issued at any time for a
 // wallet that has already paid. That property is what makes the join endpoint safely idempotent
@@ -419,10 +443,19 @@ module.exports = async function handler(req, res) {
      */
     if (body.preflight) {
       const secret = (process.env.GAME_SECRET || '').trim();
+      /*
+       * The floor is answered HERE, in the preflight, because this is the one moment it can be
+       * answered for free. By the time the real call arrives the deposit is already on chain and
+       * irreversible, and every refusal down there lands as "charged and not let in" -- the worst
+       * outcome this endpoint can produce. ready:false makes the client stop before it signs, so a
+       * player aimed at a sub-floor room is turned away having spent nothing.
+       */
+      const tooCheap = belowPaidFloor(lobbyId);
       return res.status(200).json({
         ok: true,
-        ready: !!secret,
-        reason: secret ? null : 'server-misconfigured',
+        ready: !!secret && !tooCheap,
+        reason: tooCheap ? 'stake-below-minimum' : (secret ? null : 'server-misconfigured'),
+        minPaidUsd: MIN_PAID_USD,
         lobbyId: lobbyId || null,
       });
     }
@@ -433,6 +466,21 @@ module.exports = async function handler(req, res) {
     if (!walletAddress)  return res.status(400).json({ error: 'walletAddress required' });
     if (lamps <= 0)      return res.status(400).json({ error: 'wagerLamports must be positive' });
     if (!txSig)          return res.status(400).json({ error: 'txSig required' });
+    /*
+     * Below the floor, refused before the replay guard, the wager record or anything else is
+     * written, so this request leaves nothing behind it. The shipped clients cannot produce such a
+     * request: the games floor the stake at the top of joinLobby, the platform pages floor the
+     * Custom box, and the preflight above already answered ready:false. Reaching here means a call
+     * hand-made to skip all three, so it is refused rather than minted -- otherwise the floor is a
+     * UI suggestion rather than a rule. A deposit such a caller chose to broadcast anyway is not
+     * consumed here; it stays theirs to claim, exactly as any other rejected join.
+     */
+    if (belowPaidFloor(lobbyId)) {
+      return res.status(400).json({
+        error: 'Paid lobbies start at $' + MIN_PAID_USD.toFixed(2) + '. Pick a lobby at or above that, or play free.',
+        minPaidUsd: MIN_PAID_USD,
+      });
+    }
 
     // Wallet signature proves the player owns the wallet making this claim
     if (!verifyPlayerSig(sig, ts, 'join', walletAddress, lamps)) {

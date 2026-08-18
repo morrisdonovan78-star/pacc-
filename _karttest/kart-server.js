@@ -679,7 +679,10 @@ async function notifyKartLobby(lb) {
   if (r === '404') { f.msgId = null; f.createdAt = 0; }    // card deleted — next event starts a new one
 }
 
-const MIN_STAKE_C = 10;        // $0.10 floor — below this the network fee dominates the pot
+// $0.25 floor for any paid race — the platform-wide minimum (see battle/br-server.js). Free races
+// (stake 0) are unaffected. Below a quarter the 10% fee cannot cover the invocations, RPC calls and
+// on-chain payout the race costs to run.
+const MIN_STAKE_C = 25;        // $0.25 floor
 const MAX_STAKE_C = 50000;     // $500 ceiling
 function normStake(v) {
   const c = Math.round((Number(v) || 0) * 100);

@@ -260,7 +260,12 @@ const MATCH_TIMEOUT_MS = 22 * 60 * 1000;
 const EMPTY_LOBBY_TTL = 30 * 1000;
 const RECONNECT_GRACE_MS = 90 * 1000;
 const RESULTS_MS = 12000;
-const MIN_STAKE_C = 10, MAX_STAKE_C = 50000;
+// $0.25 is the floor for ANY paid lobby, across every game. Free (stake 0) is untouched. Below a
+// quarter the 10% fee is worth ~1c while the round still costs a full set of invocations, RPC calls
+// and an on-chain payout. The clamp is UP because normStake is the ONE place a stake becomes real
+// here, so a lobby cannot exist at a price the platform does not accept; the clients floor the same
+// value first, so nobody is billed more than they were shown.
+const MIN_STAKE_C = 25, MAX_STAKE_C = 50000;
 
 const lobbies = new Map();
 let nextLobbyNum = 1;
