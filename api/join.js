@@ -608,8 +608,43 @@ module.exports = async function handler(req, res) {
     // It records WHO paid and WHEN, because the re-presentation branch above has to tell an
     // in-flight retry apart from an old deposit being offered again — it cannot do that from a bare '1'.
     await kvSet(txKey, JSON.stringify({ w: walletAddress, l: lamps, t: Date.now() }), 86400);
+
+    /* A deposit belongs to the ROOM it bought, and until now nothing recorded which room that was.
+     * `pw:` is keyed by wallet alone, so one wallet has exactly one live wager entry across all five
+     * games — and a $1 Pac-Man entry that was never consumed reads back, byte for byte, as the stake
+     * for the $0.25 snake lobby that wallet joins next. That is not hypothetical: it is the
+     * 23-Aug-2026 report, where a player carried a $1 base into a 25c room, dropped $1 of gold on
+     * death, and the wallet that ate it cashed out $1 of other people's escrow.
+     *
+     * The lobby id IS the stake here (`ss-paid-lobby-0.25` is a quarter-dollar snake arena — see
+     * api/admin.js), so binding the entry to its lobby id is enough to make every downstream reader
+     * able to tell "this player's stake" from "some stake this player once had". Same TTL as `pw:`
+     * so the two expire together and can never be found disagreeing.
+     *
+     * Read by: settle's `stake-read` (refuses to hand the game server a stake from another room) and
+     * the cash-out proof check (refuses a proof signed for a room this deposit did not buy). */
+    const priorLobby = await kvGet('pwlob:' + walletAddress).catch(() => null);
+    const priorWager = await kvGet('pw:' + walletAddress).catch(() => null);
+    if (priorWager !== null && priorLobby && priorLobby !== lobbyId) {
+      /* The player is paying into a new room while an unconsumed entry from a different room is still
+       * standing. The write below replaces it, and that older deposit is then money in escrow that no
+       * cash-out can ever draw — `wager-orphans` lists it, `clear-entry` clears it once refunded. It
+       * is not silently correctable here: the SOL is on-chain and only the operator can send it back. */
+      console.warn('[join] CROSS-LOBBY entry replaced — earlier deposit is now stranded in escrow', {
+        wallet: String(walletAddress).slice(0, 8),
+        priorLobby, priorLamports: Number(priorWager) || 0,
+        newLobby: lobbyId, newLamports: lamps,
+        note: 'refund the prior deposit if it never played (settle: wager-orphans / clear-entry)',
+      });
+    }
+
     // Store for 4 hours — more than enough for any game session
     await kvSet('pw:' + walletAddress, lamps, 14400);
+    // Which ROOM this deposit bought. Written after `pw:` deliberately: a reader that finds `pw:` but
+    // not `pwlob:` treats the entry as legacy and lets it through (see stake-read), so the worst case
+    // of a half-completed write is the old, permissive behaviour — never a player locked out of a
+    // room they actually paid for.
+    await kvSet('pwlob:' + walletAddress, lobbyId, 14400);
     // Which deposit opened this entry. Same TTL as the entry, so the two can never disagree, and it is
     // what lets a resume require the SAME payment rather than any payment this wallet ever made.
     await kvSet('pwtx:' + walletAddress, txSig, 14400);
