@@ -2827,22 +2827,51 @@ module.exports = async function handler(req, res) {
       for (const a of addrs) {
         if (!a || a.length < 32 || a.length > 64) continue;
         const lam = Math.max(0, Math.floor(Number(await kvGet('pw:' + a)) || 0));
-        if (lam > 0 && askLobby) {
-          // Absent = an entry written before join.js started recording the room. Those drain within
-          // the 4h `pw:` TTL, and refusing them would strand players who paid correctly, so a missing
-          // binding is permitted and logged. A binding that DISAGREES is the bug, and is refused.
-          const own = await kvGet('pwlob:' + a).catch(() => null);
-          if (own && own !== askLobby) {
-            console.warn('[settle] stake-read CROSS-LOBBY refused — deposit bought ' + own +
-                         ', asked for ' + askLobby + ' player=' + String(a).slice(0, 8) +
-                         ' lamports=' + lam);
-            betAlert('STAKE-READ cross-lobby refused — ' + String(a).slice(0, 8) + ' deposited in ' +
-                     own + ' but ' + askLobby + ' asked for it (' + lam + ' lamports). The player is ' +
-                     'in a room they did not pay for, or left an unconsumed entry behind.');
-            stakes[a] = 0;
-            continue;
-          }
+        // Absent = an entry written before join.js started recording the room. Those drain within the
+        // 4h `pw:` TTL, and refusing them would strand players who paid correctly, so a missing
+        // binding is permitted and logged. A binding that DISAGREES is the bug, and is refused.
+        const own = lam > 0 ? await kvGet('pwlob:' + a).catch(() => null) : null;
+
+        if (lam > 0 && askLobby && own && own !== askLobby) {
+          console.warn('[settle] stake-read CROSS-LOBBY refused — deposit bought ' + own +
+                       ', asked for ' + askLobby + ' player=' + String(a).slice(0, 8) +
+                       ' lamports=' + lam);
+          betAlert('STAKE-READ cross-lobby refused — ' + String(a).slice(0, 8) + ' deposited in ' +
+                   own + ' but ' + askLobby + ' asked for it (' + lam + ' lamports). The player is ' +
+                   'in a room they did not pay for, or left an unconsumed entry behind.');
+          stakes[a] = 0;
+          continue;
         }
+
+        /* PAC-MAN DEPOSITS ARE NEVER AN ANSWER TO THIS QUESTION, and saying so is what protects the
+         * game nodes we cannot reach.
+         *
+         * The ONLY consumer of stake-read on the node is the Slither Snakes lamport ledger: `_stakeLam`
+         * has exactly one reader, inside `ssLamCarried`, and all six of its call sites take a snake.
+         * The connect handler nevertheless fires the read for BOTH games, so a Pac-Man join writes a
+         * value into a map that only Snake consumes — and NOTHING on the Pac-Man path ever clears it
+         * (`_stakeLam.delete` lives in the snake death / cash-out / kill paths). That is why the leak
+         * reported on 23 Aug 2026 came in through Pac-Man specifically: quit Pac-Man without dying or
+         * cashing out and the $1 sits there until the process restarts, ready to be latched by the next
+         * snake that wallet spawns — `_lamAuth` is a one-way latch, so the correct 25c arriving
+         * milliseconds later is ignored for the whole session.
+         *
+         * Answering 0 starves it at source, and it works on an UNPATCHED node because the node only
+         * stores a positive answer: `if (lam > 0) { _stakeLam.set(...) }`. A zero leaves the ledger
+         * untouched instead of poisoning it. Nothing is lost by this — no Pac-Man code path reads the
+         * value, so it has never been anything but a hazard.
+         *
+         * Snake rooms are `ss-paid-lobby-*` / `ss-og-paid-lobby-*`; Pac-Man's are the bare
+         * `paid-lobby-*` (see the lobby regex in api/join.js). Legacy entries carry no binding at all
+         * and are left alone. */
+        if (lam > 0 && own && own.indexOf('ss-') !== 0) {
+          console.warn('[settle] stake-read: Pac-Man deposit (' + own + ') withheld from the snake ' +
+                       'ledger for ' + String(a).slice(0, 8) + ' — ' + lam + ' lamports, unread by ' +
+                       'any Pac-Man code path');
+          stakes[a] = 0;
+          continue;
+        }
+
         stakes[a] = lam;
       }
       clearTimeout(guard); done = true;
