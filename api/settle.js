@@ -2815,64 +2815,10 @@ module.exports = async function handler(req, res) {
       }
       if (!authed) { clearTimeout(guard); done = true; return res.status(403).json({ error: 'Forbidden' }); }
       const addrs = Array.isArray(body.addresses) ? body.addresses.slice(0, 64).map(a => String(a || '')) : [];
-      /* The ROOM the game server is asking on behalf of. `pw:` is keyed by wallet alone, so without
-       * this the answer to "what did this player deposit?" was "whatever they last deposited
-       * ANYWHERE" — a $1 Pac-Man entry the player never consumed answered for the $0.25 snake lobby
-       * they walked into next, and the snake carried, shed and paid out $1 of a stake nobody put into
-       * that room. Optional so an un-patched node keeps working exactly as before; once the node sends
-       * it, a stake from another room reads as 0 and the node falls back to the capped path instead of
-       * inventing money. */
-      const askLobby = String(body.lobby || '');
       const stakes = {};
       for (const a of addrs) {
         if (!a || a.length < 32 || a.length > 64) continue;
-        const lam = Math.max(0, Math.floor(Number(await kvGet('pw:' + a)) || 0));
-        // Absent = an entry written before join.js started recording the room. Those drain within the
-        // 4h `pw:` TTL, and refusing them would strand players who paid correctly, so a missing
-        // binding is permitted and logged. A binding that DISAGREES is the bug, and is refused.
-        const own = lam > 0 ? await kvGet('pwlob:' + a).catch(() => null) : null;
-
-        if (lam > 0 && askLobby && own && own !== askLobby) {
-          console.warn('[settle] stake-read CROSS-LOBBY refused — deposit bought ' + own +
-                       ', asked for ' + askLobby + ' player=' + String(a).slice(0, 8) +
-                       ' lamports=' + lam);
-          betAlert('STAKE-READ cross-lobby refused — ' + String(a).slice(0, 8) + ' deposited in ' +
-                   own + ' but ' + askLobby + ' asked for it (' + lam + ' lamports). The player is ' +
-                   'in a room they did not pay for, or left an unconsumed entry behind.');
-          stakes[a] = 0;
-          continue;
-        }
-
-        /* PAC-MAN DEPOSITS ARE NEVER AN ANSWER TO THIS QUESTION, and saying so is what protects the
-         * game nodes we cannot reach.
-         *
-         * The ONLY consumer of stake-read on the node is the Slither Snakes lamport ledger: `_stakeLam`
-         * has exactly one reader, inside `ssLamCarried`, and all six of its call sites take a snake.
-         * The connect handler nevertheless fires the read for BOTH games, so a Pac-Man join writes a
-         * value into a map that only Snake consumes — and NOTHING on the Pac-Man path ever clears it
-         * (`_stakeLam.delete` lives in the snake death / cash-out / kill paths). That is why the leak
-         * reported on 23 Aug 2026 came in through Pac-Man specifically: quit Pac-Man without dying or
-         * cashing out and the $1 sits there until the process restarts, ready to be latched by the next
-         * snake that wallet spawns — `_lamAuth` is a one-way latch, so the correct 25c arriving
-         * milliseconds later is ignored for the whole session.
-         *
-         * Answering 0 starves it at source, and it works on an UNPATCHED node because the node only
-         * stores a positive answer: `if (lam > 0) { _stakeLam.set(...) }`. A zero leaves the ledger
-         * untouched instead of poisoning it. Nothing is lost by this — no Pac-Man code path reads the
-         * value, so it has never been anything but a hazard.
-         *
-         * Snake rooms are `ss-paid-lobby-*` / `ss-og-paid-lobby-*`; Pac-Man's are the bare
-         * `paid-lobby-*` (see the lobby regex in api/join.js). Legacy entries carry no binding at all
-         * and are left alone. */
-        if (lam > 0 && own && own.indexOf('ss-') !== 0) {
-          console.warn('[settle] stake-read: Pac-Man deposit (' + own + ') withheld from the snake ' +
-                       'ledger for ' + String(a).slice(0, 8) + ' — ' + lam + ' lamports, unread by ' +
-                       'any Pac-Man code path');
-          stakes[a] = 0;
-          continue;
-        }
-
-        stakes[a] = lam;
+        stakes[a] = Math.max(0, Math.floor(Number(await kvGet('pw:' + a)) || 0));
       }
       clearTimeout(guard); done = true;
       /* `requireCashProof` rides along on this already-GAME_SECRET-authed read so the guard's state is
@@ -3539,23 +3485,6 @@ module.exports = async function handler(req, res) {
             proofAuthentic = proofOk;
             // Bind the proof to THIS deposit. The base the game server read out of `pw:` at join
             // must still be the `pw:` we just consumed, so a proof cannot be carried across rounds.
-            /* Bind the proof to the ROOM this deposit bought, too. The base check below only proves
-             * the signed base equals the entry we just consumed — it says nothing about WHERE that
-             * entry was paid, so a proof signed in one room settled cleanly against a deposit made in
-             * another. Legacy entries carry no binding and keep the old behaviour; a binding that
-             * disagrees drops to the capped path rather than paying an uncapped figure attested for a
-             * room this money never entered. */
-            if (proofOk) {
-              const ownLobby = await kvGet('pwlob:' + playerAddress).catch(() => null);
-              if (ownLobby && cpLobby && ownLobby !== cpLobby) {
-                console.warn('[settle] cashout proof CROSS-LOBBY signed=' + cpLobby + ' deposit=' + ownLobby +
-                             ' player=' + playerAddress.slice(0, 8) + ' — refusing proof, falling back');
-                betAlert('CASHOUT cross-lobby proof — ' + playerAddress.slice(0, 8) + ' deposited in ' +
-                         ownLobby + ' but the proof is signed for ' + cpLobby + ' (' + cpLam +
-                         ' lamports claimed). Falling back to the capped path.');
-                proofOk = false;
-              }
-            }
             if (proofOk && cpBase !== kvWager) {
               console.warn('[settle] cashout proof base mismatch signed=' + cpBase + ' kv=' + kvWager + ' — signature is genuine, falling back to the capped path');
               proofOk = false;
